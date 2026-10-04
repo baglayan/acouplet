@@ -77,15 +77,18 @@ extension LDACNativeSession {
         if stopping { session.stop(restoreAudio: false) }
         try session.handle(source, line: line)
         let rejected = source == "probe" && !stopping
+        let unavailable = line == "LDAC_UNAVAILABLE rate=48000 channels=2"
+        let recoverable = rejected && active && !unavailable
         try require((session.failure != nil) == rejected, "Probe diagnostic did not immediately set failure for its live owner")
         try require(session.shouldStop == (rejected || stopping), "Probe diagnostic did not revoke live ownership")
-        try require(session.recoverableFailure == (rejected && active) && session.recoveryRequested == (rejected && active),
+        try require(session.recoverableFailure == recoverable && session.recoveryRequested == recoverable,
             "Probe recovery classification did not match admitted playback")
-        try require(session.hardFailure == (rejected && !active), "Probe setup failure was not distinct from active connection loss")
+        try require(session.hardFailure == (rejected && !recoverable), "Probe setup failure was not distinct from active connection loss")
         try require(!session.mediaCloseRequired && !session.mediaCloseSent && !session.finalized,
             "Probe diagnostic bypassed orderly protocol cleanup")
         if rejected {
-            let message = active ? "The LDAC Bluetooth connection ended."
+            let message = unavailable ? "The headphones did not offer a compatible LDAC stream. Check their audio settings, then retry."
+                : active ? "The LDAC Bluetooth connection ended."
                 : "The LDAC audio connection could not finish setup. Try LDAC again."
             try require(session.failure == message, "Probe failure did not use the intended user-facing explanation")
             try session.handle("probe", line: "PEER_COMMAND_UNSUPPORTED")
@@ -104,7 +107,7 @@ extension LDACNativeSession {
             try require(session.mediaCloseRequired, "Real closure marker did not advance cleanup")
         }
         for _ in 0..<100 { await Task.yield() }
-        try require(events.names == (rejected ? [active ? "connectionLost" : "failed"] : []),
+        try require(events.names == (rejected ? [recoverable ? "connectionLost" : "failed"] : []),
             "Probe events were missing, duplicated, or reactivated playback: \(events.names)")
     }
 
@@ -322,7 +325,7 @@ enum LDACSessionClosureCheck {
         print("Actual LDAC session shutdown checks: \(30 - failures)/30 passed; local fixture children only")
         let closureFailures = failures
         var ownershipChecks = 0
-        for line in ["PEER_COMMAND_UNSUPPORTED", "CONTROL_FAILED expected=media-finished closed=0"] {
+        for line in ["PEER_COMMAND_UNSUPPORTED", "CONTROL_FAILED expected=media-finished closed=0", "LDAC_UNAVAILABLE rate=48000 channels=2"] {
             for source in ["probe", "media", "daemon"] {
                 for active in [false, true] {
                     for stopping in [false, true] {

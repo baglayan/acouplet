@@ -1,7 +1,6 @@
 import AppKit
 import AppIntents
 import Combine
-import ServiceManagement
 import SwiftUI
 
 @MainActor
@@ -34,15 +33,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--unregister-login-item") {
-            do {
-                if SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval {
-                    try SMAppService.mainApp.unregister()
-                }
-                exit(EXIT_SUCCESS)
-            } catch {
-                print(error.localizedDescription)
+            environment.settings.setLaunchAtLogin(false)
+            if let error = environment.settings.launchAtLoginError {
+                print(error)
                 exit(EXIT_FAILURE)
             }
+            exit(EXIT_SUCCESS)
         }
         if !isRunningTests,
            let existing = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
@@ -123,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] controllers in self?.observeDeviceAlerts(controllers) }
             .store(in: &cancellables)
         guard !isRunningTests else { return }
+        environment.settings.enableLaunchAtLoginByDefault()
         #if ACOUPLET_SPARKLE
         environment.updater.start()
         #endif

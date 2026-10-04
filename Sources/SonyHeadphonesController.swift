@@ -554,6 +554,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             "Source change: \(sourceTransition.map { String(describing: $0.phase) } ?? "None")",
             "Device connection change: \(deviceActionTransition.map { String(describing: $0.phase) } ?? "None")",
             "Connection preference: \(connectionMode?.title ?? "Unknown")",
+            "Connection preference change: \(connectionTransition.map { String(describing: $0.phase) } ?? "None")",
+            "Requested connection preference: \(connectionTransition?.targetMode.title ?? "None")",
+            "Connection preference confirmed: \(connectionTransition.map { $0.preferenceConfirmed ? "Yes" : "No" } ?? "Unknown")",
+            "Connection preference issue: \(connectionModeError ?? "None")",
             "Supported connection modes: \(supportedConnectionModes.map { $0.map(\.title).joined(separator: ", ") } ?? "Unknown")",
             "Connection mode available: \((legacyControls.map { $0.connectionQuality.available } ?? audioFeatures.connectionModeAvailable).map { $0 ? "Yes" : "No" } ?? "Unknown")",
             "Left connected: \(audioFeatures.leftConnected.map { $0 ? "Yes" : "No" } ?? "Unknown")",
@@ -617,6 +621,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     @Published private var fixedAlertsEnabled = false
     private var transmittedFrame: SonyFrame?
     private var connectionRequestID: UUID?
+    private(set) var lastConnectionModeChangeID: UUID?
     private var connectionModeTimeout: DispatchWorkItem?
     private var modeReadbacks: [UUID?] = []
     private var pendingInboundAcknowledgments = 0
@@ -2236,6 +2241,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         connectionModeTimeout = nil
         connectionModeError = nil
         connectionRequestID = UUID()
+        lastConnectionModeChangeID = connectionRequestID
         invalidateSoundPressureReading()
         connectionTransition = transition
         transitionDevice = device
@@ -2252,6 +2258,22 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         recoveryClassicAddress = address
         retryAttempt = 0
         send(transition.requestPayload)
+    }
+
+    func retryConnectionModeChange(expectedRequestID: UUID) -> Bool {
+        guard !isSystemSleeping, powerOffState == nil, !isRunningHeadphoneTest,
+              connectionRequestID == expectedRequestID, lastConnectionModeChangeID == expectedRequestID,
+              connectionTransition?.phase == .failed, connectionTransition?.retryRecovery() == true else { return false }
+        cancelScheduledRetry(resetAttempts: true)
+        connectionModeError = nil
+        recoveryUsesBLE = nil
+        if isReady {
+            updateConnectionModeTimeout()
+            verifyConnectionPreferenceIfNeeded()
+        } else {
+            scheduleRetry()
+        }
+        return true
     }
 
     func refreshDevices() {

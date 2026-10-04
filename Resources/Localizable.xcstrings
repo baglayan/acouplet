@@ -1,6 +1,210 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Finish the current connection change before starting LDAC.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish the current connection change before starting LDAC."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC’yi başlatmadan önce mevcut bağlantı değişikliğini tamamlayın."
+          }
+        }
+      }
+    },
+    "Sound Quality could not be selected for LDAC.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sound Quality could not be selected for LDAC."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC için Ses Kalitesi seçilemedi."
+          }
+        }
+      }
+    },
+    "Sound Quality was not confirmed. LDAC did not start.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sound Quality was not confirmed. LDAC did not start."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses Kalitesi ayarı doğrulanamadı. LDAC başlatılmadı."
+          }
+        }
+      }
+    },
+    "The Sony headphone controller changed.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The Sony headphone controller changed."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sony kulaklık denetleyicisi değişti."
+          }
+        }
+      }
+    },
+    "The headphones did not confirm the connection preference.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphones did not confirm the connection preference."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıklar bağlantı tercihini doğrulamadı."
+          }
+        }
+      }
+    },
+    "Check the headphone connection in Bluetooth settings before changing its preference.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check the headphone connection in Bluetooth settings before changing its preference."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlantı tercihini değiştirmeden önce Bluetooth ayarlarından kulaklık bağlantısını kontrol edin."
+          }
+        }
+      }
+    },
+    "The connection preference change was cancelled.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The connection preference change was cancelled."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlantı tercihi değişikliği iptal edildi."
+          }
+        }
+      }
+    },
+    "The headphone connection preference could not be verified.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphone connection preference could not be verified."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklığın bağlantı tercihi doğrulanamadı."
+          }
+        }
+      }
+    },
+    "Stable Connection could not be selected.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stable Connection could not be selected."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kararlı Bağlantı seçilemedi."
+          }
+        }
+      }
+    },
+    "Stable Connection was not confirmed.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stable Connection was not confirmed."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kararlı Bağlantı ayarı doğrulanamadı."
+          }
+        }
+      }
+    },
+    "Stable Connection could not be restored. %@": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stable Connection could not be restored. %@"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kararlı Bağlantı ayarına geri dönülemedi. %@"
+          }
+        }
+      }
+    },
+    "The headphones did not offer a compatible LDAC stream. Check their audio settings, then retry.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphones did not offer a compatible LDAC stream. Check their audio settings, then retry."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıklar uyumlu bir LDAC akışı sunmadı. Ses ayarlarını kontrol edip tekrar deneyin."
+          }
+        }
+      }
+    },
     "GitHub Repository": {
       "extractionState": "manual",
       "localizations": {

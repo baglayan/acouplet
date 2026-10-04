@@ -64,17 +64,14 @@ final class SettingsStore: ObservableObject {
 
     private let managesLaunchService: Bool
 
-    init(defaults: UserDefaults, managesLaunchService: Bool = false,
-         isDevelopmentDistribution: Bool = Bundle.main.object(forInfoDictionaryKey: "AcoupletDistribution") as? String == "development") {
+    init(defaults: UserDefaults, managesLaunchService: Bool = false) {
         self.defaults = defaults
         self.managesLaunchService = managesLaunchService
         keepMenuBarIconWhenDisconnected = defaults.bool(forKey: Keys.keepMenuBarIconWhenDisconnected)
         showBatteryInMenuBar = defaults.bool(forKey: Keys.showBatteryInMenuBar)
         lowBatteryNotificationsEnabled = defaults.bool(forKey: Keys.lowBatteryNotificationsEnabled)
         firmwareNotificationsEnabled = defaults.bool(forKey: Keys.firmwareNotificationsEnabled)
-        experimentalLDACEnabled = defaults.object(forKey: Keys.experimentalLDACEnabled) == nil
-            ? isDevelopmentDistribution
-            : defaults.bool(forKey: Keys.experimentalLDACEnabled)
+        experimentalLDACEnabled = defaults.bool(forKey: Keys.experimentalLDACEnabled)
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         ldacConfiguration = Self.decode(LDACConfiguration.self, from: defaults.data(forKey: Keys.ldacConfiguration)) ?? LDACConfiguration()
         #endif
@@ -120,7 +117,16 @@ final class SettingsStore: ObservableObject {
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
+    func enableLaunchAtLoginByDefault() {
+        guard !hasBackgroundService, !defaults.bool(forKey: Keys.launchAtLoginDefaultApplied) else { return }
+        defaults.set(true, forKey: Keys.launchAtLoginDefaultApplied)
+        if !managesLaunchService || SMAppService.mainApp.status == .notRegistered {
+            setLaunchAtLogin(true)
+        }
+    }
+
     func setLaunchAtLogin(_ enabled: Bool) {
+        defaults.set(true, forKey: Keys.launchAtLoginDefaultApplied)
         guard managesLaunchService else {
             launchAtLogin = enabled
             return
@@ -128,10 +134,10 @@ final class SettingsStore: ObservableObject {
         do {
             if enabled {
                 try SMAppService.mainApp.register()
-            } else {
+            } else if SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval {
                 try SMAppService.mainApp.unregister()
             }
-            launchAtLogin = enabled
+            launchAtLogin = SMAppService.mainApp.status == .enabled
             launchAtLoginError = nil
         } catch {
             launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -179,6 +185,7 @@ final class SettingsStore: ObservableObject {
         static let ldacConfiguration = "preferences.ldacConfiguration"
         #endif
         static let reconnectAutomatically = "preferences.reconnectAutomatically"
+        static let launchAtLoginDefaultApplied = "preferences.launchAtLoginDefaultApplied"
         static let globalShortcutEnabled = "preferences.globalShortcutEnabled"
         static let customEqualizerDraft = "preferences.customEqualizerDraft"
         static let equalizerDraftsByDevice = "preferences.equalizerDraftsByDevice"

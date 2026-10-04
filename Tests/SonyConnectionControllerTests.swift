@@ -4,6 +4,52 @@ import IOBluetooth
 
 final class SonyConnectionControllerTests: XCTestCase {
     @MainActor
+    func testConnectionPreferenceOwnershipSurvivesControlResetAndChangesOnlyForAcceptedRequests() throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulatedReady: true)
+        defer { controller.simulateControlLoss() }
+        controller.setConnectionMode(.stableConnection)
+        let first = try XCTUnwrap(controller.lastConnectionModeChangeID)
+        controller.setConnectionMode(.lowLatency)
+        XCTAssertEqual(controller.lastConnectionModeChangeID, first)
+        controller.respondToConnectionAlert(try XCTUnwrap(controller.connectionTransition?.alert), action: .negative)
+        controller.setConnectionMode(.stableConnection)
+        let second = try XCTUnwrap(controller.lastConnectionModeChangeID)
+        XCTAssertNotEqual(first, second)
+        controller.respondToConnectionAlert(try XCTUnwrap(controller.connectionTransition?.alert), action: .positive)
+        XCTAssertEqual(controller.connectionTransition?.phase, .confirmed)
+        controller.setConnectionMode(.stableConnection)
+        XCTAssertEqual(controller.lastConnectionModeChangeID, second)
+        controller.systemWillSleep()
+        XCTAssertNil(controller.connectionTransition)
+        XCTAssertEqual(controller.lastConnectionModeChangeID, second)
+        controller.systemDidWake()
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        XCTAssertEqual(controller.lastConnectionModeChangeID, second)
+        controller.setConnectionMode(.stableConnection)
+        XCTAssertNotEqual(controller.lastConnectionModeChangeID, second)
+    }
+
+    @MainActor
+    func testOwnedConnectionPreferenceRetryChecksWithoutReplayingTheSetter() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        controller.setConnectionMode(.stableConnection)
+        let request = try XCTUnwrap(controller.lastConnectionModeChangeID)
+        acknowledgeAll(controller)
+        controller.simulateConnectionModeTimeout()
+        XCTAssertEqual(controller.connectionTransition?.phase, .failed)
+        XCTAssertTrue(controller.diagnosticReport.contains("Connection preference change: failed"))
+        XCTAssertTrue(controller.diagnosticReport.contains("Connection preference issue: \(controller.connectionModeError!)"))
+        XCTAssertFalse(controller.retryConnectionModeChange(expectedRequestID: UUID()))
+        XCTAssertEqual(controller.connectionTransition?.phase, .failed)
+        XCTAssertTrue(controller.retryConnectionModeChange(expectedRequestID: request))
+        XCTAssertEqual(controller.connectionTransition?.phase, .recovering)
+        XCTAssertEqual(controller.lastConnectionModeChangeID, request)
+        XCTAssertNil(controller.connectionModeError)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xE8 }.count, 1)
+    }
+
+    @MainActor
     func testClassicConnectionWaitsForCompletionWithoutDuplicatePollingOpens() throws {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WH-1000XM4", controlBusy: true)

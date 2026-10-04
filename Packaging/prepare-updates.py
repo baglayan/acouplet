@@ -30,15 +30,20 @@ def prepare(archive, notes, output, history, initialize, account, team, reposito
         run(['/usr/bin/hdiutil', 'attach', '-readonly', '-nobrowse', '-mountpoint', mount, archive], capture=True)
         try:
             entries = {path.name for path in mount.iterdir()}
-            if entries not in ({'Acouplet.app', 'Applications'}, {'Acouplet.app', 'Applications', '.DS_Store', '.background'}) or \
+            if entries not in ({'Acouplet.app', 'Applications'}, {'Acouplet.app', 'Applications', '.DS_Store'}, {'Acouplet.app', 'Applications', '.DS_Store', '.background'}) or \
                (mount / 'Acouplet.app').is_symlink() or not (mount / 'Applications').is_symlink() or \
                os.readlink(mount / 'Applications') != '/Applications':
                 raise ValueError('The update image must contain only the app, Applications shortcut and optional disk image artwork.')
-            if '.background' in entries and ((mount / '.DS_Store').is_symlink() or not (mount / '.DS_Store').is_file() or
-                    (mount / '.background').is_symlink() or not (mount / '.background').is_dir() or
+            if '.DS_Store' in entries and ((mount / '.DS_Store').is_symlink() or not (mount / '.DS_Store').is_file()):
+                raise ValueError('The disk image layout must be a regular file.')
+            if '.background' in entries and ((mount / '.background').is_symlink() or not (mount / '.background').is_dir() or
                     {path.name for path in (mount / '.background').iterdir()} != {'background.tiff'} or
                     (mount / '.background/background.tiff').is_symlink() or not (mount / '.background/background.tiff').is_file()):
                 raise ValueError('The disk image artwork must contain only regular layout and background files.')
+            if '.DS_Store' in entries and '.background' not in entries:
+                background = mount / 'Acouplet.app/Contents/Resources/DMGBackground.tiff'
+                if background.is_symlink() or not background.is_file():
+                    raise ValueError('The disk image background must be a regular file inside the signed app.')
             report = distribution['inspect_package'](mount, dmg=archive)
             if report['blockers']:
                 raise ValueError('The update image failed release checks: ' + '; '.join(report['blockers']))

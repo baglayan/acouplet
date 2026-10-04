@@ -88,18 +88,38 @@ final class SettingsStoreTests: XCTestCase {
     #endif
 
     @MainActor
-    func testLDACDefaultsFollowDistributionAndExplicitPreferencePersists() throws {
+    func testLDACDefaultsOffAndExplicitPreferencePersists() throws {
         let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let production = SettingsStore(defaults: defaults, isDevelopmentDistribution: false)
-        XCTAssertFalse(production.experimentalLDACEnabled)
-        XCTAssertTrue(SettingsStore(defaults: defaults, isDevelopmentDistribution: true).experimentalLDACEnabled)
+        let settings = SettingsStore(defaults: defaults)
+        XCTAssertFalse(settings.experimentalLDACEnabled)
         XCTAssertNil(defaults.object(forKey: "preferences.experimentalLDACEnabled"))
-        production.experimentalLDACEnabled = true
-        XCTAssertTrue(SettingsStore(defaults: defaults, isDevelopmentDistribution: false).experimentalLDACEnabled)
-        production.experimentalLDACEnabled = false
-        XCTAssertFalse(SettingsStore(defaults: defaults, isDevelopmentDistribution: true).experimentalLDACEnabled)
+        settings.experimentalLDACEnabled = true
+        XCTAssertTrue(SettingsStore(defaults: defaults).experimentalLDACEnabled)
+        settings.experimentalLDACEnabled = false
+        XCTAssertFalse(SettingsStore(defaults: defaults).experimentalLDACEnabled)
+    }
+
+    @MainActor
+    func testLaunchAtLoginDefaultAppliesOnceAndRespectsExplicitOptOut() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = SettingsStore(defaults: defaults)
+        settings.enableLaunchAtLoginByDefault()
+        XCTAssertTrue(settings.launchAtLogin)
+        settings.setLaunchAtLogin(false)
+        settings.enableLaunchAtLoginByDefault()
+        XCTAssertFalse(settings.launchAtLogin)
+        let restored = SettingsStore(defaults: defaults)
+        restored.enableLaunchAtLoginByDefault()
+        XCTAssertFalse(restored.launchAtLogin)
+        defaults.removePersistentDomain(forName: suiteName)
+        let optedOut = SettingsStore(defaults: defaults)
+        optedOut.setLaunchAtLogin(false)
+        optedOut.enableLaunchAtLoginByDefault()
+        XCTAssertFalse(optedOut.launchAtLogin)
     }
 
     @MainActor

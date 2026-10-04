@@ -10,6 +10,11 @@ if (( $# )); then
     fi
     notarize=true
 fi
+appearance="${ACOUPLET_DMG_APPEARANCE:-pearl}"
+if [[ "$appearance" != dark && "$appearance" != pearl ]]; then
+    print -u2 "ACOUPLET_DMG_APPEARANCE must be dark or pearl."
+    exit 2
+fi
 if [[ "${CODE_SIGN_IDENTITY:-}" != 'Developer ID Application: '?* && ! "${CODE_SIGN_IDENTITY:-}" =~ '^[[:xdigit:]]{40}$' ]]; then
     print -u2 "Set CODE_SIGN_IDENTITY to the name or SHA-1 fingerprint of an existing Developer ID Application identity."
     exit 1
@@ -51,6 +56,8 @@ if [[ "$notarize" == true ]]; then
     /usr/bin/python3 "$repo_root/Packaging/notarize-ldac-installer.py" "$app" --profile "$NOTARY_KEYCHAIN_PROFILE" \
         --evidence-dir "$release_dir" "${notary_keychain[@]}"
 fi
+/usr/bin/swift "$repo_root/Packaging/DMGBackground.swift" \
+    "$app/Contents/Resources/AppIcon.icns" "$app/Contents/Resources/DMGBackground.tiff" "$appearance"
 /usr/bin/sed 's/$(PRODUCT_BUNDLE_IDENTIFIER)/dev.baglayan.Acouplet/g' "$repo_root/Configuration/Direct.entitlements" > "$release_dir/Direct.entitlements"
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --timestamp --entitlements "$release_dir/Direct.entitlements" --generate-entitlement-der "$app"
 /usr/bin/python3 "$repo_root/Packaging/check-distribution.py" "$stage" --signatures-only > "$release_dir/signatures.json"

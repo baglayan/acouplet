@@ -504,6 +504,8 @@ final class LDACNativeSession: @unchecked Sendable {
             if signalingGate.cid == nil, !shouldStop,
                LDACChannelGate.captures("^NO_PLAYBACK realCID=0000 owned=(?:0x0|\\(nil\\)) openExpired=0 openError=(-?[0-9]+)$", line) != nil {
                 fail("Bluetooth could not open the LDAC audio connection. Try LDAC again.")
+            } else if line == "LDAC_UNAVAILABLE rate=\(configuration.sampleRate.rawValue) channels=2" && !shouldStop {
+                fail(String(localized: "The headphones did not offer a compatible LDAC stream. Check their audio settings, then retry."))
             } else if line == "PREPARE_MEDIA" && !shouldStop {
                 guard children["media"] == nil else { throw LDACSessionError("LDAC requested repeated media preparation.") }
                 var descriptors: [Int32] = [0, 0]

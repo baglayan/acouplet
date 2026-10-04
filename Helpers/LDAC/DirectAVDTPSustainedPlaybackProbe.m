@@ -491,7 +491,11 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
                 probe.delayReporting = NO;
             }
         }
-        if (!capabilitiesComplete || !probe.selectedSink || probe.peerStopped || probe.closed || probe.failed || probe.stopRequested) break;
+        if (!capabilitiesComplete || probe.peerStopped || probe.closed || probe.failed || probe.stopRequested) break;
+        if (!probe.selectedSink) {
+            printf("LDAC_UNAVAILABLE rate=%u channels=2\n", probe.sampleRate);
+            break;
+        }
         printf("PREPARE_MEDIA\n");
         if (!WaitControl(probe, @"media-prepared")) break;
         printf("LDAC_SELECTED remoteSEID=%u localSourceSEID=1 delayReporting=%d rate=%u channels=2 quality=%s\n",
@@ -624,6 +628,13 @@ static BOOL SelfTest(void) {
                                  0x01, 0x00, 0x00, 0xAA, 0x00, 0x3C, 0x07, 0x04, 0x02,
                                  0x02, 0x00, 0x08, 0x00};
     NSData *actual = [NSData dataWithBytes:actualCaps length:sizeof(actualCaps)];
+    const uint8_t sbcCaps[] = {0x22, 0x0C, 0x01, 0x00, 0x07, 0x06, 0x00, 0x00, 0x3F,
+                              0xFF, 0x02, 0x23, 0x04, 0x02, 0x02, 0x00, 0x08, 0x00};
+    const uint8_t aacCaps[] = {0x32, 0x0C, 0x01, 0x00, 0x07, 0x08, 0x00, 0x02, 0x80,
+                              0x01, 0x8C, 0x82, 0xEE, 0x00, 0x04, 0x02, 0x02, 0x00, 0x08, 0x00};
+    NSData *sbc = [NSData dataWithBytes:sbcCaps length:sizeof(sbcCaps)];
+    NSData *aac = [NSData dataWithBytes:aacCaps length:sizeof(aacCaps)];
+    passed &= DecodeReply(sbc, 2, 12, 1, NO) != nil && DecodeReply(aac, 3, 12, 2, NO) != nil;
     BOOL hasDelay = NO;
     passed &= DecodeReply(actual, 4, 12, 3, NO) != nil && LDACSelection(actual, 48000, &hasDelay) && hasDelay;
     const uint32_t rates[] = {44100, 48000, 88200, 96000};
@@ -632,6 +643,7 @@ static BOOL SelfTest(void) {
         probe.configured = YES;
         passed &= LDACSelection(actual, rates[rate], &hasDelay) && hasDelay;
         passed &= LDACSelection(capabilities, rates[rate], &hasDelay) == (rates[rate] == 48000);
+        passed &= !LDACSelection(sbc, rates[rate], &hasDelay) && !LDACSelection(aac, rates[rate], &hasDelay);
         const uint8_t signals[] = {2, 4, 12};
         for (NSUInteger index = 0; index < 3; index++) {
             uint8_t signal = signals[index];

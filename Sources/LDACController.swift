@@ -24,6 +24,8 @@ final class LDACController: ObservableObject {
     private var outputID: UUID?
     private var headphones: SonyHeadphonesController?
     private var controlObservation: AnyCancellable?
+    private var connectionModeRestoreID: UUID?
+    private var connectionModeConfirmed = false
     private var startTask: Task<Void, Never>?
     private var readinessTask: Task<Void, Never>?
     private var volumeTask: Task<Void, Never>?
@@ -136,7 +138,10 @@ final class LDACController: ObservableObject {
 
     func stop(restoreAudio: Bool = true, reason: String = "app requested stop", completion: (@MainActor () -> Void)? = nil) {
         requestedAddress = nil
-        if let completion { stopCompletions.append(completion) }
+        if let completion {
+            stopCompletions.append(completion)
+            objectWillChange.send()
+        }
         if !isSessionRunning { completeStop() }
         else { stopSession(restoreAudio: restoreAudio, reason: reason) }
     }
@@ -146,6 +151,8 @@ final class LDACController: ObservableObject {
         state = .requested
         targetAddress = address
         volumeError = nil
+        connectionModeRestoreID = nil
+        connectionModeConfirmed = false
         isRecovering = false
         recoveryAttempt = 0
         restoreAudioOnStop = true
@@ -181,6 +188,14 @@ final class LDACController: ObservableObject {
                 }
                 if let reason = self.deviceUnavailableReason(forAddress: address) { throw ControlError(reason) }
                 self.headphones = headphones
+                try await self.prepareConnectionMode(headphones, address: address, identifier: identifier)
+                try Task.checkCancellation()
+                guard self.sessionID == identifier, self.requestedAddress == address, self.state != .stopping else {
+                    throw CancellationError()
+                }
+                guard devices.controller(for: address) === headphones else {
+                    throw ControlError(String(localized: "The Sony headphone controller changed."))
+                }
                 try await output.claim(model: headphones.deviceModel.name, targetAddress: address, sampleRate: self.requestedConfiguration.sampleRate)
                 let priority = try output.priorityControl()
                 let previousReadback = headphones.musicVolumeReadbackID
@@ -216,6 +231,123 @@ final class LDACController: ObservableObject {
                 self.requestedAddress = nil
                 self.finish(error.localizedDescription)
             }
+        }
+    }
+
+    private func prepareConnectionMode(_ headphones: SonyHeadphonesController, address: String, identifier: UUID) async throws {
+        try Task.checkCancellation()
+        guard headphones.connectionTransition?.isFinished != false else {
+            throw ControlError(String(localized: "Finish the current connection change before starting LDAC."))
+        }
+        guard headphones.supportsConnectionMode else { return }
+        if headphones.connectionMode == .soundQuality { return }
+        let original = headphones.connectionMode
+        let previous = headphones.lastConnectionModeChangeID
+        headphones.setConnectionMode(.soundQuality)
+        guard let request = headphones.lastConnectionModeChangeID, request != previous else {
+            throw ControlError(headphones.connectionModeError ?? String(localized: "Sound Quality could not be selected for LDAC."))
+        }
+        if original == .stableConnection { connectionModeRestoreID = request }
+        guard try await waitForConnectionChange(headphones, address: address, request: request),
+              headphones.connectionMode == .soundQuality else {
+            throw ControlError(String(localized: "Sound Quality was not confirmed. LDAC did not start."))
+        }
+        try Task.checkCancellation()
+        guard sessionID == identifier, requestedAddress == address, state != .stopping else { throw CancellationError() }
+        connectionModeConfirmed = true
+    }
+
+    private func waitForConnectionChange(_ headphones: SonyHeadphonesController, address: String, request: UUID,
+                                         restoring: Bool = false, timeout: Duration = .seconds(30)) async throws -> Bool {
+        try Task.checkCancellation()
+        let changes = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let observation = headphones.objectWillChange.sink { changes.continuation.yield(()) }
+        let deviceObservation = devices?.objectWillChange.sink { changes.continuation.yield(()) }
+        let stopObservation = objectWillChange.sink { changes.continuation.yield(()) }
+        var deadline: Task<Void, Never>?
+        var expired = false
+        var refreshed = false
+        var retried = false
+        defer {
+            observation.cancel()
+            deviceObservation?.cancel()
+            stopObservation.cancel()
+            deadline?.cancel()
+            changes.continuation.finish()
+        }
+        changes.continuation.yield(())
+        for await _ in changes.stream {
+            await Task.yield()
+            try Task.checkCancellation()
+            guard devices?.controller(for: address) === headphones,
+                  SonyBLEIdentity.normalizedAddress(headphones.address) == address else {
+                throw ControlError(String(localized: "The Sony headphone controller changed."))
+            }
+            guard headphones.lastConnectionModeChangeID == request else { return false }
+            let sleeping = devices?.isSystemSleeping == true
+            if stopCompletions.isEmpty && (sleeping || headphones.connectionTransition?.awaitingUser == true) {
+                deadline?.cancel()
+                deadline = nil
+                expired = false
+            } else if deadline == nil {
+                deadline = Task {
+                    do { try await Task.sleep(for: timeout) }
+                    catch { return }
+                    expired = true
+                    changes.continuation.yield(())
+                }
+            }
+            if expired { throw ControlError(String(localized: "The headphones did not confirm the connection preference.")) }
+            if sleeping { continue }
+            if restoring, !headphones.isReady, headphones.connectionTransition?.isFinished != false, !refreshed {
+                refreshed = true
+                headphones.refresh()
+            }
+            if let transition = headphones.connectionTransition {
+                switch transition.phase {
+                case .failed:
+                    if restoring, !retried, headphones.retryConnectionModeChange(expectedRequestID: request) {
+                        retried = true
+                        continue
+                    }
+                    throw ControlError(headphones.connectionModeError ?? String(localized: "The headphones did not confirm the connection preference."))
+                case .pairingRequired:
+                    throw ControlError(String(localized: "Check the headphone connection in Bluetooth settings before changing its preference."))
+                case .cancelled:
+                    if !restoring { throw ControlError(String(localized: "The connection preference change was cancelled.")) }
+                default:
+                    if !transition.isFinished { continue }
+                }
+            }
+            if headphones.isReady, headphones.connectionMode != nil { return true }
+        }
+        try Task.checkCancellation()
+        throw ControlError(String(localized: "The headphones did not confirm the connection preference."))
+    }
+
+    private func restoreConnectionMode() async -> String? {
+        guard let request = connectionModeRestoreID, let headphones, let address = targetAddress else { return nil }
+        defer {
+            connectionModeRestoreID = nil
+            connectionModeConfirmed = false
+        }
+        do {
+            guard try await waitForConnectionChange(headphones, address: address, request: request, restoring: true) else { return nil }
+            if headphones.connectionMode == .stableConnection { return nil }
+            guard headphones.connectionMode == .soundQuality else {
+                throw ControlError(String(localized: "The headphone connection preference could not be verified."))
+            }
+            headphones.setConnectionMode(.stableConnection)
+            guard let restoration = headphones.lastConnectionModeChangeID, restoration != request else {
+                throw ControlError(headphones.connectionModeError ?? String(localized: "Stable Connection could not be selected."))
+            }
+            guard try await waitForConnectionChange(headphones, address: address, request: restoration, restoring: true) else { return nil }
+            guard headphones.connectionMode == .stableConnection else {
+                throw ControlError(String(localized: "Stable Connection was not confirmed."))
+            }
+            return nil
+        } catch {
+            return String(localized: "Stable Connection could not be restored. \(error.localizedDescription)")
         }
     }
 
@@ -404,6 +536,11 @@ final class LDACController: ObservableObject {
 
     private func controlsChanged() {
         guard state != .stopping else { return }
+        if let request = connectionModeRestoreID, let headphones,
+           headphones.lastConnectionModeChangeID != request
+            || (connectionModeConfirmed && headphones.connectionMode != nil && headphones.connectionMode != .soundQuality) {
+            connectionModeRestoreID = nil
+        }
         if let address = targetAddress, let headphones, devices?.controller(for: address) !== headphones {
             fail("The Sony headphone controller changed. LDAC stopped.")
             return
@@ -587,6 +724,7 @@ final class LDACController: ObservableObject {
         cleanupTask = Task { [weak self] in
             guard let self else { return }
             let restoreError = await output?.restoreAndRelease()
+            let connectionRestoreError = await self.restoreConnectionMode()
             self.record("restored", reason: restoreError ?? "routes restored and output lease released")
             self.nativeOutput = nil
             self.outputID = nil
@@ -603,7 +741,7 @@ final class LDACController: ObservableObject {
             self.isRecovering = false
             self.stableSince = nil
             if self.audioCaptureAccess == .checking { self.audioCaptureAccess = .unchecked }
-            let messages = [message, self.volumeError, restoreError].compactMap { $0 }
+            let messages = [message, self.volumeError, restoreError, connectionRestoreError].compactMap { $0 }
             self.volumeError = nil
             self.cleanupTask = nil
             if !messages.isEmpty {

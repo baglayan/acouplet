@@ -154,19 +154,30 @@ elif name == 'ditto': shutil.copytree(args[0], args[1])
 elif name == 'build-ldac-output-installer.sh':
     assert Path(args[0]).name == 'AcoupletLDACOutput.driver' and args[2] == '0.22'
     Path(args[1]).write_text('fresh final signed installer')
+elif name == 'swift':
+    assert len(args) == 4 and Path(args[0]).name == 'DMGBackground.swift'
+    icon, background = Path(args[1]), Path(args[2])
+    assert icon.name == 'AppIcon.icns' and icon.is_file()
+    assert background == icon.with_name('DMGBackground.tiff')
+    assert args[3] == os.environ['ACOUPLET_DMG_APPEARANCE']
+    if mode == 'background-failure': sys.exit(1)
+    background.write_text('Fixture background: ' + args[3])
 elif name == 'create-dmg.sh':
     assert len(args) == 2
     stage = Path(args[0])
     assert sorted(path.name for path in stage.iterdir()) == ['Acouplet.app', 'Applications']
     assert (stage / 'Applications').is_symlink()
     assert os.readlink(stage / 'Applications') == '/Applications'
+    assert (stage / 'Acouplet.app/Contents/Resources/DMGBackground.tiff').read_text() == (stage / 'Acouplet.app/Contents/_CodeSignature/CodeResources').read_text()
     if mode == 'image-failure': sys.exit(1)
     Path(args[1]).write_text('signed image')
 elif name == 'codesign':
     if Path(args[-1]).name == 'Acouplet.app':
+        background = Path(args[-1]) / 'Contents/Resources/DMGBackground.tiff'
+        assert background.read_text() == 'Fixture background: ' + os.environ['ACOUPLET_DMG_APPEARANCE']
         signature = Path(args[-1]) / 'Contents/_CodeSignature/CodeResources'
         signature.parent.mkdir(exist_ok=True)
-        signature.write_text('sealed installer')
+        signature.write_text(background.read_text())
     assert '--sign' in args and '--timestamp' in args and '--deep' not in args
     if mode == 'sign-failure': sys.exit(1)
 elif name == 'hdiutil':
@@ -192,14 +203,14 @@ else: raise AssertionError(name)
 '''
 
 
-def check_release(mode='success', notarize=False, signing=None, succeeds=True):
+def check_release(mode='success', notarize=False, signing=None, succeeds=True, appearance='pearl'):
     with tempfile.TemporaryDirectory(prefix='acouplet-direct-release-check-') as directory:
         root = Path(directory)
         scripts, stubs = root / 'Packaging', root / 'stubs'
         scripts.mkdir()
         stubs.mkdir()
         source = (packaging / 'direct.sh').read_text()
-        for name in ('package.sh', 'build-ldac-output-installer.sh', 'create-dmg.sh', 'codesign', 'ditto', 'hdiutil', 'xcrun', 'spctl', 'python3'):
+        for name in ('package.sh', 'build-ldac-output-installer.sh', 'create-dmg.sh', 'codesign', 'ditto', 'hdiutil', 'xcrun', 'spctl', 'python3', 'swift'):
             stub = (scripts if name in ('package.sh', 'build-ldac-output-installer.sh', 'create-dmg.sh') else stubs) / name
             stub.write_text(stub_source)
             stub.chmod(0o755)
@@ -214,6 +225,7 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('original')
         sparkle_fixture(app)
+        (app / 'Contents/Resources/AppIcon.icns').write_text('Fixture icon.')
         for relative in ('Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer'):
             target = app / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -234,7 +246,7 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True):
         previous = dist / 'Acouplet-0.22.dmg'
         previous.write_text('previous release')
         environment = {key: value for key, value in os.environ.items() if key not in ('CODE_SIGN_IDENTITY', 'NOTARY_KEYCHAIN_PROFILE')}
-        environment.update(ACOUPLET_DIRECT_CHECK_ROOT=str(root), ACOUPLET_DIRECT_CHECK_MODE=mode, ACOUPLET_INSTALLER_SIGNING_IDENTITY='Developer ID Installer: Example (ABCDE12345)')
+        environment.update(ACOUPLET_DIRECT_CHECK_ROOT=str(root), ACOUPLET_DIRECT_CHECK_MODE=mode, ACOUPLET_INSTALLER_SIGNING_IDENTITY='Developer ID Installer: Example (ABCDE12345)', ACOUPLET_DMG_APPEARANCE=appearance)
         environment.update({'CODE_SIGN_IDENTITY': 'Developer ID Application: Example (ABCDE12345)', 'NOTARY_KEYCHAIN_PROFILE': 'existing-profile'} if signing is None else signing)
         result = subprocess.run(['/bin/zsh', str(script), *(['--notarize'] if notarize else [])], env=environment, capture_output=True, text=True)
         assert (result.returncode == 0) == succeeds, (mode, result.stdout, result.stderr)
@@ -243,8 +255,9 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True):
         if succeeds:
             signed = [Path(args[-1]).name for args in commands if args[0] == 'codesign']
             installer_index = next(index for index, args in enumerate(commands) if args[0] == 'build-ldac-output-installer.sh')
+            background_index = next(index for index, args in enumerate(commands) if args[0] == 'swift')
             outer_index = next(index for index, args in enumerate(commands) if args[0] == 'codesign' and Path(args[-1]).name == 'Acouplet.app')
-            assert installer_index < outer_index
+            assert installer_index < outer_index and background_index < outer_index
             if notarize:
                 notary_index = next(index for index, args in enumerate(commands) if args[0] == 'python3' and Path(args[1]).name == 'notarize-ldac-installer.py')
                 assert installer_index < notary_index < outer_index
@@ -253,17 +266,22 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True):
             assert any(args[:3] == ['xcrun', 'notarytool', 'submit'] for args in commands) == notarize
             assert (prepared / 'Build Receipt.txt').read_text() == 'original receipt'
             assert (app / 'Contents/Frameworks/SonyNativeHUD.dylib').read_text() == 'original'
+            assert not (app / 'Contents/Resources/DMGBackground.tiff').exists()
         else:
             assert previous.read_text() == 'previous release'
             if signing is not None: assert not commands, commands
+            if mode == 'background-failure':
+                assert commands[-1][0] == 'swift'
+                assert not any(args[0] == 'codesign' and Path(args[-1]).name == 'Acouplet.app' for args in commands)
         print('direct release ' + mode + (' notarized' if notarize else '') + ': passed')
 
 
 check_release()
+check_release(appearance='dark')
 check_release(notarize=True)
 check_release(signing={'CODE_SIGN_IDENTITY': 'A' * 40})
 check_release(signing={}, succeeds=False)
 check_release(signing={'CODE_SIGN_IDENTITY': 'Apple Development'}, succeeds=False)
 check_release(signing={'CODE_SIGN_IDENTITY': 'Developer ID Application: Example (ABCDE12345)'}, notarize=True, succeeds=False)
-for mode in ('build-failure', 'sign-failure', 'image-failure', 'check-failure', 'notary-invalid', 'staple-failure', 'gatekeeper-failure', 'installer-notary-failure'):
+for mode in ('build-failure', 'sign-failure', 'background-failure', 'image-failure', 'check-failure', 'notary-invalid', 'staple-failure', 'gatekeeper-failure', 'installer-notary-failure'):
     check_release(mode, notarize=True, succeeds=False)

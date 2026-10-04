@@ -20,6 +20,7 @@ with tempfile.TemporaryDirectory(prefix='acouplet-prepare-updates-check-') as di
     signing_team = 'ABCDEFGHIJ'
     bundle_id = 'dev.baglayan.Acouplet'
     layout_case = ''
+    layout_mode = 'legacy'
 
     def run(arguments, input=None, capture=False):
         words = list(map(str, arguments))
@@ -31,9 +32,14 @@ with tempfile.TemporaryDirectory(prefix='acouplet-prepare-updates-check-') as di
             (app / 'Contents').mkdir(parents=True)
             (app.parent / 'Applications').symlink_to('/Applications')
             background = app.parent / '.background'
-            background.mkdir()
-            (background / 'background.tiff').write_bytes(b'Fixture background.')
-            (app.parent / '.DS_Store').write_bytes(b'Fixture layout.')
+            if layout_mode == 'legacy':
+                background.mkdir()
+                (background / 'background.tiff').write_bytes(b'Fixture background.')
+            if layout_mode == 'embedded':
+                embedded = app / 'Contents/Resources/DMGBackground.tiff'
+                embedded.parent.mkdir()
+                embedded.write_bytes(b'Fixture background.')
+            if layout_mode != 'plain': (app.parent / '.DS_Store').write_bytes(b'Fixture layout.')
             if layout_case == 'extra-app': (app.parent / 'Other.app').mkdir()
             if layout_case == 'extra-hidden': (app.parent / '.unexpected').touch()
             if layout_case == 'extra-background': (background / 'unexpected').touch()
@@ -44,9 +50,16 @@ with tempfile.TemporaryDirectory(prefix='acouplet-prepare-updates-check-') as di
             if layout_case == 'image-link':
                 (background / 'background.tiff').unlink()
                 (background / 'background.tiff').symlink_to(notes)
-            if layout_case == 'layout-link':
+            if layout_case in ('layout-link', 'embedded-layout-link'):
                 (app.parent / '.DS_Store').unlink()
                 (app.parent / '.DS_Store').symlink_to(notes)
+            if layout_case == 'embedded-layout-directory':
+                (app.parent / '.DS_Store').unlink()
+                (app.parent / '.DS_Store').mkdir()
+            if layout_case in ('embedded-image-link', 'embedded-image-missing', 'embedded-image-directory'):
+                embedded.unlink()
+                if layout_case == 'embedded-image-link': embedded.symlink_to(notes)
+                if layout_case == 'embedded-image-directory': embedded.mkdir()
             if layout_case == 'applications-target':
                 (app.parent / 'Applications').unlink()
                 (app.parent / 'Applications').symlink_to(root)
@@ -80,17 +93,21 @@ with tempfile.TemporaryDirectory(prefix='acouplet-prepare-updates-check-') as di
         rejects()
         assert not output.exists() and calls[-1][1] == 'detach'
         signing_key = 'fixture-public-key'
-        for case in ['team', 'identity', 'extra-app', 'extra-hidden', 'extra-background', 'background-link', 'image-link', 'layout-link', 'applications-target']:
+        for case in ['team', 'identity', 'extra-app', 'extra-hidden', 'extra-background', 'background-link', 'image-link', 'layout-link', 'applications-target',
+                     'embedded-layout-link', 'embedded-layout-directory', 'embedded-image-link', 'embedded-image-missing', 'embedded-image-directory']:
             signing_team = 'WRONGTEAM1' if case == 'team' else 'ABCDEFGHIJ'
             bundle_id = 'wrong.product' if case == 'identity' else 'dev.baglayan.Acouplet'
             layout_case = case
+            layout_mode = 'embedded' if case.startswith('embedded-') else 'legacy'
             before = len([call for call in calls if Path(call[0]).name == 'generate_keys'])
             rejects()
             assert len([call for call in calls if Path(call[0]).name == 'generate_keys']) == before
             assert not output.exists()
         signing_team, bundle_id, layout_case = 'ABCDEFGHIJ', 'dev.baglayan.Acouplet', ''
-        operation(archive, notes, output, None, True, 'dev.baglayan.Acouplet', 'ABCDEFGHIJ', 'fixture/repo')
-        assert calls[-1][1] == 'detach'
-        rejects()
+        for layout_mode in ('plain', 'legacy', 'embedded'):
+            output = root / ('release-' + layout_mode)
+            operation(archive, notes, output, None, True, 'dev.baglayan.Acouplet', 'ABCDEFGHIJ', 'fixture/repo')
+            assert calls[-1][1] == 'detach'
+            rejects()
         assert not any('-x' in call or '--ed-key-file' in call for call in calls)
 print('Local update preparation: notarization gate, product/team/layout identity, signing-key continuity, existing-output rejection and disk-image cleanup passed.')
