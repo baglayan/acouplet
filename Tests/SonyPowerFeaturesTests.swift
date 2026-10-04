@@ -1,0 +1,539 @@
+import XCTest
+@testable import Acouplet
+
+final class SonyPowerFeaturesTests: XCTestCase {
+    @MainActor
+    func testControllerCareUsesNegotiatedTableAndReplyConfirmation() {
+        for modern in [false, true] {
+            let controller = makeController(modernCare: modern)
+            defer { controller.simulateControlLoss() }
+            let type: UInt8 = modern ? 0x0E : 0x0C
+            let inquiry: UInt8 = modern ? 1 : 0x0C
+            XCTAssertNil(controller.powerFeatures.batteryCare?.enabled)
+            controller.setBatteryCare(true)
+            XCTAssertNil(controller.pendingChanges[.batteryCare])
+            if modern { deliver([0x21, inquiry, 85], type: type, to: controller) }
+            deliver([0x23, inquiry, 0] + (modern ? [1] : []), type: type, to: controller)
+            deliver([0x27, inquiry, 1], type: type, to: controller)
+            controller.setBatteryCare(true)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x28, inquiry, 0])
+            XCTAssertEqual(controller.simulatedPendingFrame?.type, type)
+            XCTAssertEqual(controller.powerFeatures.batteryCare?.enabled, false)
+            acknowledgeAll(controller)
+            XCTAssertNotNil(controller.pendingChanges[.batteryCare])
+            deliver([0x29, inquiry, 0], type: type == 0x0C ? 0x0E : 0x0C, to: controller)
+            XCTAssertNotNil(controller.pendingChanges[.batteryCare])
+            deliver([0x29, inquiry, 0], type: type, to: controller)
+            XCTAssertEqual(controller.powerFeatures.batteryCare?.enabled, true)
+            XCTAssertNil(controller.pendingChanges[.batteryCare])
+            controller.simulateControlLoss()
+            XCTAssertNil(controller.powerFeatures.batteryCare)
+        }
+    }
+
+    @MainActor
+    func testControllerEffectCancellationDoesNotDisablePreferenceAndRevalidatesQueuedWrites() {
+        let controller = makeController(modernCare: true)
+        defer { controller.simulateControlLoss() }
+        deliver([0x21, 0x0B, 20, 1, 0xE2, 0], to: controller)
+        deliver([0x27, 0x0B, 0, 0], to: controller)
+        controller.cancelPowerSaveEffect()
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x28, 0x0B, 0, 1])
+        controller.setAutoPowerSave(false)
+        XCTAssertNil(controller.pendingChanges[.autoPowerSave])
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.powerFeatures.autoPowerSave?.effectActive, true)
+        XCTAssertNotNil(controller.pendingChanges[.powerSaveEffect])
+        deliver([0x27, 0x0B, 0, 0], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.powerSaveEffect])
+        deliver([0x29, 0x0B, 0, 1], to: controller)
+        XCTAssertNil(controller.pendingChanges[.powerSaveEffect])
+        XCTAssertEqual(controller.powerFeatures.autoPowerSave?.enabled, true)
+        XCTAssertEqual(controller.powerFeatures.autoPowerSave?.effectActive, false)
+
+        deliver([0x21, 1, 85], type: 0x0E, to: controller)
+        deliver([0x23, 1, 0, 1], type: 0x0E, to: controller)
+        deliver([0x27, 1, 1], type: 0x0E, to: controller)
+        controller.setAutoPowerSave(false)
+        controller.setBatteryCare(true)
+        XCTAssertNotNil(controller.pendingChanges[.batteryCare])
+        deliver([0x07, 0, 0], type: 0x0E, to: controller)
+        acknowledgeAll(controller)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x28, 1, 0] })
+        XCTAssertNil(controller.powerFeatures.batteryCare)
+    }
+
+    @MainActor
+    func testOldPeriodicPowerReadCannotConfirmNewEffectCancellation() async throws {
+        let controller = makeController(modernCare: true)
+        defer { controller.simulateControlLoss() }
+        deliver([0x21, 0x0B, 20, 1, 0xE2, 0], to: controller)
+        deliver([0x27, 0x0B, 0, 1], to: controller)
+        let initialReads = controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && $0.payload == [0x26, 0x0B] }.count
+        for _ in 0..<5 { controller.simulateAutomaticRefresh() }
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && $0.payload == [0x26, 0x0B] }.count, initialReads + 1)
+
+        deliver([0x29, 0x0B, 0, 0], to: controller)
+        XCTAssertEqual(controller.powerFeatures.autoPowerSave?.effectActive, true)
+        controller.cancelPowerSaveEffect()
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x28, 0x0B, 0, 1])
+        acknowledgeAll(controller)
+        try await Task.sleep(for: .milliseconds(350))
+        XCTAssertNotNil(controller.pendingChanges[.powerSaveEffect])
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && $0.payload == [0x26, 0x0B] }.count, initialReads + 1)
+
+        deliver([0x27, 0x0B, 0, 1], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.powerSaveEffect])
+        XCTAssertEqual(controller.powerFeatures.autoPowerSave?.effectActive, true)
+        for _ in 0..<10 { await Task.yield() }
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && $0.payload == [0x26, 0x0B] }.count, initialReads + 2)
+        XCTAssertNotNil(controller.pendingChanges[.powerSaveEffect])
+        deliver([0x27, 0x0B, 0, 1], to: controller)
+        XCTAssertNil(controller.pendingChanges[.powerSaveEffect])
+        XCTAssertEqual(controller.powerFeatures.autoPowerSave?.enabled, true)
+        XCTAssertEqual(controller.powerFeatures.autoPowerSave?.effectActive, false)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && $0.payload == [0x28, 0x0B, 0, 1] }.count, 1)
+    }
+
+    @MainActor
+    private func makeController(modernCare: Bool, acknowledgePowerReads: Bool = true) -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
+            payload: [0x01, 0, 0x03, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        acknowledgeAll(controller)
+        let functions: [UInt8] = modernCare ? [0x6B, 0x2B] : [0x6B, 0x2B, 0x2C]
+        deliver([0x07, 0, UInt8(functions.count)] + functions.flatMap { [$0, 0] }, to: controller)
+        acknowledgeAll(controller)
+        deliver([0x67, 0x17, 1, 1, 0, 0, 10], to: controller)
+        if acknowledgePowerReads { acknowledgeAll(controller) }
+        if modernCare {
+            deliver([0x07, 0, 1, 0x22, 0], type: 0x0E, to: controller)
+            if acknowledgePowerReads { acknowledgeAll(controller) }
+        }
+        XCTAssertTrue(controller.isReady)
+        return controller
+    }
+
+    @MainActor
+    func testRemovedCareReplyDrainsBeforeCapabilityIsReadmitted() {
+        let controller = makeController(modernCare: true)
+        defer { controller.simulateControlLoss() }
+        let countBefore = controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x26, 1] }.count
+        XCTAssertEqual(countBefore, 1)
+        deliver([0x07, 0, 0], type: 0x0E, to: controller)
+        XCTAssertNil(controller.powerFeatures.batteryCare)
+        deliver([0x27, 1, 0], type: 0x0E, to: controller)
+        XCTAssertNil(controller.powerFeatures.batteryCare)
+        deliver([0x07, 0, 1, 0x22, 0], type: 0x0E, to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x26, 1] }.count, countBefore + 1)
+        XCTAssertNil(controller.powerFeatures.batteryCare?.enabled)
+        deliver([0x27, 1, 1], type: 0x0E, to: controller)
+        XCTAssertEqual(controller.powerFeatures.batteryCare?.enabled, false)
+    }
+
+    @MainActor
+    func testPowerReturnsRequireTransmittedReadsOnTheirNegotiatedTable() {
+        for modern in [false, true] {
+            let controller = makeController(modernCare: modern, acknowledgePowerReads: false)
+            defer { controller.simulateControlLoss() }
+            let type: UInt8 = modern ? 0x0E : 0x0C
+            let inquiry: UInt8 = modern ? 1 : 0x0C
+            let careReplies: [[UInt8]] = (modern ? [[0x21, inquiry, 85, 0xFE]] : [])
+                + [[0x23, inquiry, 0] + (modern ? [1] : []), [0x27, inquiry, 1]]
+            let autoReplies: [[UInt8]] = [[0x21, 0x0B, 20, 1, 0xE2, 0], [0x27, 0x0B, 0, 0]]
+            let initial = controller.powerFeatures
+            XCTAssertFalse(payloads(controller, type: type).contains([0x26, inquiry]))
+            for reply in careReplies { deliver(reply, type: type, to: controller) }
+            for reply in autoReplies { deliver(reply, to: controller) }
+            XCTAssertEqual(controller.powerFeatures, initial)
+            acknowledgeAll(controller)
+            for reply in careReplies { deliver(reply, type: type == 0x0C ? 0x0E : 0x0C, to: controller) }
+            for reply in autoReplies { deliver(reply, type: 0x0E, to: controller) }
+            XCTAssertEqual(controller.powerFeatures, initial)
+            for reply in careReplies { deliver(reply, type: type, to: controller) }
+            for reply in autoReplies { deliver(reply, to: controller) }
+            XCTAssertTrue(controller.canSetBatteryCare)
+            XCTAssertTrue(controller.canSetAutoPowerSave)
+            XCTAssertTrue(controller.canCancelPowerSaveEffect)
+            let confirmed = controller.powerFeatures
+            if modern { deliver([0x21, inquiry, 70], type: type, to: controller) }
+            deliver([0x23, inquiry, 1] + (modern ? [0] : []), type: type, to: controller)
+            deliver([0x27, inquiry, 0], type: type, to: controller)
+            deliver([0x21, 0x0B, 10, 0, 0], to: controller)
+            deliver([0x27, 0x0B, 1, 1], to: controller)
+            XCTAssertEqual(controller.powerFeatures, confirmed)
+            controller.refresh()
+            acknowledgeAll(controller)
+            deliver([0x27, inquiry, 0xFF], type: type, to: controller)
+            deliver([0x27, 0x0B, 0, 0xFF], to: controller)
+            XCTAssertNil(controller.powerFeatures.batteryCare?.enabled)
+            XCTAssertNil(controller.powerFeatures.autoPowerSave?.effectActive)
+            XCTAssertFalse(controller.canSetBatteryCare)
+            XCTAssertFalse(controller.canSetAutoPowerSave)
+            XCTAssertFalse(controller.canCancelPowerSaveEffect)
+            deliver([0x27, inquiry, 1], type: type, to: controller)
+            deliver([0x27, 0x0B, 0, 0], to: controller)
+            XCTAssertEqual(controller.powerFeatures, confirmed)
+            XCTAssertTrue(controller.canSetBatteryCare)
+            XCTAssertTrue(controller.canCancelPowerSaveEffect)
+        }
+    }
+
+    @MainActor
+    func testPowerNotificationsCannotBeRewoundByOlderStatusOrParameterReads() {
+        for modern in [false, true] {
+            let controller = makeReadyController(modernCare: modern)
+            defer { controller.simulateControlLoss() }
+            let type: UInt8 = modern ? 0x0E : 0x0C
+            let inquiry: UInt8 = modern ? 1 : 0x0C
+            controller.refresh()
+            acknowledgeAll(controller)
+            deliver([0x25, inquiry, 1] + (modern ? [0] : []), type: type, to: controller)
+            deliver([0x29, inquiry, 0], type: type, to: controller)
+            deliver([0x29, 0x0B, 1, 1], to: controller)
+            let notified = controller.powerFeatures
+            deliver([0x23, inquiry, 0] + (modern ? [1] : []), type: type, to: controller)
+            deliver([0x27, inquiry, 1], type: type, to: controller)
+            deliver([0x27, 0x0B, 0, 0], to: controller)
+            XCTAssertEqual(controller.powerFeatures, notified)
+            XCTAssertEqual(controller.powerFeatures.batteryCare?.available, false)
+            XCTAssertEqual(controller.powerFeatures.batteryCare?.enabled, true)
+            XCTAssertEqual(controller.powerFeatures.autoPowerSave?.enabled, false)
+            XCTAssertEqual(controller.powerFeatures.autoPowerSave?.effectActive, false)
+            XCTAssertFalse(controller.canSetBatteryCare)
+        }
+    }
+
+    @MainActor
+    func testPowerReadDeadlinesRequireTransmissionAndKnownReplies() async {
+        let cases: [(type: UInt8, query: [UInt8], valid: [UInt8], invalid: [UInt8])] = [
+            (0x0C, [0x22, 0x0C], [0x23, 0x0C, 0], [0x23, 0x0C, 0xFF]),
+            (0x0C, [0x26, 0x0C], [0x27, 0x0C, 1], [0x27, 0x0C, 0xFF]),
+            (0x0E, [0x20, 1], [0x21, 1, 85], [0x21, 1]),
+            (0x0E, [0x22, 1], [0x23, 1, 0, 1], [0x23, 1, 0xFF, 1]),
+            (0x0E, [0x26, 1], [0x27, 1, 1], [0x27, 1, 0xFF]),
+            (0x0C, [0x20, 0x0B], [0x21, 0x0B, 20, 1, 0xE2, 0], [0x21, 0x0B, 20, 1]),
+            (0x0C, [0x26, 0x0B], [0x27, 0x0B, 0, 0], [0x27, 0x0B, 0, 0xFF]),
+        ]
+        for testCase in cases {
+            let replies: [[UInt8]?] = [nil, testCase.invalid, testCase.valid]
+            for reply in replies {
+                let controller = makeController(modernCare: testCase.type == 0x0E, acknowledgePowerReads: false)
+                defer { controller.simulateControlLoss() }
+                controller.simulatePowerReadTimeout(testCase.query, type: testCase.type)
+                for _ in 0..<4 { await Task.yield() }
+                XCTAssertTrue(controller.isReady)
+                acknowledgeAll(controller)
+                XCTAssertTrue(payloads(controller, type: testCase.type).contains(testCase.query))
+                if let reply { deliver(reply, type: testCase.type, to: controller) }
+                let session = controller.simulatedControlSession
+                controller.simulatePowerReadTimeout(testCase.query, type: testCase.type)
+                for _ in 0..<4 { await Task.yield() }
+                XCTAssertEqual(controller.isReady, reply == testCase.valid)
+                XCTAssertTrue(controller.isDeviceConnected)
+                if reply != testCase.valid {
+                    XCTAssertGreaterThan(controller.simulatedControlSession, session)
+                    controller.simulateDeviceConnection(named: "WF-1000XM5")
+                    controller.simulateProtocolData(SonyFrameCodec.encode(type: testCase.type, sequence: 0,
+                        payload: testCase.valid), session: session)
+                    controller.simulatePowerReadTimeout(testCase.query, type: testCase.type)
+                    for _ in 0..<4 { await Task.yield() }
+                    XCTAssertTrue(controller.isReady)
+                    XCTAssertNil(controller.powerFeatures.batteryCare)
+                    XCTAssertNil(controller.powerFeatures.autoPowerSave)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testPowerTimeoutBlocksSharedActionsUntilFreshOwnedStateReconciles() async {
+        let cases: [(modern: Bool, setting: SonyHeadphonesController.Setting)] = [
+            (false, .batteryCare), (true, .batteryCare), (true, .autoPowerSave), (true, .powerSaveEffect),
+        ]
+        for testCase in cases {
+            for hasOldPoll in [false, true] {
+                let controller = makeReadyController(modernCare: testCase.modern)
+                defer { controller.simulateControlLoss() }
+                let care = testCase.setting == .batteryCare
+                let type: UInt8 = care && testCase.modern ? 0x0E : 0x0C
+                let inquiry: UInt8 = care ? (testCase.modern ? 1 : 0x0C) : 0x0B
+                let query: [UInt8] = [0x26, inquiry]
+                if hasOldPoll {
+                    controller.refresh()
+                    acknowledgeAll(controller)
+                }
+                let reads = payloads(controller, type: type).filter { $0 == query }.count
+                let before = controller.powerFeatures
+                if care { controller.setBatteryCare(true) }
+                else if testCase.setting == .autoPowerSave { controller.setAutoPowerSave(false) }
+                else { controller.cancelPowerSaveEffect() }
+                acknowledgeAll(controller)
+                XCTAssertNotNil(controller.pendingChanges[testCase.setting])
+                if care { XCTAssertFalse(controller.canSetBatteryCare) }
+                else {
+                    XCTAssertFalse(controller.canSetAutoPowerSave)
+                    XCTAssertFalse(controller.canCancelPowerSaveEffect)
+                }
+                controller.simulateSettingTimeout(testCase.setting)
+                for _ in 0..<4 { await Task.yield() }
+                XCTAssertNil(controller.pendingChanges[testCase.setting])
+                XCTAssertNotNil(controller.settingErrors[testCase.setting])
+                let writes = payloads(controller, type: type).filter { $0.first == 0x28 }
+                if care {
+                    XCTAssertFalse(controller.canSetBatteryCare)
+                    controller.setBatteryCare(true)
+                } else {
+                    XCTAssertFalse(controller.canSetAutoPowerSave)
+                    XCTAssertFalse(controller.canCancelPowerSaveEffect)
+                    controller.setAutoPowerSave(false)
+                    controller.cancelPowerSaveEffect()
+                }
+                XCTAssertEqual(payloads(controller, type: type).filter { $0.first == 0x28 }, writes)
+                if hasOldPoll {
+                    let stale: [UInt8] = care ? [0x27, inquiry, 0]
+                        : testCase.setting == .autoPowerSave ? [0x27, inquiry, 1, 0] : [0x27, inquiry, 0, 1]
+                    deliver(stale, type: type, to: controller)
+                    XCTAssertEqual(controller.powerFeatures, before)
+                    XCTAssertNotNil(controller.settingErrors[testCase.setting])
+                }
+                acknowledgeAll(controller)
+                XCTAssertEqual(payloads(controller, type: type).filter { $0 == query }.count, reads + 1)
+                deliver(care ? [0x27, inquiry, 1] : [0x27, inquiry, 0, 0], type: type, to: controller)
+                XCTAssertNil(controller.settingErrors[testCase.setting])
+                XCTAssertNil(controller.pendingChanges[testCase.setting])
+                XCTAssertEqual(controller.powerFeatures, before)
+                if care { XCTAssertTrue(controller.canSetBatteryCare) }
+                else {
+                    XCTAssertTrue(controller.canSetAutoPowerSave)
+                    XCTAssertTrue(controller.canCancelPowerSaveEffect)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testQueuedPowerWritesRevalidateSourceContext() throws {
+        for setting: SonyHeadphonesController.Setting in [.batteryCare, .autoPowerSave, .powerSaveEffect] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            controller.simulateGalleryDevice(model: .wfXM6)
+            defer { controller.simulateControlLoss() }
+            controller.refreshEqualizer()
+            if setting == .batteryCare { controller.setBatteryCare(false) }
+            else if setting == .autoPowerSave { controller.setAutoPowerSave(false) }
+            else { controller.cancelPowerSaveEffect() }
+            XCTAssertNotNil(controller.pendingChanges[setting])
+            controller.setSourceKeeping(!(try XCTUnwrap(controller.multipoint.keeping)))
+            XCTAssertEqual(controller.sourceTransition?.isFinished, false)
+            XCTAssertFalse(controller.canSetBatteryCare)
+            XCTAssertFalse(controller.canSetAutoPowerSave)
+            XCTAssertFalse(controller.canCancelPowerSaveEffect)
+            acknowledgeAll(controller)
+            XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0x28 })
+            XCTAssertFalse(controller.isReady)
+            XCTAssertNil(controller.pendingChanges[setting])
+        }
+    }
+
+    @MainActor
+    func testQueuedPowerWritesRejectUnavailableOrUnknownState() {
+        let cases: [(modern: Bool, setting: SonyHeadphonesController.Setting)] = [
+            (false, .batteryCare), (true, .batteryCare), (true, .autoPowerSave), (true, .powerSaveEffect),
+        ]
+        for testCase in cases {
+            let controller = makeReadyController(modernCare: testCase.modern)
+            defer { controller.simulateControlLoss() }
+            controller.refresh()
+            if testCase.setting == .batteryCare {
+                controller.setBatteryCare(true)
+                deliver(testCase.modern ? [0x25, 1, 1, 1] : [0x25, 0x0C, 1],
+                    type: testCase.modern ? 0x0E : 0x0C, to: controller)
+            } else {
+                if testCase.setting == .autoPowerSave { controller.setAutoPowerSave(false) }
+                else { controller.cancelPowerSaveEffect() }
+                deliver([0x29, 0x0B, 0, 0xFF], to: controller)
+            }
+            XCTAssertNotNil(controller.pendingChanges[testCase.setting])
+            acknowledgeAll(controller)
+            XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0x28 })
+            XCTAssertFalse(controller.isReady)
+            XCTAssertNil(controller.pendingChanges[testCase.setting])
+        }
+    }
+
+    @MainActor
+    func testReadmittedCareStaysEmptyUntilAllRetiredRepliesDrainAndFreshReadsReturn() {
+        let controller = makeController(modernCare: true)
+        defer { controller.simulateControlLoss() }
+        let queries: [[UInt8]] = [[0x20, 1], [0x22, 1], [0x26, 1]]
+        for query in queries { XCTAssertEqual(payloads(controller, type: 0x0E).filter { $0 == query }.count, 1) }
+        deliver([0x07, 0, 0], type: 0x0E, to: controller)
+        XCTAssertNil(controller.powerFeatures.batteryCare)
+        deliver([0x07, 0, 1, 0x22, 0], type: 0x0E, to: controller)
+        acknowledgeAll(controller)
+        for query in queries { XCTAssertEqual(payloads(controller, type: 0x0E).filter { $0 == query }.count, 1) }
+        let readmitted = controller.powerFeatures.batteryCare
+        XCTAssertNotNil(readmitted)
+        for old: [UInt8] in [[0x21, 1, 85], [0x23, 1, 0, 1], [0x27, 1, 0]] {
+            deliver(old, type: 0x0E, to: controller)
+            XCTAssertEqual(controller.powerFeatures.batteryCare, readmitted)
+            XCTAssertFalse(controller.canSetBatteryCare)
+        }
+        acknowledgeAll(controller)
+        for query in queries { XCTAssertEqual(payloads(controller, type: 0x0E).filter { $0 == query }.count, 2) }
+        for fresh: [UInt8] in [[0x21, 1, 90], [0x23, 1, 0, 0], [0x27, 1, 1]] {
+            deliver(fresh, type: 0x0E, to: controller)
+        }
+        XCTAssertEqual(controller.powerFeatures.batteryCare?.threshold, 90)
+        XCTAssertEqual(controller.powerFeatures.batteryCare?.noticeNecessary, true)
+        XCTAssertEqual(controller.powerFeatures.batteryCare?.enabled, false)
+        XCTAssertTrue(controller.canSetBatteryCare)
+    }
+
+    @MainActor
+    private func makeReadyController(modernCare: Bool) -> SonyHeadphonesController {
+        let controller = makeController(modernCare: modernCare)
+        let type: UInt8 = modernCare ? 0x0E : 0x0C
+        let inquiry: UInt8 = modernCare ? 1 : 0x0C
+        if modernCare { deliver([0x21, inquiry, 85], type: type, to: controller) }
+        deliver([0x23, inquiry, 0] + (modernCare ? [1] : []), type: type, to: controller)
+        deliver([0x27, inquiry, 1], type: type, to: controller)
+        deliver([0x21, 0x0B, 20, 1, 0xE2, 0], to: controller)
+        deliver([0x27, 0x0B, 0, 0], to: controller)
+        XCTAssertTrue(controller.canSetBatteryCare)
+        XCTAssertTrue(controller.canSetAutoPowerSave)
+        XCTAssertTrue(controller.canCancelPowerSaveEffect)
+        return controller
+    }
+
+    @MainActor
+    private func payloads(_ controller: SonyHeadphonesController, type: UInt8 = 0x0C) -> [[UInt8]] {
+        controller.simulatedTransmittedFrames.filter { $0.type == type }.map(\.payload)
+    }
+
+    @MainActor
+    private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, to controller: SonyHeadphonesController) {
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload))
+    }
+
+    @MainActor
+    private func acknowledgeAll(_ controller: SonyHeadphonesController) {
+        for _ in 0..<100 {
+            guard let frame = controller.simulatedPendingFrame else { return }
+            replyToOrdinaryNoiseMetadata(frame, controller: controller)
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - frame.sequence, payload: []))
+        }
+        XCTFail("Simulated command queue did not drain")
+    }
+
+    func testAdvertisedFunctionsChooseTheirOwnTableAndLegacyCarePrecedence() {
+        let empty = SonyPowerFeatures()
+        XCTAssertNil(empty.batteryCare)
+        XCTAssertNil(empty.autoPowerSave)
+        XCTAssertEqual(empty.queryPayloads(frameType: 0x0C), [])
+        XCTAssertEqual(empty.queryPayloads(frameType: 0x0E), [])
+        let wrongTables = SonyPowerFeatures(supportedFunctions: [0x22], supportedFunctions2: [0x2B, 0x2C])
+        XCTAssertEqual(wrongTables, empty)
+        let legacy = SonyPowerFeatures(supportedFunctions: [0x2B, 0x2C], supportedFunctions2: [0x22])
+        XCTAssertEqual(legacy.queryPayloads(frameType: 0x0C), [[0x22, 0x0C], [0x26, 0x0C], [0x20, 0x0B], [0x26, 0x0B]])
+        XCTAssertEqual(legacy.queryPayloads(frameType: 0x0E), [])
+        let modern = SonyPowerFeatures(supportedFunctions2: [0x22])
+        XCTAssertEqual(modern.queryPayloads(frameType: 0x0E), [[0x20, 1], [0x22, 1], [0x26, 1]])
+    }
+
+    func testBatteryCareKeepsAvailabilityPreferenceAndNoticeSeparate() throws {
+        for includesThreshold in [false, true] {
+            var state = SonyBatteryCare(includesThreshold: includesThreshold)
+            let type = state.frameType
+            let inquiry = state.inquiryType
+            XCTAssertNil(state.setPayload(enabled: true))
+            XCTAssertTrue(state.update([0x27, inquiry, 0], frameType: type))
+            XCTAssertEqual(state.enabled, true)
+            XCTAssertNil(state.setPayload(enabled: false))
+            XCTAssertTrue(state.update([0x23, inquiry, 0] + (includesThreshold ? [0] : []), frameType: type))
+            if includesThreshold {
+                XCTAssertNil(state.setPayload(enabled: false))
+                XCTAssertTrue(state.update([0x21, inquiry, 85, 0xFE], frameType: type))
+                XCTAssertEqual(state.threshold, 85)
+                XCTAssertEqual(state.noticeNecessary, true)
+                XCTAssertEqual(state.queryPayloads, [[0x22, inquiry], [0x26, inquiry]])
+            }
+            XCTAssertEqual(state.setPayload(enabled: false), [0x28, inquiry, 1])
+            XCTAssertTrue(state.update([0x25, inquiry, 1] + (includesThreshold ? [1] : []), frameType: type))
+            XCTAssertEqual(state.enabled, true)
+            XCTAssertNil(state.setPayload(enabled: false))
+            XCTAssertTrue(state.update([0x29, inquiry, 1], frameType: type))
+            XCTAssertEqual(state.enabled, false)
+            XCTAssertEqual(state.available, false)
+        }
+    }
+
+    func testMalformedCareDoesNotMutateAndUnknownValuesNeverBecomeOff() {
+        var state = SonyBatteryCare(includesThreshold: true)
+        for payload: [UInt8] in [[0x21, 1, 80], [0x23, 1, 0, 1], [0x27, 1, 0]] {
+            XCTAssertTrue(state.update(payload, frameType: 0x0E))
+        }
+        let previous = state
+        for payload: [UInt8] in [[], [0x21], [0x21, 1], [0x21, 1, 0], [0x21, 1, 101], [0x23, 1, 0], [0x23, 1, 0, 1, 0], [0x29, 1, 0, 0], [0x28, 1, 1], [0x27, 0x0C, 1]] {
+            XCTAssertFalse(state.update(payload, frameType: 0x0E))
+            XCTAssertEqual(state, previous)
+        }
+        XCTAssertFalse(state.update([0x27, 1, 1], frameType: 0x0C))
+        XCTAssertEqual(state, previous)
+        XCTAssertTrue(state.update([0x25, 1, 0xFF, 0xFF], frameType: 0x0E))
+        XCTAssertNil(state.available)
+        XCTAssertNil(state.noticeNecessary)
+        XCTAssertEqual(state.enabled, true)
+        XCTAssertTrue(state.update([0x29, 1, 0xFF], frameType: 0x0E))
+        XCTAssertNil(state.enabled)
+        XCTAssertNil(state.setPayload(enabled: false))
+    }
+
+    func testAutoPowerSaveCancellationPreservesPreferenceAndBothFunctionTables() throws {
+        var power = SonyPowerFeatures(supportedFunctions: [0x2B])
+        XCTAssertNil(power.autoPowerSave?.setPayload(enabled: true))
+        XCTAssertFalse(power.update([0x23, 0x0B, 0], frameType: 0x0C))
+        XCTAssertTrue(power.update([0x21, 0x0B, 20, 2, 0xE2, 0x51, 1, 0x53], frameType: 0x0C))
+        XCTAssertEqual(power.autoPowerSave?.affectedFunctions, [0xE2, 0x51])
+        XCTAssertEqual(power.autoPowerSave?.affectedFunctions2, [0x53])
+        XCTAssertTrue(power.update([0x27, 0x0B, 0, 0], frameType: 0x0C))
+        XCTAssertEqual(power.autoPowerSave?.enabled, true)
+        XCTAssertEqual(power.autoPowerSave?.effectActive, true)
+        XCTAssertEqual(power.autoPowerSave?.cancelEffectPayload, [0x28, 0x0B, 0, 1])
+        XCTAssertEqual(power.autoPowerSave?.setPayload(enabled: false), [0x28, 0x0B, 1, 0])
+        XCTAssertTrue(power.update([0x29, 0x0B, 0, 1], frameType: 0x0C))
+        XCTAssertEqual(power.autoPowerSave?.enabled, true)
+        XCTAssertEqual(power.autoPowerSave?.effectActive, false)
+        XCTAssertNil(power.autoPowerSave?.cancelEffectPayload)
+        XCTAssertEqual(power.queryPayloads(frameType: 0x0C), [[0x26, 0x0B]])
+    }
+
+    func testPowerSaveChecksEveryCountBoundaryAndUnknownStatesBeforeWrites() {
+        var state = SonyAutoPowerSave()
+        let capability: [UInt8] = [0x21, 0x0B, 0, 2, 0xE2, 0xFE, 2, 0x53, 0xFD]
+        XCTAssertTrue(state.update(capability, frameType: 0x0C))
+        XCTAssertEqual(state.affectedFunctions, [0xE2, 0xFE])
+        XCTAssertEqual(state.affectedFunctions2, [0x53, 0xFD])
+        let previous = state
+        for count in 0..<capability.count {
+            XCTAssertFalse(state.update(Array(capability.prefix(count)), frameType: 0x0C))
+            XCTAssertEqual(state, previous)
+        }
+        for payload: [UInt8] in [capability + [0], [0x21, 0x0B, 101, 0, 0], [0x21, 0x0B, 20, 255, 0], [0x21, 0x0B, 20, 0, 255], [0x21, 0x0B, 20, 1, 0, 0], [0x21, 0x0B, 20, 0, 1, 0], [0x27, 0x0B, 0, 0, 0], [0x23, 0x0B, 0, 0]] {
+            XCTAssertFalse(state.update(payload, frameType: 0x0C))
+            XCTAssertEqual(state, previous)
+        }
+        XCTAssertFalse(state.update(capability, frameType: 0x0E))
+        XCTAssertTrue(state.update([0x21, 0x0B, 100, 0, 0], frameType: 0x0C))
+        XCTAssertEqual(state.affectedFunctions, [])
+        for payload: [UInt8] in [[0x27, 0x0B, 0xFF, 0], [0x29, 0x0B, 0, 0xFF]] {
+            XCTAssertTrue(state.update(payload, frameType: 0x0C))
+            XCTAssertNil(state.setPayload(enabled: false))
+            XCTAssertNil(state.cancelEffectPayload)
+        }
+    }
+}

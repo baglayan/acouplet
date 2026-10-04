@@ -4,111 +4,277 @@ import SwiftUI
 
 @MainActor
 final class MenuBarController: NSObject, NSPopoverDelegate {
-    private struct StatusPresentation {
-        let title: String
-        let accessibilityLabel: String
-    }
+    private let devices: SonyDeviceCoordinator
+    private let settings: SettingsStore
+    #if ACOUPLET_SPARKLE
+    private let updater: AppUpdater
+    #endif
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    private let noiseModeHUD: SonyNoiseModeHUD
+    private let ldac: LDACController
+    #endif
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let popover = NSPopover()
+    private var observation: AnyCancellable?
+    private var imageState: (model: SonyDeviceModel, leftConnected: Bool?, rightConnected: Bool?, batteries: SonyBatteries, chargingCase: Bool)?
+    private var measuredContentSize = NSSize.zero
+    private var wantsPopover = false
+    private var dismissalObservations = Set<AnyCancellable>()
+    private var foregroundApplicationPID: Int32?
 
-    private let environment: AppEnvironment
-    private let statusItem: NSStatusItem
-    private let popover: NSPopover
-    private var cancellables = Set<AnyCancellable>()
-    private var pendingStatusPresentation: StatusPresentation?
-
-    init(environment: AppEnvironment) {
-        self.environment = environment
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        popover = NSPopover()
+    init(environment: AppEnvironment, showSettings: @escaping () -> Void) {
+        let devices = environment.devices
+        let settings = environment.settings
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        let ldac = environment.ldac
+        #endif
+        self.devices = devices
+        self.settings = settings
+        #if ACOUPLET_SPARKLE
+        updater = environment.updater
+        #endif
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        noiseModeHUD = environment.noiseModeHUD
+        self.ldac = ldac
+        #endif
         super.init()
-
+        statusItem.autosaveName = "HeadphoneControls"
+        if #available(macOS 27.0, *) {
+            statusItem.expandedInterfaceDelegate = self
+        } else {
+            statusItem.button?.target = self
+            statusItem.button?.action = #selector(togglePopover)
+        }
+        let controller = NSHostingController(rootView: SelectedDeviceView(devices: devices) { [weak self] in
+            MenuBarView(showSettings: showSettings, closeMenu: { [weak self] in self?.closeMenu() })
+                .environmentObject(settings)
+                #if ACOUPLET_SPARKLE
+                .environmentObject(environment.updater)
+                #endif
+                #if !ACOUPLET_PUBLIC_APIS_ONLY
+                .environmentObject(ldac)
+                #endif
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { [weak self] size in
+                    self?.measuredContentSize = size
+                    Task { @MainActor [weak self] in
+                        guard let self, self.wantsPopover else { return }
+                        self.updatePopoverSize()
+                        if !self.popover.isShown { self.showPopover() }
+                    }
+                }
+        }.frame(minHeight: 0, maxHeight: .infinity, alignment: .top))
+        controller.sizingOptions = []
+        popover.contentViewController = controller
+        popover.appearance = NSApp.appearance
         popover.behavior = .transient
-        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.delegate = self
-        popover.contentSize = MenuBarMetrics.displaySize
-        popover.contentViewController = NSHostingController(
-            rootView: MenuBarView(onSizeChange: { [weak self] size in
-                guard let self, self.popover.contentSize != size else { return }
-                self.popover.contentSize = size
-            })
-                .environmentObject(environment.settings)
-                .environmentObject(environment.headphones)
-        )
-
-        guard let button = statusItem.button else { return }
-        let image = NSImage(systemSymbolName: "headphones", accessibilityDescription: nil)
-        image?.isTemplate = true
-        button.image = image
-        button.setAccessibilityLabel(String(localized: "status.accessibilityLabel"))
-        button.target = self
-        button.action = #selector(togglePopover(_:))
-        button.sendAction(on: [.leftMouseUp])
-
-        Publishers.CombineLatest3(
-            environment.headphones.$linkState,
-            environment.headphones.$noiseControlMode,
-            environment.headphones.$batteryLevel
-        )
-        .sink { [weak self] _, _, _ in self?.updateStatusItem() }
-        .store(in: &cancellables)
+        var changes = devices.objectWillChange.merge(with: settings.objectWillChange).eraseToAnyPublisher()
+        #if ACOUPLET_SPARKLE
+        changes = changes.merge(with: updater.objectWillChange).eraseToAnyPublisher()
+        #endif
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        changes = changes.merge(with: ldac.objectWillChange).eraseToAnyPublisher()
+        #endif
+        observation = changes
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateStatusItem() }
         updateStatusItem()
     }
 
+    func stop() {
+        observation = nil
+        dismissalObservations.removeAll()
+        closeMenu()
+        popover.close()
+        popover.delegate = nil
+        if #available(macOS 27.0, *) { statusItem.expandedInterfaceDelegate = nil }
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        noiseModeHUD.setAnchorView(nil)
+        #endif
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
     private func updateStatusItem() {
+        let headphones = devices.selectedController
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        let keepsLDACVisible = ldac.targetAddress == headphones.address && ldac.state.keepsMenuBarVisible(isSessionRunning: ldac.isSessionRunning)
+        #else
+        let keepsLDACVisible = false
+        #endif
+        #if ACOUPLET_SPARKLE
+        let hasPendingUpdate = updater.hasPendingUpdate
+        #else
+        let hasPendingUpdate = false
+        #endif
+        let isVisible = hasPendingUpdate || settings.keepMenuBarIconWhenDisconnected || headphones.showsMenuBarIcon
+            || (keepsLDACVisible && headphones.deviceModel != .unknown)
+        if statusItem.isVisible != isVisible { statusItem.isVisible = isVisible }
         guard let button = statusItem.button else { return }
-        let headphones = environment.headphones
-        let title: String
-        if headphones.isReady {
-            if let battery = headphones.batteryLevel {
-                title = " \(battery)%"
-            } else if let mode = headphones.noiseControlMode {
-                title = " \(mode.compactTitle)"
-            } else {
-                title = ""
+        let model = headphones.deviceModel
+        if !keepsLDACVisible || headphones.isReady || button.image == nil {
+            let imageState = (
+                model: model,
+                leftConnected: headphones.audioFeatures.leftConnected,
+                rightConnected: headphones.audioFeatures.rightConnected,
+                batteries: headphones.isReady ? headphones.batteries : SonyBatteries(),
+                chargingCase: headphones.isReady && headphones.isChargingInCase
+            )
+            if self.imageState.map({ $0 == imageState }) != true || button.image == nil {
+                self.imageState = imageState
+                button.image = DeviceIcon.menuBarImage(model: imageState.model,
+                    leftConnected: imageState.leftConnected, rightConnected: imageState.rightConnected,
+                    batteries: imageState.batteries, chargingCase: imageState.chargingCase)
             }
+        }
+        let title: String
+        if settings.showBatteryInMenuBar, headphones.isReady, let level = headphones.batteryLevel {
+            title = "\(level)%"
+        } else if settings.showBatteryInMenuBar, keepsLDACVisible, !headphones.isReady {
+            title = button.title
         } else {
             title = ""
         }
-        let details = [
-            headphones.statusText,
-            headphones.noiseControlMode?.title,
-            headphones.batteryLevel.map { "Battery \($0) percent" },
-        ]
-        .compactMap { $0 }
-        .joined(separator: ", ")
-        let presentation = StatusPresentation(
-            title: title,
-            accessibilityLabel: "XM5 Control, \(details)"
-        )
+        if button.title != title { button.title = title }
+        let imagePosition: NSControl.ImagePosition = title.isEmpty ? .imageOnly : .imageLeading
+        if button.imagePosition != imagePosition { button.imagePosition = imagePosition }
+        let batteryDescription: String
+        if !headphones.isReady {
+            batteryDescription = ""
+        } else if !model.isEarbuds {
+            batteryDescription = headphones.batteries.single.map { String(localized: "Battery \($0.level)%") } ?? ""
+        } else {
+            batteryDescription = [(String(localized: "Left"), headphones.batteries.left), (String(localized: "Right"), headphones.batteries.right), (String(localized: "Case"), headphones.batteries.caseBattery)]
+                .compactMap { name, reading in reading.map { String(localized: "\(name) \($0.level)%") } }
+                .joined(separator: ", ")
+        }
+        button.setAccessibilityLabel(String(localized: "Acouplet, \(headphones.deviceName), \(headphones.statusText)"))
+        button.setAccessibilityValue(model.isEarbuds ? DeviceIcon.connectionValue(
+            left: headphones.audioFeatures.leftConnected,
+            right: headphones.audioFeatures.rightConnected
+        ) + ". " + batteryDescription : batteryDescription)
+        button.toolTip = batteryDescription.isEmpty ? headphones.deviceName : "\(headphones.deviceName) · \(batteryDescription)"
+        if hasPendingUpdate { button.toolTip = String(localized: "Update Available…") }
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        noiseModeHUD.setAnchorView(statusItem.isVisible ? button : nil)
+        #endif
+        if !statusItem.isVisible { closeMenu() }
+    }
 
-        // Keep the status item's width fixed while its popover is anchored to it.
-        // Accessibility remains current even while the visual title is queued.
-        button.setAccessibilityLabel(presentation.accessibilityLabel)
-        guard !popover.isShown else {
-            pendingStatusPresentation = presentation
+    private func updatePopoverSize() {
+        let size = measuredContentSize
+        guard size.width > 0, size.height > 0, size != popover.contentSize else { return }
+        guard popover.isShown else {
+            popover.contentSize = size
             return
         }
-        apply(presentation)
+        let animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = animates ? 0.2 : 0
+            context.allowsImplicitAnimation = animates
+            self.popover.contentSize = size
+        }, completionHandler: nil)
     }
 
-    private func apply(_ presentation: StatusPresentation) {
-        statusItem.button?.title = presentation.title
-        statusItem.button?.setAccessibilityLabel(presentation.accessibilityLabel)
-    }
-
-    func popoverDidClose(_ notification: Notification) {
-        guard let pendingStatusPresentation else { return }
-        self.pendingStatusPresentation = nil
-        apply(pendingStatusPresentation)
-    }
-
-    @objc
-    private func togglePopover(_ sender: Any?) {
-        if popover.isShown {
-            popover.performClose(sender)
+    private func showPopover() {
+        guard let button = statusItem.button, button.window != nil else {
+            closeMenu()
             return
         }
-        guard let button = statusItem.button, button.window != nil else { return }
+        wantsPopover = true
+        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        popover.contentViewController?.view.layoutSubtreeIfNeeded()
+        guard measuredContentSize.width > 0, measuredContentSize.height > 0 else { return }
+        updatePopoverSize()
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        noiseModeHUD.setMenuVisible(true)
+        #endif
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        NSApp.activate(ignoringOtherApps: true)
+        popover.contentViewController?.view.window?.makeKey()
+    }
+
+    private func closeMenu() {
+        if #available(macOS 27.0, *), let session = statusItem.expandedInterfaceSession {
+            session.cancel()
+        } else {
+            wantsPopover = false
+            popover.close()
+        }
+    }
+
+    @objc private func togglePopover() {
+        if popover.isShown || wantsPopover { closeMenu() }
+        else { showPopover() }
+    }
+
+    func popoverShouldClose(_ popover: NSPopover) -> Bool {
+        if let event = NSApp.currentEvent,
+           event.type == .leftMouseDown || event.type == .leftMouseUp,
+           let button = statusItem.button, event.window === button.window,
+           button.bounds.contains(button.convert(event.locationInWindow, from: nil)) {
+            return false
+        }
+        return true
+    }
+
+    func popoverWillShow(_ notification: Notification) {
+        let shownAt = ProcessInfo.processInfo.systemUptime
+        dismissalObservations.removeAll()
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] event in
+            guard event.timestamp > shownAt else { return }
+            MainActor.assumeIsolated { self?.closeMenu() }
+        }) {
+            AnyCancellable { NSEvent.removeMonitor(monitor) }.store(in: &dismissalObservations)
+        }
+        foregroundApplicationPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let center = NSWorkspace.shared.notificationCenter
+        center.publisher(for: NSWorkspace.didActivateApplicationNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self, let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      application.isActive else { return }
+                let processIdentifier = application.processIdentifier
+                guard processIdentifier != self.foregroundApplicationPID else { return }
+                self.foregroundApplicationPID = processIdentifier
+                if processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                    self.closeMenu()
+                }
+            }
+            .store(in: &dismissalObservations)
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        wantsPopover = false
+        dismissalObservations.removeAll()
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        noiseModeHUD.setMenuVisible(false)
+        #endif
+        if #available(macOS 27.0, *) { statusItem.expandedInterfaceSession?.cancel() }
+    }
+
+}
+
+#if !ACOUPLET_PUBLIC_APIS_ONLY
+extension LDACState {
+    func keepsMenuBarVisible(isSessionRunning: Bool) -> Bool {
+        switch self {
+        case .requested, .connecting, .active, .stopping: true
+        case .failed: isSessionRunning
+        case .off: false
+        }
+    }
+}
+#endif
+
+@available(macOS 27.0, *)
+extension MenuBarController: @MainActor NSStatusItemExpandedInterfaceDelegate {
+    func statusItem(_ statusItem: NSStatusItem, didBegin expandedInterfaceSession: NSStatusItemExpandedInterfaceSession) {
+        showPopover()
+    }
+
+    func statusItemDidEndExpandedInterfaceSession(_ statusItem: NSStatusItem, animated: Bool) {
+        guard wantsPopover else { return }
+        wantsPopover = false
+        popover.animates = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        popover.close()
     }
 }

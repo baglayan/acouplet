@@ -1,0 +1,1415 @@
+import XCTest
+@testable import Acouplet
+
+final class SonyLegacyControlsTests: XCTestCase {
+    func testLegacyFunctionListAndBatteryCommandsStaySeparateFromV2() throws {
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 4, 0x11, 0x15, 0x18, 0x62]))
+        XCTAssertEqual(controls.batteryQueries, [[0x10, 0], [0x10, 1], [0x10, 2]])
+        XCTAssertEqual(controls.noiseQueries, [[0x60, 2], [0x62, 2], [0x66, 2]])
+        XCTAssertNil(SonyLegacyControls(supportPayload: [0x07, 0, 2, 0x11, 1, 0x62, 1]))
+        XCTAssertTrue(controls.update([0x11, 0x01, 73, 0, 84, 1]))
+        XCTAssertEqual(controls.batteries.left?.level, 73)
+        XCTAssertEqual(controls.batteries.right?.isCharging, true)
+        XCTAssertTrue(controls.update([0x13, 0x02, 62, 0]))
+        XCTAssertEqual(controls.batteries.caseBattery?.level, 62)
+        let prior = controls
+        XCTAssertFalse(controls.update([0x23, 0x09, 73, 0, 84, 1]))
+        XCTAssertFalse(controls.update([0x11, 0x01, 73, 0, 84]))
+        XCTAssertEqual(controls, prior)
+    }
+
+    func testDualSingleNoiseWritesUseAdvertisedTypesAndLimits() throws {
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 1, 0x62]))
+        XCTAssertNil(controls.noiseControlPayload(mode: .anc, ambientLevel: 10, focusOnVoice: false))
+        XCTAssertTrue(controls.update([0x61, 0x02, 0x02, 3, 0x01, 2, 0, 20, 1, 15]))
+        XCTAssertTrue(controls.update([0x67, 0x02, 1, 2, 0, 1, 0, 12]))
+        XCTAssertFalse(controls.canSetNoiseControl)
+        XCTAssertTrue(controls.update([0x63, 0x02, 0]))
+        XCTAssertTrue(controls.canSetNoiseControl)
+        XCTAssertEqual(controls.noiseState?.mode, .ambient)
+        XCTAssertEqual(controls.noiseControlPayload(mode: .anc, ambientLevel: 12, focusOnVoice: false), [0x68, 2, 1, 2, 2, 1, 0, 0])
+        XCTAssertEqual(controls.noiseControlPayload(mode: .wind, ambientLevel: 12, focusOnVoice: false), [0x68, 2, 1, 2, 1, 1, 0, 0])
+        XCTAssertEqual(controls.noiseControlPayload(mode: .ambient, ambientLevel: 15, focusOnVoice: true), [0x68, 2, 1, 2, 0, 1, 1, 15])
+        XCTAssertNil(controls.noiseControlPayload(mode: .ambient, ambientLevel: 16, focusOnVoice: true))
+        XCTAssertNil(controls.noiseControlPayload(mode: .ambient, ambientLevel: 0, focusOnVoice: false))
+        XCTAssertEqual(controls.noiseControlPayload(mode: .off, ambientLevel: 0, focusOnVoice: false), [0x68, 2, 0, 2, 0, 1, 0, 12])
+    }
+
+    func testLegacyBatteryZeroIsAReadingAndUnknownChargingIsNotFalse() throws {
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 2, 0x15, 0x18]))
+        XCTAssertTrue(controls.update([0x11, 1, 0, 0, 64, 0]))
+        XCTAssertEqual(controls.batteries.left?.level, 0)
+        XCTAssertEqual(controls.batteries.right?.level, 64)
+        XCTAssertTrue(controls.update([0x13, 1, 52, 0xF0, 65, 1]))
+        XCTAssertEqual(controls.batteries.left?.level, 52)
+        XCTAssertEqual(controls.batteries.left?.chargingState, .unknown)
+        XCTAssertEqual(controls.batteries.right?.isCharging, true)
+        XCTAssertTrue(controls.update([0x13, 2, 77, 0xF0]))
+        XCTAssertEqual(controls.batteries.caseBattery?.level, 77)
+        XCTAssertEqual(controls.batteries.caseBattery?.chargingState, .unknown)
+        XCTAssertTrue(controls.update([0x13, 1, 52, 2, 65, 3]))
+        XCTAssertNil(controls.batteries.left)
+        XCTAssertNil(controls.batteries.right)
+        XCTAssertFalse(controls.update([0x11, 0, 90, 0]))
+        XCTAssertNil(controls.batteries.single)
+    }
+
+
+    func testOnOffNoiseCapabilityDoesNotInventWindOrVoiceFocus() throws {
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 1, 0x62]))
+        XCTAssertTrue(controls.update([0x61, 2, 0, 2, 0, 1, 0, 2]))
+        XCTAssertTrue(controls.update([0x63, 2, 0]))
+        XCTAssertTrue(controls.update([0x67, 2, 1, 0, 1, 0, 0, 0]))
+        XCTAssertEqual(controls.noiseState?.mode, .anc)
+        XCTAssertEqual(controls.noiseControlPayload(mode: .ambient, ambientLevel: 1, focusOnVoice: false), [0x68, 2, 1, 0, 0, 0, 0, 1])
+        XCTAssertNil(controls.noiseControlPayload(mode: .wind, ambientLevel: 1, focusOnVoice: false))
+        XCTAssertNil(controls.noiseControlPayload(mode: .ambient, ambientLevel: 1, focusOnVoice: true))
+        XCTAssertNil(controls.noiseControlPayload(mode: .ambient, ambientLevel: 2, focusOnVoice: false))
+    }
+
+    func testMalformedAndUnavailableStatesCannotProduceWrites() throws {
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 1, 0x62]))
+        XCTAssertFalse(controls.update([0x61, 2, 2, 3, 1, 2, 0, 20]))
+        XCTAssertFalse(controls.update([0x61, 2, 2, 3, 1, 2, 0, 20, 0, 20]))
+        XCTAssertTrue(controls.update([0x61, 2, 2, 3, 1, 1, 0, 20]))
+        XCTAssertTrue(controls.update([0x63, 2, 0]))
+        XCTAssertTrue(controls.update([0x67, 2, 1, 2, 2, 1, 0, 0]))
+        XCTAssertTrue(controls.canSetNoiseControl)
+        XCTAssertTrue(controls.update([0x65, 2, 1]))
+        XCTAssertNil(controls.noiseControlPayload(mode: .off, ambientLevel: 10, focusOnVoice: false))
+        XCTAssertTrue(controls.update([0x65, 2, 0xFF]))
+        XCTAssertNil(controls.noiseAvailable)
+        XCTAssertTrue(controls.update([0x65, 2, 0]))
+        XCTAssertTrue(controls.update([0x69, 2, 0xFF, 2, 2, 1, 0, 0]))
+        XCTAssertNil(controls.noiseState?.mode)
+        XCTAssertFalse(controls.canSetNoiseControl)
+        XCTAssertTrue(controls.update([0x61, 2, 1, 20, 1, 1, 0, 20]))
+        XCTAssertTrue(controls.noiseCapability?.modes.isEmpty == true)
+    }
+
+    func testOffAndStaleCapabilityStatesDoNotBypassWireValidation() throws {
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 1, 0x62]))
+        XCTAssertTrue(controls.update([0x61, 2, 2, 3, 1, 1, 0, 20]))
+        XCTAssertTrue(controls.update([0x63, 2, 0]))
+        XCTAssertTrue(controls.update([0x67, 2, 0, 2, 0xFF, 1, 0, 12]))
+        XCTAssertNil(controls.noiseState?.mode)
+        XCTAssertFalse(controls.canSetNoiseControl)
+        XCTAssertTrue(controls.update([0x67, 2, 0, 2, 0, 1, 0, 12]))
+        XCTAssertTrue(controls.canSetNoiseControl)
+        XCTAssertTrue(controls.update([0x61, 2, 2, 3, 1, 1, 0, 10]))
+        XCTAssertNil(controls.noiseControlPayload(mode: .off, ambientLevel: 10, focusOnVoice: false))
+        XCTAssertTrue(controls.update([0x61, 2, 0, 2, 0, 1, 0, 2]))
+        XCTAssertTrue(controls.update([0x67, 2, 0, 0, 0, 0, 0, 2]))
+        XCTAssertNil(controls.noiseState?.mode)
+        XCTAssertFalse(controls.canSetNoiseControl)
+    }
+
+    func testLegacyDSEEUsesAdvertisedTypeAndExplicitSettingType() {
+        for (raw, expected) in [(UInt8(0), SonyDSEEType.hx), (1, .dsee), (2, .extreme)] {
+            var dsee = SonyLegacyDSEE(isSupported: true)
+            XCTAssertEqual(dsee.queryPayloads, [[0xE0, 2], [0xE2, 2], [0xE6, 2]])
+            XCTAssertTrue(dsee.update([0xE1, 2, raw, 0]))
+            XCTAssertEqual(dsee.type, expected)
+            XCTAssertTrue(dsee.update([0xE3, 2, 0]))
+            XCTAssertNil(dsee.setPayload(.automatic))
+            XCTAssertTrue(dsee.update([0xE7, 2, 0, 0]))
+            XCTAssertEqual(dsee.setPayload(.automatic), [0xE8, 2, 0, 1])
+            XCTAssertEqual(dsee.setPayload(.off), [0xE8, 2, 0, 0])
+            XCTAssertEqual(dsee.queryPayloads, [[0xE2, 2], [0xE6, 2]])
+            XCTAssertFalse(dsee.acceptsSetPayload([0xE8, 1, 1]))
+            XCTAssertFalse(dsee.acceptsSetPayload([0xE8, 2, 1, 1]))
+            XCTAssertFalse(dsee.acceptsSetPayload([0xE8, 2, 0, 0xFF]))
+        }
+    }
+
+    func testLegacyDSEEUnknownCapabilitiesAndStatusRemainNonWritable() {
+        var dsee = SonyLegacyDSEE(isSupported: true)
+        XCTAssertTrue(dsee.update([0xE1, 2, 3, 0]))
+        XCTAssertTrue(dsee.update([0xE3, 2, 0]))
+        XCTAssertTrue(dsee.update([0xE7, 2, 0, 0]))
+        XCTAssertEqual(dsee.rawType, 3)
+        XCTAssertNil(dsee.type)
+        XCTAssertFalse(dsee.canSet)
+        XCTAssertTrue(dsee.update([0xE1, 2, 0, 1]))
+        XCTAssertFalse(dsee.canSet)
+        XCTAssertTrue(dsee.update([0xE1, 2, 0, 0]))
+        XCTAssertTrue(dsee.canSet)
+        XCTAssertTrue(dsee.update([0xE9, 2, 1, 1]))
+        XCTAssertFalse(dsee.canSet)
+        XCTAssertTrue(dsee.update([0xE9, 2, 0, 0xFF]))
+        XCTAssertEqual(dsee.mode, .unknown(0xFF))
+        XCTAssertFalse(dsee.canSet)
+        XCTAssertTrue(dsee.update([0xE9, 2, 0, 1]))
+        XCTAssertTrue(dsee.update([0xE5, 2, 1]))
+        XCTAssertEqual(dsee.available, false)
+        XCTAssertFalse(dsee.canSet)
+        XCTAssertTrue(dsee.update([0xE5, 2, 0xFF]))
+        XCTAssertNil(dsee.available)
+        XCTAssertFalse(dsee.canSet)
+    }
+
+    func testLegacyDSEERejectsUnadvertisedTruncatedAndV2Messages() {
+        var dsee = SonyLegacyDSEE(isSupported: false)
+        XCTAssertTrue(dsee.queryPayloads.isEmpty)
+        XCTAssertFalse(dsee.update([0xE1, 2, 0, 0]))
+        dsee = SonyLegacyDSEE(isSupported: true)
+        let malformed: [[UInt8]] = [[0xE1, 2, 0], [0xE7, 2, 1], [0xE3, 2, 0, 0], [0xE1, 1, 0], [0xE9, 1, 1]]
+        for payload in malformed {
+            XCTAssertFalse(dsee.update(payload))
+        }
+        XCTAssertNil(dsee.rawType)
+        XCTAssertNil(dsee.mode)
+        XCTAssertNil(dsee.available)
+    }
+
+    func testLegacyConnectionQualityRequiresE1AndAdvertisedTypeForBothTypedChoices() throws {
+        var unsupported = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 2, 0xE2, 0xE7]))
+        XCTAssertFalse(unsupported.connectionQuality.isSupported)
+        XCTAssertTrue(unsupported.connectionQuality.queryPayloads.isEmpty)
+        for payload: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
+            XCTAssertFalse(unsupported.update(payload))
+        }
+        XCTAssertFalse(unsupported.allows([0xE0, 1]))
+        XCTAssertFalse(unsupported.allows([0xE8, 1, 0, 1]))
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 1, 0xE1]))
+        XCTAssertEqual(controls.connectionQuality.queryPayloads, [[0xE0, 1], [0xE2, 1], [0xE6, 1]])
+        for query in controls.connectionQuality.queryPayloads { XCTAssertTrue(controls.allows(query)) }
+        XCTAssertFalse(controls.allows([0xE8, 1, 0, 1]))
+        XCTAssertTrue(controls.update([0xE7, 1, 0, 0]))
+        XCTAssertTrue(controls.update([0xE3, 1, 0]))
+        XCTAssertNil(controls.connectionQuality.supportedModes)
+        XCTAssertFalse(controls.connectionQuality.canSet)
+        XCTAssertTrue(controls.update([0xE1, 1, 0]))
+        XCTAssertEqual(controls.connectionQuality.supportedModes, [.soundQuality, .stableConnection])
+        XCTAssertEqual(controls.connectionQuality.queryPayloads, [[0xE2, 1], [0xE6, 1]])
+        let prior = controls
+        for (mode, value) in [(SonyConnectionMode.soundQuality, UInt8(0)), (.stableConnection, 1)] {
+            let payload: [UInt8] = [0xE8, 1, 0, value]
+            XCTAssertEqual(controls.connectionQuality.setPayload(mode), payload)
+            XCTAssertTrue(controls.connectionQuality.acceptsSetPayload(payload))
+            XCTAssertTrue(controls.allows(payload))
+        }
+        XCTAssertEqual(controls, prior)
+        XCTAssertNil(controls.connectionQuality.setPayload(.lowLatency))
+        XCTAssertFalse(controls.allows([0xE8, 1, 0, 2]))
+        XCTAssertFalse(controls.allows([0xE8, 5, 0, 1]))
+        XCTAssertFalse(controls.allows([0xE8, 1, 1]))
+    }
+
+    func testLegacyConnectionQualityUnknownsNeverBecomeLowLatencyOrWritableDefaults() {
+        var quality = SonyLegacyConnectionQuality(isSupported: true)
+        for payload: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
+            XCTAssertTrue(quality.update(payload))
+        }
+        XCTAssertTrue(quality.canSet)
+        for value: UInt8 in [2, 0xFF] {
+            var unknown = quality
+            XCTAssertTrue(unknown.update([0xE9, 1, 0, value]))
+            XCTAssertEqual(unknown.mode, .unknown(value))
+            XCTAssertEqual(unknown.mode?.title, "Unknown")
+            XCTAssertNotEqual(unknown.mode, .lowLatency)
+            XCTAssertFalse(unknown.hasKnownParameter)
+            XCTAssertNil(unknown.setPayload(.stableConnection))
+        }
+        for payload: [UInt8] in [[0xE1, 1, 1], [0xE1, 1, 0xFF], [0xE5, 1, 1], [0xE5, 1, 2],
+                                [0xE5, 1, 0xFF], [0xE9, 1, 1, 0], [0xE9, 1, 0xFF, 1]] {
+            var changed = quality
+            XCTAssertTrue(changed.update(payload))
+            XCTAssertFalse(changed.canSet)
+            XCTAssertNil(changed.setPayload(.soundQuality))
+            XCTAssertFalse(changed.acceptsSetPayload([0xE8, 1, 0, 0]))
+            if payload[0] == 0xE1 {
+                XCTAssertEqual(changed.settingType, payload[2])
+                XCTAssertNil(changed.supportedModes)
+                XCTAssertEqual(changed.mode, .soundQuality)
+            } else if payload[0] == 0xE5 {
+                XCTAssertEqual(changed.available, payload[2] == 1 ? false : nil)
+                XCTAssertEqual(changed.mode, .soundQuality)
+            } else {
+                XCTAssertEqual(changed.parameterSettingType, payload[2])
+                XCTAssertFalse(changed.hasKnownParameter)
+            }
+        }
+    }
+
+    func testLegacyConnectionQualityExactShapesKeepDSEEAndModernQualitySeparate() throws {
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 2, 0xE1, 0xE2]))
+        for payload: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0],
+                                [0xE1, 2, 2, 0], [0xE3, 2, 0], [0xE7, 2, 0, 0]] {
+            XCTAssertTrue(controls.update(payload))
+        }
+        let prior = controls.connectionQuality
+        var quality = prior
+        for payload: [UInt8] in [[], [0xE1, 1], [0xE1, 1, 0, 0], [0xE3, 1], [0xE3, 1, 0, 0],
+                                [0xE5, 1, 0, 0], [0xE7, 1, 0], [0xE7, 1, 0, 0, 0], [0xE9, 1, 1],
+                                [0xE9, 1, 0, 1, 0], [0xE1, 2, 2, 0], [0xE7, 2, 0, 1],
+                                [0xE1, 5, 2, 0, 1, 0], [0xE3, 5, 0, 0], [0xE7, 5, 1],
+                                [0xE9, 5, 1, 2], [0xE8, 1, 0, 1]] {
+            XCTAssertFalse(quality.update(payload))
+            XCTAssertEqual(quality, prior)
+        }
+        for payload: [UInt8] in [[0xE8, 1, 1], [0xE8, 1, 1, 1], [0xE8, 1, 0, 1, 0],
+                                [0xE8, 2, 0, 1], [0xE8, 5, 1, 0]] {
+            XCTAssertFalse(quality.acceptsSetPayload(payload))
+        }
+        let dsee = controls.dsee
+        XCTAssertTrue(controls.update([0xE9, 1, 0, 1]))
+        XCTAssertEqual(controls.connectionQuality.mode, .stableConnection)
+        XCTAssertEqual(controls.dsee, dsee)
+        quality = controls.connectionQuality
+        XCTAssertTrue(controls.update([0xE9, 2, 0, 1]))
+        XCTAssertEqual(controls.dsee.mode, .automatic)
+        XCTAssertEqual(controls.connectionQuality, quality)
+        var modern = SonyAudioFeatures(supportedFunctions: [0xE2, 0xE7])
+        XCTAssertFalse(modern.update([0xE7, 1, 0, 1]))
+        XCTAssertTrue(modern.update([0xE7, 1, 1]))
+        XCTAssertEqual(modern.dseeMode, .automatic)
+        XCTAssertNil(modern.connectionMode)
+        XCTAssertTrue(modern.update([0xE9, 5, 1, 2]))
+        XCTAssertEqual(modern.connectionMode, .stableConnection)
+        XCTAssertEqual(modern.lastConnectionModeSwitchingStream, .classicAudio)
+        XCTAssertEqual(controls.connectionQuality, quality)
+    }
+
+    func testLegacyPauseRequiresAdvertisedTypedStateAndUsesOneForOn() throws {
+        var unsupported = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 1, 0xF1]))
+        XCTAssertTrue(unsupported.wearingControl.queryPayloads.isEmpty)
+        XCTAssertNil(unsupported.wearingControl.state)
+        for payload: [UInt8] in [[0xF1, 3, 0], [0xF3, 3, 0], [0xF7, 3, 0, 1]] {
+            XCTAssertFalse(unsupported.update(payload))
+        }
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 1, 0xF3]))
+        XCTAssertEqual(controls.wearingControl.queryPayloads, [[0xF0, 3], [0xF2, 3], [0xF6, 3]])
+        XCTAssertNil(controls.wearingControl.setPayload(enabled: true))
+        XCTAssertTrue(controls.update([0xF3, 3, 0]))
+        XCTAssertTrue(controls.update([0xF7, 3, 0, 0]))
+        XCTAssertFalse(controls.wearingControl.canSet)
+        XCTAssertTrue(controls.update([0xF1, 3, 0]))
+        XCTAssertEqual(controls.wearingControl.queryPayloads, [[0xF2, 3], [0xF6, 3]])
+        XCTAssertEqual(controls.wearingControl.state?.enabled, false)
+        XCTAssertEqual(controls.wearingControl.setPayload(enabled: true), [0xF8, 3, 0, 1])
+        XCTAssertEqual(controls.wearingControl.setPayload(enabled: false), [0xF8, 3, 0, 0])
+        XCTAssertTrue(controls.allows([0xF8, 3, 0, 1]))
+        XCTAssertTrue(controls.update([0xF9, 3, 0, 1]))
+        XCTAssertEqual(controls.wearingControl.state?.enabled, true)
+        XCTAssertFalse(controls.wearingControl.acceptsSetPayload([0xF8, 1, 0]))
+        XCTAssertFalse(controls.wearingControl.acceptsSetPayload([0xF8, 3, 1, 1]))
+        XCTAssertFalse(controls.wearingControl.acceptsSetPayload([0xF8, 3, 0, 2]))
+    }
+
+    func testLegacyPauseRejectsMalformedAndUnknownTypesStatusOrCurrentValues() {
+        let valid: [[UInt8]] = [[0xF1, 3, 0], [0xF3, 3, 0], [0xF7, 3, 0, 1]]
+        for unknown: [UInt8] in [[0xF1, 3, 1], [0xF1, 3, 0xFF], [0xF5, 3, 1], [0xF5, 3, 0xFF],
+                                 [0xF9, 3, 1, 1], [0xF9, 3, 0, 0xFF]] {
+            var wearing = SonyLegacyWearingControl(isSupported: true)
+            for payload in valid { XCTAssertTrue(wearing.update(payload)) }
+            XCTAssertTrue(wearing.canSet)
+            XCTAssertTrue(wearing.update(unknown))
+            XCTAssertFalse(wearing.canSet, "\(unknown)")
+            XCTAssertNil(wearing.setPayload(enabled: false))
+            XCTAssertEqual(wearing.state?.isVisible, true)
+        }
+        var wearing = SonyLegacyWearingControl(isSupported: true)
+        for payload in valid { XCTAssertTrue(wearing.update(payload)) }
+        let previous = wearing
+        for malformed: [UInt8] in [[], [0xF1, 3], [0xF1, 3, 0, 0], [0xF3, 3, 0, 0],
+                                   [0xF7, 3, 0], [0xF7, 3, 0, 1, 0], [0xF9, 1, 0, 1],
+                                   [0xF9, 3, 2, 0x35, 0x20], [0xF8, 3, 0, 1]] {
+            XCTAssertFalse(wearing.update(malformed))
+            XCTAssertEqual(wearing, previous)
+        }
+    }
+
+    func testLegacyPowerPolicyRequiresF4AndPreservesHiddenTimerWithoutOfferingV2OptionFour() throws {
+        var unsupported = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 3, 0x24, 0x25, 0xF3]))
+        XCTAssertNil(unsupported.automaticPowerOff)
+        XCTAssertFalse(unsupported.update([0xF1, 4, 2, 0x10, 0x11]))
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: [0x07, 0, 1, 0xF4]))
+        XCTAssertEqual(controls.automaticPowerOff?.queryPayloads, [[0xF0, 4], [0xF2, 4], [0xF6, 4]])
+        XCTAssertTrue(controls.update([0xF1, 4, 4, 0x11, 0x10, 4, 0xFE]))
+        XCTAssertTrue(controls.update([0xF3, 4, 0]))
+        XCTAssertNil(controls.automaticPowerOff?.setPayload(SonyAutomaticPowerOffOption(rawValue: 0x11)))
+        XCTAssertTrue(controls.update([0xF7, 4, 1, 0x10, 3]))
+        XCTAssertEqual(controls.automaticPowerOff?.options?.map(\.rawValue), [0x11, 0x10, 4, 0xFE])
+        XCTAssertEqual(controls.automaticPowerOff?.knownOptions.map(\.rawValue), [0x11, 0x10])
+        XCTAssertEqual(controls.automaticPowerOff?.setPayload(SonyAutomaticPowerOffOption(rawValue: 0x11)), [0xF8, 4, 1, 0x11, 3])
+        XCTAssertTrue(controls.allows([0xF8, 4, 1, 0x11, 3]))
+        for option: UInt8 in [0, 3, 4, 0xFE] {
+            XCTAssertNil(controls.automaticPowerOff?.setPayload(SonyAutomaticPowerOffOption(rawValue: option)))
+        }
+        XCTAssertTrue(controls.update([0xF1, 4, 3, 3, 0, 0x11]))
+        XCTAssertEqual(controls.automaticPowerOff?.options?.map(\.rawValue), [3, 0, 0x11])
+        XCTAssertEqual(controls.automaticPowerOff?.setPayload(SonyAutomaticPowerOffOption(rawValue: 0)), [0xF8, 4, 1, 0, 0])
+        XCTAssertEqual(controls.automaticPowerOff?.setPayload(SonyAutomaticPowerOffOption(rawValue: 3)), [0xF8, 4, 1, 3, 3])
+        XCTAssertFalse(controls.allows([0x28, 4, 0x11, 3]))
+    }
+
+    func testLegacyPowerPolicyRequiresKnownTypeAndBothIDsInExactFiveByteTuple() {
+        let valid: [[UInt8]] = [[0xF1, 4, 2, 0x10, 0x11], [0xF3, 4, 0], [0xF7, 4, 1, 0x10, 3]]
+        var state = SonyAutomaticPowerOffState(inquiryType: 4, generation: .v1)
+        for payload in valid { XCTAssertTrue(state.update(payload)) }
+        let prior = state
+        for malformed: [UInt8] in [[0xF1, 4, 2, 0x10], [0xF1, 4, 2, 0x11, 0x11], [0xF3, 4, 0, 0],
+                                   [0xF7, 4, 0x10, 3], [0xF9, 4, 1, 0x10, 3, 0], [0xF9, 3, 1, 0x10, 3],
+                                   [0x27, 4, 0x11, 3], [0x29, 4, 0x11, 3]] {
+            XCTAssertFalse(state.update(malformed))
+            XCTAssertEqual(state, prior)
+        }
+        for unknown: [UInt8] in [[0xF5, 4, 1], [0xF5, 4, 0xFF], [0xF9, 4, 0, 0x10, 3],
+                                 [0xF9, 4, 0xFF, 0x10, 3], [0xF9, 4, 1, 4, 3], [0xF9, 4, 1, 0x10, 4],
+                                 [0xF9, 4, 1, 0xFE, 3], [0xF9, 4, 1, 0x10, 0xFF]] {
+            var changed = prior
+            XCTAssertTrue(changed.update(unknown))
+            XCTAssertNil(changed.setPayload(SonyAutomaticPowerOffOption(rawValue: 0x11)))
+            if unknown[0] == 0xF9 { XCTAssertFalse(changed.hasKnownParameter) }
+        }
+    }
+}
+
+@available(macOS 27.0, *)
+@MainActor
+final class SonyLegacyControllerTests: XCTestCase {
+    private let capability: [UInt8] = [0x61, 2, 2, 3, 1, 2, 0, 20, 1, 15]
+    private let ambient: [UInt8] = [0x67, 2, 1, 2, 0, 1, 0, 12]
+
+    func testLegacyBudBatteryCannotRestoreExpiredCaseCharging() throws {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        deliver([0x13, 2, 65, 1], to: controller)
+        let observedAt = try XCTUnwrap(controller.lowBatteryReadings.first { $0.part == .caseBattery }?.observedAt)
+        controller.simulateCaseBatteryExpiry(at: observedAt.addingTimeInterval(46))
+        XCTAssertNil(controller.batteries.caseBattery)
+        deliver([0x13, 1, 73, 0, 76, 0], to: controller)
+        XCTAssertEqual(controller.batteries.left?.level, 73)
+        XCTAssertEqual(controller.batteries.right?.level, 76)
+        XCTAssertNil(controller.batteries.caseBattery)
+        deliver([0x13, 2, 64, 0], to: controller)
+        XCTAssertEqual(controller.batteries.caseBattery?.level, 64)
+        XCTAssertEqual(controller.batteries.caseBattery?.chargingState, .notCharging)
+    }
+
+    func testLegacyBatteryNotificationsRetireOnlyTheirTransmittedPollAndFreshness() {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        deliver([0x13, 1, 19, 0, 18, 1], to: controller)
+        let pair = controller.lowBatteryReadings
+        XCTAssertEqual(pair.map(\.part), [.left, .right])
+        XCTAssertEqual(pair.map(\.level), [19, 18])
+        XCTAssertNil(controller.lowBatteryNotificationDeviceID)
+        let pairQueries = controller.simulatedTransmittedFrames.filter { $0.payload == [0x10, 1] }.count
+        controller.refresh()
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x10, 1] }.count, pairQueries)
+        deliver([0x11, 1, 80, 0, 90, 0], to: controller)
+        XCTAssertEqual(controller.batteries.left?.level, 19)
+        XCTAssertEqual(controller.batteries.right?.isCharging, true)
+        XCTAssertEqual(controller.lowBatteryReadings, pair)
+        deliver([0x11, 2, 24, 0], to: controller)
+        XCTAssertEqual(Array(controller.lowBatteryReadings.prefix(2)), pair)
+        XCTAssertEqual(controller.lowBatteryReadings.last?.part, .caseBattery)
+        XCTAssertEqual(controller.lowBatteryReadings.last?.level, 24)
+        controller.refresh()
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x10, 1] }.count, pairQueries + 1)
+        deliver([0x11, 1, 17, 0, 18, 0], to: controller)
+        XCTAssertEqual(controller.lowBatteryReadings.first { $0.part == .left }?.level, 17)
+        deliver([0x13, 1, 255, 0, 255, 0], to: controller)
+        XCTAssertEqual(controller.lowBatteryReadings.map(\.part), [.caseBattery])
+        controller.simulateControlLoss()
+        XCTAssertTrue(controller.lowBatteryReadings.isEmpty)
+    }
+
+    func testNegotiatedLegacyIdentityBatteryAndQueriesStaySeparateFromV2() {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.deviceModel, .wfXM4)
+        XCTAssertEqual(controller.deviceName, "WF-1000XM5")
+        XCTAssertEqual(controller.deviceInformation.color?.rawValue, 0xFF)
+        XCTAssertEqual(controller.controlProtocol, "MDR v1")
+        XCTAssertEqual(controller.availableNoiseModes, [.off, .anc, .ambient, .wind])
+        XCTAssertTrue(controller.supportedFunctions.isEmpty)
+        XCTAssertTrue(controller.supportedFunctions2.isEmpty)
+        XCTAssertFalse(controller.equalizer.isSupported)
+        XCTAssertTrue(controller.audioFeatures.queryPayloads.isEmpty)
+        XCTAssertTrue(controller.systemFeatures.queryPayloads.isEmpty)
+        XCTAssertTrue(controller.touchAssignments.queryPayloads.isEmpty)
+        XCTAssertFalse(controller.canPowerOff)
+        deliver([0x11, 1, 0, 0, 84, 1], to: controller)
+        deliver([0x11, 2, 65, 0], to: controller)
+        XCTAssertEqual(controller.batteries.left?.level, 0)
+        XCTAssertEqual(controller.batteries.right?.isCharging, true)
+        XCTAssertEqual(controller.batteries.caseBattery?.level, 65)
+        deliver([0x11, 0, 95, 0], to: controller)
+        deliver([0x23, 9, 96, 0, 96, 0], to: controller)
+        deliver([0xE7, 1, 1], to: controller)
+        XCTAssertNil(controller.batteries.single)
+        XCTAssertEqual(controller.batteries.left?.level, 0)
+        controller.refresh()
+        controller.refreshEqualizer()
+        controller.setEqualizerPreset(.bassBoost)
+        acknowledgeAll(controller)
+        let allowed: Set<[UInt8]> = [[0, 0], [4, 1], [4, 2], [4, 3], [6, 0], [0x60, 2], [0x62, 2], [0x66, 2], [0x10, 1], [0x10, 2]]
+        let commands = controller.simulatedTransmittedFrames.filter { $0.type != 0x01 }
+        let unexpected = commands.filter { $0.type != 0x0C || !allowed.contains($0.payload) }
+        let details = unexpected.map { frame in
+            "type \(String(format: "%02X", frame.type)): \(frame.payload.map { String(format: "%02X", $0) }.joined(separator: " "))"
+        }.joined(separator: "; ")
+        XCTAssertTrue(unexpected.isEmpty, "Unexpected V1 command frames: \(details)")
+        XCTAssertTrue(controller.simulatedTransmittedFrames.filter { $0.type == 0x01 }.allSatisfy { $0.payload.isEmpty })
+    }
+
+    func testCapabilityAndAvailabilityMustPrecedeOwnedCurrentStateInEitherOrder() {
+        for statusFirst in [false, true] {
+            let controller = beginController()
+            defer { controller.simulateControlLoss() }
+            deliver([0x07, 0, 1, 0x62], to: controller)
+            acknowledgeAll(controller)
+            deliver(ambient, to: controller)
+            XCTAssertNil(controller.legacyControls?.noiseState)
+            XCTAssertFalse(controller.isReady)
+            deliver(statusFirst ? [0x63, 2, 0] : capability, to: controller)
+            acknowledgeAll(controller)
+            XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0x66, 2] })
+            deliver(statusFirst ? capability : [0x63, 2, 0], to: controller)
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x66, 2] }.count, 1)
+            XCTAssertFalse(controller.isReady)
+            deliver(ambient, to: controller)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertTrue(controller.canChangeNoiseControl)
+        }
+    }
+
+    func testLegacyCapabilityResponsesRequireTransmissionAndMalformedRepliesKeepOwnership() {
+        let controller = beginController()
+        defer { controller.simulateControlLoss() }
+        controller.defersSimulatedWrites = true
+        deliver([0x07, 0, 1, 0x62], to: controller)
+        controller.completeSimulatedWrite()
+        controller.defersSimulatedWrites = false
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x60, 2])
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0x60, 2] })
+        deliver(capability, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        XCTAssertNil(controller.legacyControls?.noiseCapability)
+        XCTAssertNil(controller.legacyControls?.noiseAvailable)
+        controller.completeSimulatedWrite()
+        acknowledgeAll(controller)
+        deliver(Array(capability.dropLast()), to: controller)
+        XCTAssertNil(controller.legacyControls?.noiseCapability)
+        deliver(capability, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        acknowledgeAll(controller)
+        deliver(ambient, to: controller)
+        XCTAssertTrue(controller.isReady)
+    }
+
+    func testUnavailableAndBinaryAmbientCapabilitiesDoNotExposeUnsupportedControls() {
+        let controller = makeController(capability: [0x61, 2, 0, 2, 0, 1, 0, 2],
+                                        state: [0x67, 2, 1, 0, 1, 0, 0, 0], available: 1)
+        defer { controller.simulateControlLoss() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        XCTAssertFalse(controller.supportsVoiceFocus)
+        XCTAssertEqual(controller.ambientLevelRange, 1...1)
+        XCTAssertEqual(controller.availableNoiseModes, [.off, .anc, .ambient])
+        XCTAssertTrue(controller.noiseControlActions.isEmpty)
+        let count = controller.simulatedTransmittedFrames.count
+        controller.setNoiseControl(.off)
+        controller.setFocusOnVoice(true)
+        controller.applyPreset(mode: .ambient, ambientLevel: 12, focusOnVoice: true)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.count, count)
+        deliver([0x65, 2, 0], to: controller)
+        XCTAssertTrue(controller.canChangeNoiseControl)
+        XCTAssertFalse(controller.canApplyNoisePreset(mode: .ambient, ambientLevel: 12, focusOnVoice: false))
+        controller.setNoiseControl(.ambient)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x68, 2, 1, 0, 0, 0, 0, 1])
+    }
+
+    func testNoiseConfirmationRequiresTransmissionAndTerminalExactTuple() throws {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        controller.defersSimulatedWrites = true
+        controller.setNoiseControl(.anc)
+        let payload = try XCTUnwrap(controller.simulatedPendingFrame?.payload)
+        XCTAssertEqual(payload, [0x68, 2, 1, 2, 2, 1, 0, 0])
+        controller.defersSimulatedWrites = false
+        deliver([0x69] + payload.dropFirst(), to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.noiseControl])
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == payload })
+        controller.completeSimulatedWrite()
+        acknowledgeAll(controller)
+        var adjusting = payload
+        adjusting[0] = 0x69
+        adjusting[2] = 0x10
+        deliver(adjusting, to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.noiseControl])
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        XCTAssertTrue(controller.noiseControlActions.isEmpty)
+        var completed = adjusting
+        completed[2] = 0x11
+        completed[4] = 1
+        deliver(completed, to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.noiseControl])
+        completed[4] = 2
+        deliver(completed, to: controller)
+        XCTAssertNil(controller.pendingChanges[.noiseControl])
+        XCTAssertEqual(controller.noiseControlMode, .anc)
+        XCTAssertTrue(controller.canChangeNoiseControl)
+    }
+
+    func testAdjustingStateCannotCompleteHandshakeOrReturnSuccessfulNoOp() async throws {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        let action = try XCTUnwrap(controller.noiseControlActions.first { $0.title == NoiseControlMode.ambient.title })
+        deliver([0x69, 2, 0x10, 2, 0, 1, 0, 12], to: controller)
+        do {
+            try await controller.performNoiseControlAction(action.id)
+            XCTFail("An adjusting state must not complete an action as a no-op.")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Noise control is unavailable on the headphones.")
+        }
+        let connecting = makeController(state: [0x67, 2, 0x10, 2, 0, 1, 0, 12])
+        defer { connecting.simulateControlLoss() }
+        XCTAssertFalse(connecting.isReady)
+        deliver([0x69, 2, 0x11, 2, 0, 1, 0, 12], to: connecting)
+        XCTAssertTrue(connecting.isReady)
+        XCTAssertEqual(connecting.noiseControlMode, .ambient)
+    }
+
+    func testOldNoisePollCannotConfirmNewLegacyWrite() throws {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        controller.setNoiseControl(.anc)
+        let payload = try XCTUnwrap(controller.simulatedPendingFrame?.payload)
+        acknowledgeAll(controller)
+        let before = controller.simulatedTransmittedFrames.filter { $0.payload == [0x66, 2] }.count
+        deliver([0x67] + payload.dropFirst(), to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.noiseControl])
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x66, 2] }.count, before + 1)
+        deliver([0x67] + payload.dropFirst(), to: controller)
+        XCTAssertNil(controller.pendingChanges[.noiseControl])
+    }
+
+    func testTimedOutNativeNoiseActionRejectsStaleNoOpUntilFreshOwnedState() async throws {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        let anc = try XCTUnwrap(controller.noiseControlActions.first { $0.title == NoiseControlMode.anc.title })
+        let ambientAction = try XCTUnwrap(controller.noiseControlActions.first { $0.title == NoiseControlMode.ambient.title })
+        controller.refresh()
+        acknowledgeAll(controller)
+        let started = expectation(description: "Legacy noise action started")
+        let action = Task { @MainActor in
+            started.fulfill()
+            try await controller.performNoiseControlAction(anc.id)
+        }
+        await fulfillment(of: [started], timeout: 1)
+        acknowledgeAll(controller)
+        XCTAssertNotNil(controller.pendingChanges[.noiseControl])
+        controller.simulateSettingTimeout(.noiseControl)
+        do {
+            try await action.value
+            XCTFail("An unconfirmed legacy action must time out.")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Headphones did not confirm the change.")
+        }
+        XCTAssertNil(controller.pendingChanges[.noiseControl])
+        XCTAssertEqual(controller.noiseControlMode, .ambient)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        XCTAssertTrue(controller.noiseControlActions.isEmpty)
+        do {
+            try await controller.performNoiseControlAction(ambientAction.id)
+            XCTFail("A stale displayed mode must not complete a native action as a no-op.")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Sync noise control before making another change.")
+        }
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0x68 }.count, 1)
+        let reads = controller.simulatedTransmittedFrames.filter { $0.payload == [0x66, 2] }.count
+        let confirmedANC: [UInt8] = [0x67, 2, 1, 2, 2, 1, 0, 0]
+        deliver(confirmedANC, to: controller)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        XCTAssertEqual(controller.noiseControlMode, .ambient)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x66, 2] }.count, reads + 1)
+        deliver(confirmedANC, to: controller)
+        XCTAssertTrue(controller.canChangeNoiseControl)
+        XCTAssertEqual(controller.noiseControlMode, .anc)
+        XCTAssertNil(controller.settingErrors[.noiseControl])
+        controller.simulateNoiseReadTimeout([0x66, 2])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+    }
+
+    func testOldLegacyNoiseRepliesCannotUndoNewerStateOrAvailability() {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        deliver([0x69, 2, 1, 2, 2, 1, 0, 0], to: controller)
+        deliver([0x65, 2, 1], to: controller)
+        deliver(ambient, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        XCTAssertEqual(controller.noiseControlMode, .anc)
+        XCTAssertEqual(controller.legacyControls?.noiseState?.mode, .anc)
+        XCTAssertEqual(controller.legacyControls?.noiseAvailable, false)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        deliver([0x65, 2, 0], to: controller)
+        XCTAssertTrue(controller.canChangeNoiseControl)
+    }
+
+    func testAcknowledgedLegacyNoiseMetadataReadsHaveBoundedLifetime() async {
+        for query: [UInt8] in [[0x60, 2], [0x62, 2]] {
+            let controller = beginController()
+            defer { controller.simulateControlLoss() }
+            deliver([0x07, 0, 1, 0x62], to: controller)
+            acknowledgeAll(controller)
+            let session = controller.simulatedControlSession
+            XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == query })
+            controller.simulateNoiseReadTimeout(query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect controls to try again."))
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: capability), session: session)
+            XCTAssertNil(controller.legacyControls)
+        }
+    }
+
+    func testLegacyNoiseParameterDeadlineStartsAtTransmissionAndEndsWithItsSession() async {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        controller.simulateNoiseReadTimeout([0x66, 2])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        acknowledgeAll(controller)
+        let session = controller.simulatedControlSession
+        controller.simulateNoiseReadTimeout([0x66, 2])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertFalse(controller.isReady)
+        XCTAssertGreaterThan(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect controls to try again."))
+        controller.simulateDeviceConnection(named: "WF-1000XM4", galleryModel: .wfXM4)
+        controller.simulateNoiseReadTimeout([0x66, 2])
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: ambient), session: session)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+    }
+
+    func testLegacySessionResetDiscardsIdentityReadsAndPendingCommands() throws {
+        let controller = makeController()
+        controller.setNoiseControl(.anc)
+        let payload = try XCTUnwrap(controller.simulatedPendingFrame?.payload)
+        let session = controller.simulatedControlSession
+        controller.simulateControlLoss()
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x69] + payload.dropFirst()), session: session)
+        XCTAssertNil(controller.legacyControls)
+        XCTAssertNil(controller.protocolInformation)
+        XCTAssertNil(controller.deviceInformation.modelName)
+        XCTAssertNil(controller.noiseControlMode)
+        XCTAssertTrue(controller.pendingChanges.isEmpty)
+        XCTAssertNil(controller.batteries.left)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x01, 0, 2, 0x10]), beginConnection: true)
+        acknowledgeAll(controller)
+        deliver(capability, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        deliver(ambient, to: controller)
+        XCTAssertNil(controller.legacyControls)
+        XCTAssertFalse(controller.isReady)
+        controller.simulateControlLoss()
+    }
+
+    func testUnsupportedLegacyNoiseCapabilityStopsWithoutRetrying() {
+        let controller = beginController()
+        deliver([0x07, 0, 1, 0x62], to: controller)
+        acknowledgeAll(controller)
+        deliver([0x61, 2, 1, 20, 1, 1, 0, 20], to: controller)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.statusText.contains("not supported yet"))
+        XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
+        XCTAssertNil(controller.retrySecondsRemaining)
+        XCTAssertEqual(controller.protocolInformation?.generation, .v1)
+        let sent = controller.simulatedTransmittedFrames
+        controller.simulateAutomaticRefresh()
+        XCTAssertEqual(controller.simulatedTransmittedFrames, sent)
+        controller.simulateControlLoss()
+    }
+
+    func testLegacyDSEEWaitsForCapabilityAvailabilityAndCurrentTypedValue() {
+        let controller = makeController(supportsDSEE: true)
+        defer { controller.simulateControlLoss() }
+        XCTAssertTrue(controller.supportsDSEE)
+        XCTAssertFalse(controller.audioFeatures.supportsDSEE)
+        XCTAssertFalse(controller.canSetDSEE)
+        deliver([0xE1, 1, 0], to: controller)
+        XCTAssertNil(controller.dseeType)
+        deliver([0xE7, 2, 1], to: controller)
+        XCTAssertNil(controller.dseeMode)
+        deliver([0xE7, 2, 0, 0], to: controller)
+        XCTAssertEqual(controller.dseeMode, .off)
+        XCTAssertFalse(controller.canSetDSEE)
+        deliver([0xE3, 2, 0], to: controller)
+        XCTAssertFalse(controller.canSetDSEE)
+        deliver([0xE1, 2, 0, 0], to: controller)
+        XCTAssertEqual(controller.dseeType, .hx)
+        XCTAssertTrue(controller.canSetDSEE)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xE0 }.map(\.payload), [[0xE0, 2]])
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E })
+    }
+
+    func testLegacyDSEEConfirmationRequiresTransmissionAndMatchingSettingType() throws {
+        let controller = makeDSEEController()
+        defer { controller.simulateControlLoss() }
+        controller.defersSimulatedWrites = true
+        controller.setDSEE(.automatic)
+        let payload = try XCTUnwrap(controller.simulatedPendingFrame?.payload)
+        XCTAssertEqual(payload, [0xE8, 2, 0, 1])
+        controller.defersSimulatedWrites = false
+        deliver([0xE9, 2, 0, 1], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.dsee])
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == payload })
+        controller.completeSimulatedWrite()
+        acknowledgeAll(controller)
+        deliver([0xE9, 2, 1, 1], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.dsee])
+        XCTAssertFalse(controller.canSetDSEE)
+        deliver([0xE9, 1, 1], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.dsee])
+        deliver([0xE9, 2, 0, 1], to: controller)
+        XCTAssertNil(controller.pendingChanges[.dsee])
+        XCTAssertEqual(controller.dseeMode, .automatic)
+        XCTAssertTrue(controller.canSetDSEE)
+    }
+
+    func testOldLegacyDSEEReadCannotConfirmNewWrite() {
+        let controller = makeDSEEController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        controller.setDSEE(.automatic)
+        acknowledgeAll(controller)
+        let count = controller.simulatedTransmittedFrames.filter { $0.payload == [0xE6, 2] }.count
+        deliver([0xE7, 2, 0, 1], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.dsee])
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xE6, 2] }.count, count + 1)
+        deliver([0xE7, 2, 0, 1], to: controller)
+        XCTAssertNil(controller.pendingChanges[.dsee])
+        XCTAssertEqual(controller.dseeMode, .automatic)
+    }
+
+    func testTimedOutLegacyDSEEWriteRequiresFreshOwnedState() async {
+        let controller = makeDSEEController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        controller.setDSEE(.automatic)
+        acknowledgeAll(controller)
+        controller.simulateSettingTimeout(.dsee)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertNil(controller.pendingChanges[.dsee])
+        XCTAssertEqual(controller.dseeMode, .off)
+        XCTAssertFalse(controller.canSetDSEE)
+        controller.setDSEE(.automatic)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xE8 }.count, 1)
+        let reads = controller.simulatedTransmittedFrames.filter { $0.payload == [0xE6, 2] }.count
+        deliver([0xE7, 2, 0, 1], to: controller)
+        XCTAssertEqual(controller.dseeMode, .off)
+        XCTAssertFalse(controller.canSetDSEE)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xE6, 2] }.count, reads + 1)
+        deliver([0xE7, 2, 0, 1], to: controller)
+        XCTAssertEqual(controller.dseeMode, .automatic)
+        XCTAssertTrue(controller.canSetDSEE)
+        XCTAssertNil(controller.settingErrors[.dsee])
+        controller.simulateLegacyDSEEReadTimeout([0xE6, 2])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+    }
+
+    func testOldLegacyDSEERepliesCannotUndoNewerStateOrAvailability() {
+        let controller = makeDSEEController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        deliver([0xE9, 2, 0, 1], to: controller)
+        deliver([0xE5, 2, 1], to: controller)
+        deliver([0xE7, 2, 0, 0], to: controller)
+        deliver([0xE3, 2, 0], to: controller)
+        XCTAssertEqual(controller.dseeMode, .automatic)
+        XCTAssertEqual(controller.dseeAvailable, false)
+        XCTAssertFalse(controller.canSetDSEE)
+        deliver([0xE5, 2, 0], to: controller)
+        XCTAssertTrue(controller.canSetDSEE)
+    }
+
+    func testAcknowledgedLegacyDSEEReadsHaveBoundedLifetime() async {
+        for query: [UInt8] in [[0xE0, 2], [0xE2, 2], [0xE6, 2]] {
+            let controller = makeController(supportsDSEE: true)
+            defer { controller.simulateControlLoss() }
+            let session = controller.simulatedControlSession
+            XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == query })
+            controller.simulateLegacyDSEEReadTimeout(query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertFalse(controller.isReady)
+            XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            XCTAssertEqual(controller.linkState, .failed("DSEE settings were not received. Reconnect controls to try again."))
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 2, 0, 1]), session: session)
+            XCTAssertNil(controller.dseeMode)
+        }
+    }
+
+    func testLegacyDSEEParameterDeadlineStartsAtTransmissionAndEndsWithItsSession() async {
+        let controller = makeDSEEController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        controller.simulateLegacyDSEEReadTimeout([0xE6, 2])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        acknowledgeAll(controller)
+        controller.simulateLegacyDSEEReadTimeout([0xE6, 2])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertFalse(controller.isReady)
+        XCTAssertEqual(controller.linkState, .failed("DSEE settings were not received. Reconnect controls to try again."))
+        controller.simulateDeviceConnection(named: "WF-1000XM4", galleryModel: .wfXM4)
+        controller.simulateLegacyDSEEReadTimeout([0xE6, 2])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+    }
+
+    func testQueuedLegacyDSEEWriteRevalidatesAvailabilityBeforeTransmission() {
+        let controller = makeDSEEController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        controller.setDSEE(.automatic)
+        XCTAssertNotNil(controller.pendingChanges[.dsee])
+        deliver([0xE5, 2, 1], to: controller)
+        acknowledgeAll(controller)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xE8 })
+        XCTAssertFalse(controller.isReady)
+        XCTAssertEqual(controller.lastErrorMessage, "DSEE became unavailable before the change could be sent.")
+    }
+
+    func testUnadvertisedAndPreviousSessionDSEECannotEnableOrConfirmControls() {
+        let unsupported = makeController()
+        defer { unsupported.simulateControlLoss() }
+        deliver([0xE1, 2, 0, 0], to: unsupported)
+        deliver([0xE5, 2, 0], to: unsupported)
+        deliver([0xE9, 2, 0, 0], to: unsupported)
+        unsupported.setDSEE(.automatic)
+        XCTAssertFalse(unsupported.supportsDSEE)
+        XCTAssertNil(unsupported.dseeMode)
+        XCTAssertFalse(unsupported.simulatedTransmittedFrames.contains { $0.payload.first == 0xE8 })
+        let controller = makeDSEEController()
+        controller.setDSEE(.automatic)
+        let session = controller.simulatedControlSession
+        controller.simulateControlLoss()
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 2, 0, 1]), session: session)
+        XCTAssertFalse(controller.supportsDSEE)
+        XCTAssertNil(controller.dseeMode)
+        XCTAssertTrue(controller.pendingChanges.isEmpty)
+    }
+
+    func testLegacyEqualizerMetadataAndStateRequireTheirTransmittedQueries() {
+        let controller = beginController()
+        defer { controller.simulateControlLoss() }
+        deliver([0x07, 0, 2, 0x62, 0x51], to: controller)
+        acknowledgeAll(controller)
+        deliver(capability, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x66, 2])
+        deliver(ambient, to: controller)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0x50, 1, 1] })
+        let metadata: [UInt8] = SonyEqualizerBand.legacy.flatMap { [$0.informationType, UInt8($0.value >> 8), UInt8($0.value & 0xFF)] }
+        let replies: [[UInt8]] = [[0x51, 1, 6, 21, 1, 0xA0, 0], [0x53, 1, 0],
+                                  [0x5B, 1, 6] + metadata, [0x57, 1, 0xA0, 6, 10, 10, 10, 10, 10, 10]]
+        for reply in replies { deliver(reply, to: controller) }
+        XCTAssertNil(controller.equalizer.capabilities)
+        XCTAssertNil(controller.equalizer.status)
+        XCTAssertNil(controller.equalizer.bandInformation)
+        XCTAssertNil(controller.equalizer.presetID)
+        acknowledgeAll(controller)
+        for reply in replies { deliver(reply, to: controller) }
+        XCTAssertTrue(controller.equalizer.canEdit)
+        XCTAssertEqual(controller.equalizer.settings, .flat)
+    }
+
+    func testLegacyEqualizerUsesOwnedReadsAndConfirmsTheExactManualCurve() async throws {
+        let controller = makeController(supportsEqualizer: true)
+        defer { controller.simulateControlLoss() }
+        XCTAssertEqual(controller.equalizer.generation, .v1)
+        XCTAssertEqual(controller.equalizer.inquiryType, 1)
+        let queries: Set<[UInt8]> = [[0x50, 1, 1], [0x52, 1], [0x5A, 1], [0x56, 1]]
+        let sentQueries = Set(controller.simulatedTransmittedFrames.filter { $0.type == 0x0C }.map(\.payload))
+        XCTAssertTrue(queries.isSubset(of: sentQueries))
+        deliver([0x51, 0, 6, 21, 1, 0xA0, 0], to: controller)
+        deliver([0x51, 1, 6, 21, 1, 0xA0], to: controller)
+        XCTAssertNil(controller.equalizer.capabilities)
+        deliver([0x51, 1, 6, 21, 3, 0xA0, 0, 0x16, 0, 0, 0], to: controller)
+        deliver([0x53, 1, 0], to: controller)
+        let metadata: [UInt8] = SonyEqualizerBand.legacy.flatMap { [$0.informationType, UInt8($0.value >> 8), UInt8($0.value & 0xFF)] }
+        deliver([0x5B, 1, 6] + metadata, to: controller)
+        deliver([0x57, 1, 0x16, 6, 10, 10, 10, 10, 10, 10], to: controller)
+        XCTAssertTrue(controller.equalizer.requiresManualSelection)
+        XCTAssertFalse(controller.equalizer.canEdit)
+        controller.setEqualizerPreset(.manual)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 1, 0xA0, 0])
+        acknowledgeAll(controller)
+        deliver([0x59, 1, 0xA0, 0], to: controller)
+        XCTAssertNil(controller.pendingChanges[.equalizer])
+        XCTAssertNil(controller.equalizer.settings)
+        XCTAssertTrue(controller.equalizer.canEdit)
+        controller.setEqualizerPreset(.manual)
+        acknowledgeAll(controller)
+        deliver([0x59, 1, 0xA0, 6, 10, 10, 10, 10, 10, 10], to: controller)
+        XCTAssertNil(controller.pendingChanges[.equalizer])
+
+        var curve = try XCTUnwrap(controller.equalizer.flatSettings)
+        curve.values = [-10, -5, 0, 3, 7, 10]
+        let request: [UInt8] = [0x58, 1, 0xFF, 6, 0, 5, 10, 13, 17, 20]
+        controller.setCustomEqualizer(curve)
+        try await Task.sleep(for: .milliseconds(180))
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, request)
+        acknowledgeAll(controller)
+        for reply: [UInt8] in [
+            [0x59, 1, 0x16, 6, 0, 5, 10, 13, 17, 20],
+            [0x59, 1, 0xFF, 6, 0, 5, 10, 13, 17, 20],
+            [0x59, 1, 0xA0, 0], [0x59, 1, 0xA0, 6, 0, 5, 10, 13, 17, 19],
+        ] {
+            deliver(reply, to: controller)
+            XCTAssertNotNil(controller.pendingChanges[.equalizer], "\(reply)")
+        }
+        deliver([0x59, 1, 0xA0, 6, 0, 5, 10, 13, 17, 20], to: controller)
+        XCTAssertNil(controller.pendingChanges[.equalizer])
+        XCTAssertEqual(controller.equalizer.settings, curve)
+
+        controller.refreshEqualizer()
+        acknowledgeAll(controller)
+        curve[0] = -9
+        controller.setCustomEqualizer(curve)
+        try await Task.sleep(for: .milliseconds(180))
+        acknowledgeAll(controller)
+        let current: [UInt8] = [0x57, 1, 0xA0, 6, 1, 5, 10, 13, 17, 20]
+        deliver(current, to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.equalizer])
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x56, 1])
+        acknowledgeAll(controller)
+        deliver(current, to: controller)
+        XCTAssertNil(controller.pendingChanges[.equalizer])
+        XCTAssertEqual(controller.equalizer.settings, curve)
+
+        controller.refreshEqualizer(trackConfirmation: true)
+        acknowledgeAll(controller)
+        deliver([0x57, 1, 0xA0, 0], to: controller)
+        XCTAssertNil(controller.equalizer.settings)
+        XCTAssertNil(controller.pendingChanges[.equalizerReadback])
+        XCTAssertEqual(controller.settingErrors[.equalizerReadback], "The headphones did not report an equalizer curve.")
+        controller.refreshEqualizer(trackConfirmation: true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x56, 1])
+        acknowledgeAll(controller)
+        deliver(current, to: controller)
+        XCTAssertNotNil(controller.equalizerReadbackID)
+        XCTAssertNil(controller.settingErrors[.equalizerReadback])
+        XCTAssertEqual(controller.equalizer.settings, curve)
+
+        controller.refreshEqualizer()
+        let settersBefore = controller.simulatedTransmittedFrames.filter { $0.payload.first == 0x58 }.count
+        curve[0] = -8
+        controller.setCustomEqualizer(curve)
+        try await Task.sleep(for: .milliseconds(180))
+        XCTAssertNotNil(controller.pendingChanges[.equalizer])
+        deliver([0x55, 1, 1], to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0x58 }.count, settersBefore)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.pendingChanges.isEmpty)
+        XCTAssertNil(controller.equalizer.capabilities)
+        deliver(current, to: controller)
+        XCTAssertNil(controller.equalizer.settings)
+    }
+
+    func testLegacyPauseMetadataRequiresActualReadsAndMatchingKnownType() {
+        let controller = beginWearingController()
+        defer { controller.simulateControlLoss() }
+        let replies: [[UInt8]] = [[0xF1, 3, 0], [0xF3, 3, 0], [0xF7, 3, 0, 0]]
+        for reply in replies { deliver(reply, to: controller) }
+        XCTAssertNil(controller.legacyControls?.wearingControl.settingType)
+        XCTAssertNil(controller.legacyControls?.wearingControl.available)
+        XCTAssertNil(controller.systemFeatureState(.pauseOnRemoval)?.enabled)
+        XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+        acknowledgeAll(controller)
+        for reply in replies { deliver(reply, type: 0x0E, to: controller) }
+        for reply: [UInt8] in [[0xF1, 3], [0xF3, 3, 0, 0], [0xF7, 3, 0]] { deliver(reply, to: controller) }
+        XCTAssertNil(controller.legacyControls?.wearingControl.settingType)
+        XCTAssertNil(controller.systemFeatureState(.pauseOnRemoval)?.enabled)
+        deliver([0xF3, 3, 0], to: controller)
+        deliver([0xF7, 3, 0, 0], to: controller)
+        XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+        deliver([0xF1, 3, 0], to: controller)
+        XCTAssertTrue(controller.canSetSystemFeature(.pauseOnRemoval))
+        XCTAssertEqual(controller.systemFeatureState(.pauseOnRemoval)?.enabled, false)
+        deliver([0xF1, 3, 1], to: controller)
+        XCTAssertEqual(controller.legacyControls?.wearingControl.settingType, 0)
+        XCTAssertTrue(controller.touchAssignments.queryPayloads.isEmpty)
+    }
+
+    func testLegacyPauseWritesUseInverseBooleanAndNeedTransmittedConfirmation() {
+        let controller = makeWearingController()
+        defer { controller.simulateControlLoss() }
+        for enabled in [true, false] {
+            controller.defersSimulatedWrites = true
+            let transmitted = controller.simulatedTransmittedFrames.count
+            controller.setSystemFeature(.pauseOnRemoval, enabled: enabled)
+            let expected: [UInt8] = [0xF8, 3, 0, enabled ? 1 : 0]
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, expected)
+            XCTAssertFalse(controller.simulatedTransmittedFrames.dropFirst(transmitted).contains { $0.payload == expected })
+            controller.defersSimulatedWrites = false
+            deliver([0xF9, 3, 0, enabled ? 1 : 0], to: controller)
+            XCTAssertEqual(controller.systemFeatureState(.pauseOnRemoval)?.enabled, enabled)
+            XCTAssertEqual(controller.pendingChanges[.system(.pauseOnRemoval)], [enabled ? 0 : 1])
+            controller.completeSimulatedWrite()
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.last { $0.payload.first == 0xF8 }?.payload, expected)
+            XCTAssertNotNil(controller.pendingChanges[.system(.pauseOnRemoval)])
+            deliver([0xF7, 3, 0, enabled ? 1 : 0], to: controller)
+            deliver([0xF9, 3, 1, enabled ? 1 : 0], to: controller)
+            XCTAssertNotNil(controller.pendingChanges[.system(.pauseOnRemoval)])
+            XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+            deliver([0xF9, 3, 0, enabled ? 1 : 0], to: controller)
+            XCTAssertNil(controller.pendingChanges[.system(.pauseOnRemoval)])
+            XCTAssertEqual(controller.systemFeatureState(.pauseOnRemoval)?.enabled, enabled)
+            acknowledgeAll(controller)
+        }
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xF8 }.map(\.payload),
+                       [[0xF8, 3, 0, 1], [0xF8, 3, 0, 0]])
+    }
+
+    func testLegacyPauseOldReadsCannotRewindKnownOrUnknownNotifications() {
+        for unknown in [false, true] {
+            let controller = makeWearingController()
+            defer { controller.simulateControlLoss() }
+            controller.refresh()
+            acknowledgeAll(controller)
+            deliver([0xF9, 3, 0, unknown ? 0xFF : 1], to: controller)
+            deliver([0xF5, 3, unknown ? 0xFF : 1], to: controller)
+            deliver([0xF7, 3, 0, 0], to: controller)
+            deliver([0xF3, 3, 0], to: controller)
+            XCTAssertEqual(controller.systemFeatureState(.pauseOnRemoval)?.enabled, unknown ? nil : true)
+            XCTAssertEqual(controller.systemFeatureState(.pauseOnRemoval)?.available, unknown ? nil : false)
+            XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+        }
+    }
+
+    func testLegacyPausePrewritePollCannotConfirmOrResolveTimedOutChange() async {
+        for expires in [false, true] {
+            let controller = makeWearingController()
+            defer { controller.simulateControlLoss() }
+            controller.refresh()
+            acknowledgeAll(controller)
+            controller.setSystemFeature(.pauseOnRemoval, enabled: true)
+            acknowledgeAll(controller)
+            if expires {
+                controller.simulateSettingTimeout(.system(.pauseOnRemoval))
+                for _ in 0..<4 { await Task.yield() }
+                XCTAssertNil(controller.pendingChanges[.system(.pauseOnRemoval)])
+                XCTAssertNotNil(controller.settingErrors[.system(.pauseOnRemoval)])
+            }
+            XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+            let count = controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xF8 }.count
+            controller.setSystemFeature(.pauseOnRemoval, enabled: false)
+            controller.setSystemFeature(.pauseOnRemoval, enabled: true)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xF8 }.count, count)
+            deliver([0xF7, 3, 0, 1], to: controller)
+            XCTAssertEqual(controller.systemFeatureState(.pauseOnRemoval)?.enabled, false)
+            XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+            if !expires { XCTAssertNotNil(controller.pendingChanges[.system(.pauseOnRemoval)]) }
+            acknowledgeAll(controller)
+            deliver([0xF7, 3, 0, expires ? 0 : 1], to: controller)
+            XCTAssertEqual(controller.systemFeatureState(.pauseOnRemoval)?.enabled, !expires)
+            XCTAssertTrue(controller.canSetSystemFeature(.pauseOnRemoval))
+            XCTAssertNil(controller.pendingChanges[.system(.pauseOnRemoval)])
+            XCTAssertNil(controller.settingErrors[.system(.pauseOnRemoval)])
+        }
+    }
+
+    func testQueuedLegacyPauseRevalidatesAvailabilityAndCurrentType() {
+        for change: [UInt8] in [[0xF5, 3, 1], [0xF5, 3, 0xFF], [0xF9, 3, 1, 0], [0xF9, 3, 0, 0xFF]] {
+            let controller = makeWearingController()
+            defer { controller.simulateControlLoss() }
+            controller.refresh()
+            controller.setSystemFeature(.pauseOnRemoval, enabled: true)
+            XCTAssertNotNil(controller.pendingChanges[.system(.pauseOnRemoval)])
+            deliver(change, to: controller)
+            acknowledgeAll(controller)
+            XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xF8 })
+            XCTAssertTrue(controller.pendingChanges.isEmpty)
+            XCTAssertFalse(controller.isReady)
+        }
+    }
+
+    func testLegacyPauseUnknownReadRepliesKeepDeadlinesAndResetWithSession() async {
+        let cases: [(query: [UInt8], unknown: [UInt8])] = [
+            ([0xF0, 3], [0xF1, 3, 0xFF]),
+            ([0xF2, 3], [0xF3, 3, 0xFF]),
+            ([0xF6, 3], [0xF7, 3, 0, 0xFF]),
+        ]
+        for testCase in cases {
+            let controller = beginWearingController()
+            defer { controller.simulateControlLoss() }
+            controller.simulateSystemReadTimeout(testCase.query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            acknowledgeAll(controller)
+            XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == testCase.query })
+            deliver(testCase.unknown, to: controller)
+            let session = controller.simulatedControlSession
+            controller.simulateSystemReadTimeout(testCase.query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isDeviceConnected)
+            XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            XCTAssertNil(controller.systemFeatureState(.pauseOnRemoval))
+            controller.simulateDeviceConnection(named: "WF-1000XM4", galleryModel: .wfXM4)
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF9, 3, 0, 1]), session: session)
+            controller.simulateSystemReadTimeout(testCase.query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertNil(controller.systemFeatureState(.pauseOnRemoval))
+        }
+    }
+
+    func testLegacyPauseAndV2TouchUseTheirOwnNegotiatedInquiryThreeDialect() {
+        let unsupported = makeController()
+        defer { unsupported.simulateControlLoss() }
+        for reply: [UInt8] in [[0xF1, 3, 0], [0xF5, 3, 0], [0xF9, 3, 0, 1]] { deliver(reply, to: unsupported) }
+        unsupported.setSystemFeature(.pauseOnRemoval, enabled: true)
+        XCTAssertNil(unsupported.systemFeatureState(.pauseOnRemoval))
+        XCTAssertFalse(unsupported.simulatedTransmittedFrames.contains { $0.payload.first == 0xF8 })
+        let legacy = makeWearingController()
+        defer { legacy.simulateControlLoss() }
+        deliver([0xF9, 3, 2, 0x20, 0x35], to: legacy)
+        XCTAssertEqual(legacy.systemFeatureState(.pauseOnRemoval)?.enabled, false)
+        XCTAssertNil(legacy.touchAssignments.selectedPresets)
+        let modern = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        modern.simulateDeviceConnection(named: "WF-1000XM5")
+        defer { modern.simulateControlLoss() }
+        let selected = modern.touchAssignments.selectedPresets
+        deliver([0xF9, 3, 0, 0], to: modern)
+        XCTAssertEqual(modern.touchAssignments.selectedPresets, selected)
+        XCTAssertEqual(modern.systemFeatureState(.pauseOnRemoval)?.enabled, true)
+        deliver([0xF9, 3, 2, 0x20, 0x35], to: modern)
+        XCTAssertEqual(modern.touchAssignments.selectedPresets, [0x20, 0x35])
+        XCTAssertEqual(modern.systemFeatureState(.pauseOnRemoval)?.enabled, true)
+    }
+
+    func testLegacyPowerPolicyOwnsItsTypedReadsAndUnknownTypeKeepsTheDeadline() async {
+        let controller = beginPowerPolicyController()
+        defer { controller.simulateControlLoss() }
+        let replies: [[UInt8]] = [[0xF1, 4, 3, 0x10, 0x11, 1], [0xF3, 4, 0], [0xF7, 4, 1, 0x10, 3]]
+        for reply in replies { deliver(reply, to: controller) }
+        XCTAssertNil(controller.automaticPowerOff?.options)
+        XCTAssertNil(controller.automaticPowerOff?.current)
+        controller.simulateSystemReadTimeout([0xF6, 4])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        acknowledgeAll(controller)
+        for reply in replies { deliver(reply, type: 0x0E, to: controller) }
+        for reply: [UInt8] in [[0x21, 4, 2, 0, 0x11], [0x23, 4, 0], [0x27, 4, 0, 0], [0xF7, 4, 0x10, 3]] {
+            deliver(reply, to: controller)
+        }
+        XCTAssertNil(controller.automaticPowerOff?.options)
+        XCTAssertNil(controller.automaticPowerOff?.current)
+        for reply in replies { deliver(reply, to: controller) }
+        XCTAssertTrue(controller.canSetAutomaticPowerOff)
+        XCTAssertNil(controller.systemFeatures.automaticPowerOff)
+        controller.refresh()
+        acknowledgeAll(controller)
+        deliver([0xF7, 4, 0, 0x10, 3], to: controller)
+        XCTAssertFalse(controller.canSetAutomaticPowerOff)
+        XCTAssertEqual(controller.automaticPowerOff?.parameterType, 0)
+        let session = controller.simulatedControlSession
+        controller.simulateSystemReadTimeout([0xF6, 4])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.isDeviceConnected)
+        XCTAssertNil(controller.automaticPowerOff)
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF9, 4, 1, 0x11, 3]), session: session)
+        deliver([0xF9, 4, 1, 0x11, 3], to: controller)
+        controller.simulateSystemReadTimeout([0xF6, 4])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.automaticPowerOff?.current?.rawValue, 0x10)
+        XCTAssertEqual(controller.automaticPowerOff?.last?.rawValue, 0)
+    }
+
+    func testLegacyPowerPolicyWritesAndConfirmationKeepTypeAndRememberedTimer() {
+        let controller = makePowerPolicyController()
+        defer { controller.simulateControlLoss() }
+        controller.defersSimulatedWrites = true
+        controller.setAutomaticPowerOff(SonyAutomaticPowerOffOption(rawValue: 0x11))
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF8, 4, 1, 0x11, 3])
+        controller.defersSimulatedWrites = false
+        deliver([0xF9, 4, 1, 0x11, 3], to: controller)
+        XCTAssertEqual(controller.automaticPowerOff?.current?.rawValue, 0x11)
+        XCTAssertNotNil(controller.pendingChanges[.automaticPowerOff])
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xF8 })
+        controller.completeSimulatedWrite()
+        acknowledgeAll(controller)
+        XCTAssertNotNil(controller.pendingChanges[.automaticPowerOff])
+        for reply: [UInt8] in [[0xF7, 4, 1, 0x11, 3], [0x29, 4, 0x11, 3], [0xF9, 4, 0, 0x11, 3], [0xF9, 4, 1, 0x11, 1]] {
+            deliver(reply, to: controller)
+            XCTAssertNotNil(controller.pendingChanges[.automaticPowerOff])
+        }
+        deliver([0xF9, 4, 1, 0x11, 3], to: controller)
+        XCTAssertNil(controller.pendingChanges[.automaticPowerOff])
+        controller.setAutomaticPowerOff(SonyAutomaticPowerOffOption(rawValue: 1))
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xF8 }.map(\.payload),
+                       [[0xF8, 4, 1, 0x11, 3], [0xF8, 4, 1, 1, 1]])
+        deliver([0xF9, 4, 1, 1, 3], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.automaticPowerOff])
+        deliver([0xF9, 4, 1, 1, 1], to: controller)
+        XCTAssertNil(controller.pendingChanges[.automaticPowerOff])
+    }
+
+    func testLegacyPowerPolicyOldTupleCannotConfirmOrResolveUncertainty() async {
+        for expires in [false, true] {
+            let controller = makePowerPolicyController()
+            defer { controller.simulateControlLoss() }
+            controller.refresh()
+            acknowledgeAll(controller)
+            deliver([0xF5, 4, 0], to: controller)
+            deliver([0xF9, 4, 1, 0x10, 3], to: controller)
+            deliver([0xF3, 4, 1], to: controller)
+            XCTAssertEqual(controller.automaticPowerOff?.available, true)
+            controller.setAutomaticPowerOff(SonyAutomaticPowerOffOption(rawValue: 0x11))
+            acknowledgeAll(controller)
+            if expires {
+                controller.simulateSettingTimeout(.automaticPowerOff)
+                for _ in 0..<4 { await Task.yield() }
+                XCTAssertNil(controller.pendingChanges[.automaticPowerOff])
+                XCTAssertNotNil(controller.settingErrors[.automaticPowerOff])
+            } else {
+                XCTAssertNotNil(controller.pendingChanges[.automaticPowerOff])
+            }
+            XCTAssertFalse(controller.canSetAutomaticPowerOff)
+            let writes = controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xF8 }.map(\.payload)
+            controller.setAutomaticPowerOff(SonyAutomaticPowerOffOption(rawValue: 0x10))
+            controller.setAutomaticPowerOff(SonyAutomaticPowerOffOption(rawValue: 0x11))
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xF8 }.map(\.payload), writes)
+            deliver([0xF7, 4, 1, 0x11, 3], to: controller)
+            XCTAssertEqual(controller.automaticPowerOff?.current?.rawValue, 0x10)
+            XCTAssertFalse(controller.canSetAutomaticPowerOff)
+            acknowledgeAll(controller)
+            deliver([0xF7, 4, 1, expires ? 0x10 : 0x11, 3], to: controller)
+            XCTAssertNil(controller.pendingChanges[.automaticPowerOff])
+            XCTAssertNil(controller.settingErrors[.automaticPowerOff])
+            XCTAssertTrue(controller.canSetAutomaticPowerOff)
+            XCTAssertEqual(controller.automaticPowerOff?.current?.rawValue, expires ? 0x10 : 0x11)
+        }
+    }
+
+    func testLegacyPowerPolicyQueuedChoiceCannotOverwriteNewRememberedTimer() {
+        for changed: [UInt8] in [[0xF9, 4, 1, 0x10, 2], [0xF5, 4, 1]] {
+            let controller = makePowerPolicyController()
+            defer { controller.simulateControlLoss() }
+            controller.refresh()
+            controller.setAutomaticPowerOff(SonyAutomaticPowerOffOption(rawValue: 0x11))
+            XCTAssertNotNil(controller.pendingChanges[.automaticPowerOff])
+            XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xF8 })
+            deliver(changed, to: controller)
+            acknowledgeAll(controller)
+            XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xF8 })
+            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.pendingChanges.isEmpty)
+        }
+    }
+
+    private func beginController() -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x01, 0, 2, 0x10]), beginConnection: true)
+        acknowledgeAll(controller)
+        let name = Array("WF-1000XM4".utf8)
+        deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
+        deliver([0x05, 3, 0x30, 0xFF], to: controller)
+        return controller
+    }
+
+    private func makeController(capability: [UInt8]? = nil, state: [UInt8]? = nil, available: UInt8 = 0,
+                                supportsDSEE: Bool = false, supportsEqualizer: Bool = false) -> SonyHeadphonesController {
+        let controller = beginController()
+        let functions: [UInt8] = [0x15, 0x18, 0x62, 0x23] + (supportsDSEE ? [0xE2] : []) + (supportsEqualizer ? [0x51] : [])
+        deliver([0x07, 0, UInt8(functions.count)] + functions, to: controller)
+        acknowledgeAll(controller)
+        deliver(capability ?? self.capability, to: controller)
+        deliver([0x63, 2, available], to: controller)
+        acknowledgeAll(controller)
+        deliver(state ?? ambient, to: controller)
+        acknowledgeAll(controller)
+        return controller
+    }
+
+    private func makeDSEEController() -> SonyHeadphonesController {
+        let controller = makeController(supportsDSEE: true)
+        deliver([0xE1, 2, 0, 0], to: controller)
+        deliver([0xE3, 2, 0], to: controller)
+        deliver([0xE7, 2, 0, 0], to: controller)
+        return controller
+    }
+
+    private func beginWearingController() -> SonyHeadphonesController {
+        let controller = beginController()
+        deliver([0x07, 0, 2, 0x62, 0xF3], to: controller)
+        acknowledgeAll(controller)
+        deliver(capability, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        deliver(ambient, to: controller)
+        return controller
+    }
+
+    private func makeWearingController() -> SonyHeadphonesController {
+        let controller = beginWearingController()
+        acknowledgeAll(controller)
+        for reply: [UInt8] in [[0xF1, 3, 0], [0xF3, 3, 0], [0xF7, 3, 0, 0]] { deliver(reply, to: controller) }
+        XCTAssertTrue(controller.canSetSystemFeature(.pauseOnRemoval))
+        return controller
+    }
+
+    private func beginPowerPolicyController() -> SonyHeadphonesController {
+        let controller = beginController()
+        deliver([0x07, 0, 2, 0x62, 0xF4], to: controller)
+        acknowledgeAll(controller)
+        deliver(capability, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        deliver(ambient, to: controller)
+        return controller
+    }
+
+    private func makePowerPolicyController() -> SonyHeadphonesController {
+        let controller = beginPowerPolicyController()
+        acknowledgeAll(controller)
+        for reply: [UInt8] in [[0xF1, 4, 3, 0x10, 0x11, 1], [0xF3, 4, 0], [0xF7, 4, 1, 0x10, 3]] {
+            deliver(reply, to: controller)
+        }
+        XCTAssertTrue(controller.canSetAutomaticPowerOff)
+        return controller
+    }
+
+    private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, to controller: SonyHeadphonesController) {
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload))
+    }
+
+    private func acknowledgeAll(_ controller: SonyHeadphonesController) {
+        for _ in 0..<100 {
+            guard let frame = controller.simulatedPendingFrame else { return }
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        }
+        XCTFail("The simulated command queue did not drain.")
+    }
+}

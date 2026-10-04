@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+ldac_driver=/Library/Audio/Plug-Ins/HAL/AcoupletLDACOutput.driver
+ldac_legacy_driver=/Library/Audio/Plug-Ins/HAL/XM5LDACOutput.driver
+ldac_team='@ACOUPLET_LDAC_SIGNING_TEAM_ID@'
+if [ ! -d "$ldac_driver" ] ||
+   [ "$(/usr/libexec/PlistBuddy -c 'Print :AcoupletLDACDriverRevision' "$ldac_driver/Contents/Info.plist" 2>/dev/null || true)" != 2 ]; then
+    printf '%s\n' 'The installed driver does not match the required Acouplet LDAC output revision. The previous driver was preserved.' >&2
+    exit 1
+fi
+for ldac_driver in "$ldac_driver" "$ldac_legacy_driver"; do
+    case "$ldac_driver" in
+        */AcoupletLDACOutput.driver) ldac_identifier=dev.baglayan.Acouplet.LDACOutput; ldac_executable=AcoupletVirtualOutput ;;
+        */XM5LDACOutput.driver) ldac_identifier=local.xm5control.ldac-output-driver; ldac_executable=XM5VirtualOutput ;;
+    esac
+    if [ -e "$ldac_driver" ] || [ -L "$ldac_driver" ]; then
+        if [ -L "$ldac_driver" ] || [ ! -d "$ldac_driver" ] || [ -L "$ldac_driver/Contents" ] ||
+           [ -L "$ldac_driver/Contents/Info.plist" ] || [ -L "$ldac_driver/Contents/MacOS" ] ||
+           [ -L "$ldac_driver/Contents/MacOS/$ldac_executable" ] ||
+           [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ldac_driver/Contents/Info.plist" 2>/dev/null || true)" != "$ldac_identifier" ] ||
+           [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$ldac_driver/Contents/Info.plist" 2>/dev/null || true)" != "$ldac_executable" ]; then
+            printf '%s\n' 'An unrelated or invalid driver occupies an LDAC output path. The previous driver was preserved.' >&2
+            exit 1
+        fi
+        /usr/bin/codesign --verify --deep --strict --all-architectures \
+            --test-requirement="=anchor apple generic and certificate leaf[subject.OU] = \"$ldac_team\"" "$ldac_driver"
+    fi
+done
+if [ -d "$ldac_legacy_driver" ]; then
+    /bin/rm -rf "$ldac_legacy_driver"
+fi
+if /usr/sbin/pkgutil --pkg-info local.xm5control.ldac-output-driver >/dev/null 2>&1; then
+    /usr/sbin/pkgutil --forget local.xm5control.ldac-output-driver >/dev/null
+fi
+printf '%s\n' 'Acouplet LDAC output installed. Restart your Mac to activate this driver.'
+printf '%s\n' 'The installer did not restart Core Audio or reboot your Mac.'

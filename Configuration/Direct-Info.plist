@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>AcoupletDistribution</key>
+    <string>$(ACOUPLET_DISTRIBUTION)</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Play Mac audio through your headphones using LDAC. Ordinary playback is temporarily muted while LDAC is on and resumes when it stops. Audio is streamed locally and is not recorded to a file.</string>
+    <key>SUFeedURL</key>
+    <string>https://baglayan.dev/updates/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>$(ACOUPLET_SPARKLE_PUBLIC_KEY)</string>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUSignedFeedFailureExpirationInterval</key>
+    <integer>0</integer>
+    <key>SUEnableInstallerLauncherService</key>
+    <false/>
+    <key>SUEnableDownloaderService</key>
+    <false/>
+    <key>SUEnableSystemProfiling</key>
+    <false/>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+</dict>
+</plist>

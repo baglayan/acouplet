@@ -1,0 +1,540 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1000000000000000000000C6 /* SonyLegacyPlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C6 /* SonyLegacyPlaybackTests.swift */; };
+		1000000000000000000000C5 /* SonyPlaybackConfirmationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C5; };
+		1000000000000000000000B0 /* AppUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B0 /* AppUpdater.swift */; };
+		1000000000000000000000A8 /* BannerLifetime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A8 /* BannerLifetime.swift */; };
+		1000000000000000000000A6 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A6 /* LICENSE */; };
+		1000000000000000000000A7 /* THIRD-PARTY-NOTICES.md in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A7 /* THIRD-PARTY-NOTICES.md */; };
+		100000000000000000000001 /* AppMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* AppMain.swift */; };
+		100000000000000000000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* AppDelegate.swift */; };
+		100000000000000000000003 /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* AppEnvironment.swift */; };
+		100000000000000000000004 /* SettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* SettingsStore.swift */; };
+		100000000000000000000007 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* MenuBarView.swift */; };
+		100000000000000000000008 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000008 /* SettingsView.swift */; };
+		100000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* Assets.xcassets */; };
+		10000000000000000000000A /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000A /* Localizable.xcstrings */; };
+		10000000000000000000000B /* SettingsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* SettingsStoreTests.swift */; };
+		10000000000000000000000C /* AppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* AppUITests.swift */; };
+		10000000000000000000000D /* SonyProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* SonyProtocol.swift */; };
+		10000000000000000000000E /* SonyHeadphonesController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* SonyHeadphonesController.swift */; };
+		10000000000000000000000F /* SonyProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* SonyProtocolTests.swift */; };
+		100000000000000000000010 /* GlobalHotKeyController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* GlobalHotKeyController.swift */; };
+		100000000000000000000011 /* EqualizerEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* EqualizerEditorView.swift */; };
+		100000000000000000000012 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* AppIcon.icon */; };
+		100000000000000000000013 /* SonyAudioFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* SonyAudioFeatures.swift */; };
+		100000000000000000000014 /* SonyAudioFeaturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* SonyAudioFeaturesTests.swift */; };
+		100000000000000000000015 /* SonySystemFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000019 /* SonySystemFeatures.swift */; };
+		100000000000000000000016 /* SonySystemFeaturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001A /* SonySystemFeaturesTests.swift */; };
+		100000000000000000000017 /* SonyCommandQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001B /* SonyCommandQueue.swift */; };
+		100000000000000000000018 /* SonyCommandQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001C /* SonyCommandQueueTests.swift */; };
+		100000000000000000000019 /* SonyBLETransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001D /* SonyBLETransport.swift */; };
+		10000000000000000000001F /* SonyBLEIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000023 /* SonyBLEIdentity.swift */; };
+		10000000000000000000001A /* SonyBLETransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001E /* SonyBLETransportTests.swift */; };
+		100000000000000000000020 /* SonyBLEIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000024 /* SonyBLEIdentityTests.swift */; };
+		10000000000000000000001B /* SonyConnectionAlerts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001F /* SonyConnectionAlerts.swift */; };
+		10000000000000000000001D /* SonyConnectionTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000021 /* SonyConnectionTransition.swift */; };
+		10000000000000000000001C /* SonyConnectionAlertsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000020 /* SonyConnectionAlertsTests.swift */; };
+		10000000000000000000001E /* SonyConnectionTransitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000022 /* SonyConnectionTransitionTests.swift */; };
+		100000000000000000000021 /* SonyConnectionControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000025 /* SonyConnectionControllerTests.swift */; };
+		100000000000000000000022 /* SonyNativeBatterySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000026 /* SonyNativeBatterySnapshot.swift */; };
+		100000000000000000000023 /* SonyNativeBatterySnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000027 /* SonyNativeBatterySnapshotTests.swift */; };
+		100000000000000000000024 /* SonyTouchAssignments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000028 /* SonyTouchAssignments.swift */; };
+		100000000000000000000025 /* SonyTouchAssignmentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000029 /* SonyTouchAssignmentsTests.swift */; };
+		100000000000000000000026 /* SonyVoiceGuidance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000002A /* SonyVoiceGuidance.swift */; };
+		100000000000000000000027 /* SonyVoiceGuidanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000002B /* SonyVoiceGuidanceTests.swift */; };
+		100000000000000000000028 /* PanelScreenHeight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000002C /* PanelScreenHeight.swift */; };
+		100000000000000000000029 /* MacAudioRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000002D /* MacAudioRoute.swift */; };
+		10000000000000000000002A /* MacAudioRouteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000002E /* MacAudioRouteTests.swift */; };
+		10000000000000000000002B /* SonyMultipoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000002F /* SonyMultipoint.swift */; };
+		10000000000000000000002C /* SonyMultipointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000030 /* SonyMultipointTests.swift */; };
+		10000000000000000000002D /* SonySourceTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000031 /* SonySourceTransition.swift */; };
+		10000000000000000000002E /* SonySourceTransitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000032 /* SonySourceTransitionTests.swift */; };
+		10000000000000000000002F /* SonySourceControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000033 /* SonySourceControllerTests.swift */; };
+		100000000000000000000030 /* SonyMultipointTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000034 /* SonyMultipointTransition.swift */; };
+		100000000000000000000031 /* SonyMultipointTransitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000035 /* SonyMultipointTransitionTests.swift */; };
+		100000000000000000000032 /* SonyMultipointControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000036 /* SonyMultipointControllerTests.swift */; };
+		100000000000000000000033 /* HeadphoneIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000037 /* HeadphoneIntents.swift */; };
+		100000000000000000000034 /* HeadphoneIntentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000038 /* HeadphoneIntentsTests.swift */; };
+		100000000000000000000035 /* HeadphoneControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000039 /* HeadphoneControls.swift */; };
+		100000000000000000000036 /* EqualizerPresetConfirmationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000003D /* EqualizerPresetConfirmationTests.swift */; };
+		100000000000000000000037 /* HeadphoneIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000037 /* HeadphoneIntents.swift */; };
+		100000000000000000000038 /* Acouplet Controls.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 20000000000000000000003A /* Acouplet Controls.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		100000000000000000000039 /* SonyPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000003E /* SonyPlayback.swift */; };
+		10000000000000000000003A /* SonyPlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000003F /* SonyPlaybackTests.swift */; };
+		10000000000000000000003B /* SonySoundPressure.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000040 /* SonySoundPressure.swift */; };
+		10000000000000000000003C /* SonySoundPressureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000041 /* SonySoundPressureTests.swift */; };
+		10000000000000000000003D /* SonyDeviceActionTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000042 /* SonyDeviceActionTransition.swift */; };
+		10000000000000000000003E /* SonyDeviceActionTransitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000043 /* SonyDeviceActionTransitionTests.swift */; };
+		10000000000000000000003F /* SonyPowerOffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000044 /* SonyPowerOffTests.swift */; };
+		100000000000000000000040 /* SonyEarTipFit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000045 /* SonyEarTipFit.swift */; };
+		100000000000000000000041 /* SonyEarTipFitTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000046 /* SonyEarTipFitTransition.swift */; };
+		100000000000000000000042 /* SonyEarTipFitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000047 /* SonyEarTipFitTests.swift */; };
+		100000000000000000000043 /* SonyEarTipFitTransitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000048 /* SonyEarTipFitTransitionTests.swift */; };
+		100000000000000000000044 /* SonyEarTipFitControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000049 /* SonyEarTipFitControllerTests.swift */; };
+		100000000000000000000045 /* SonyHeadGesturePractice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000004A /* SonyHeadGesturePractice.swift */; };
+		100000000000000000000046 /* SonyHeadGesturePracticeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000004B /* SonyHeadGesturePracticeTests.swift */; };
+		100000000000000000000047 /* SonyHeadGesturePracticeControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000004C /* SonyHeadGesturePracticeControllerTests.swift */; };
+		100000000000000000000048 /* SonyEqualizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000004D /* SonyEqualizer.swift */; };
+		10000000000000000000004A /* SonyPowerFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000004F /* SonyPowerFeatures.swift */; };
+		10000000000000000000004C /* SonyLegacyControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000051 /* SonyLegacyControls.swift */; };
+		100000000000000000000049 /* SonyEqualizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000004E /* SonyEqualizerTests.swift */; };
+		10000000000000000000004B /* SonyPowerFeaturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000050 /* SonyPowerFeaturesTests.swift */; };
+		10000000000000000000004D /* SonyLegacyControlsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000052 /* SonyLegacyControlsTests.swift */; };
+		10000000000000000000004E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* Assets.xcassets */; };
+		10000000000000000000004F /* SystemPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000053 /* SystemPlayback.swift */; };
+		100000000000000000000050 /* SystemPlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000054 /* SystemPlaybackTests.swift */; };
+		100000000000000000000051 /* SonyDeviceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000055 /* SonyDeviceCoordinator.swift */; };
+		100000000000000000000052 /* SonyDeviceCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000056 /* SonyDeviceCoordinatorTests.swift */; };
+		100000000000000000000053 /* SonyDeviceCoordinatorLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000057 /* SonyDeviceCoordinatorLifecycle.swift */; };
+		100000000000000000000054 /* SonyDeviceCoordinatorLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000058 /* SonyDeviceCoordinatorLifecycleTests.swift */; };
+		100000000000000000000056 /* SonyLegacyEqualizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000005A /* SonyLegacyEqualizerTests.swift */; };
+		100000000000000000000057 /* SonyNoiseControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000005B /* SonyNoiseControl.swift */; };
+		100000000000000000000058 /* SonyNoiseControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000005C /* SonyNoiseControlTests.swift */; };
+		100000000000000000000059 /* SonyLegacyOptimizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000005D /* SonyLegacyOptimizer.swift */; };
+		10000000000000000000005A /* SonyLegacyOptimizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000005E /* SonyLegacyOptimizerTests.swift */; };
+		10000000000000000000005B /* SonyLegacyOptimizerTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000005F /* SonyLegacyOptimizerTransition.swift */; };
+		10000000000000000000005C /* SonyLegacyOptimizerTransitionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000060 /* SonyLegacyOptimizerTransitionTests.swift */; };
+		10000000000000000000005D /* SonyLegacyOptimizerControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000061 /* SonyLegacyOptimizerControllerTests.swift */; };
+		10000000000000000000005E /* SonyLegacySoundEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000062 /* SonyLegacySoundEffect.swift */; };
+		10000000000000000000005F /* SonyLegacySoundEffectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000063 /* SonyLegacySoundEffectTests.swift */; };
+		100000000000000000000060 /* SonyLegacySoundEffectControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000064 /* SonyLegacySoundEffectControllerTests.swift */; };
+		100000000000000000000061 /* SonyNativeBatteryPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000065; };
+		100000000000000000000062 /* SonyNativeBatteryPublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000066; };
+		100000000000000000000063 /* SonyNativeBatteryBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000067; };
+		100000000000000000000064 /* Acouplet Battery Publisher in Embed Helpers */ = {isa = PBXBuildFile; fileRef = 200000000000000000000069; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy); }; };
+		100000000000000000000065 /* SonyPreferencePaneTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000006B; };
+		100000000000000000000066 /* SonyPreferencePaneServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000006C; };
+		100000000000000000000067 /* SonyPreferencePaneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000006D; };
+		100000000000000000000068 /* SonyLowBatteryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000006E; };
+		100000000000000000000069 /* SonyLowBatteryPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000006F; };
+		10000000000000000000006A /* SonyFirmwareUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000070; };
+		10000000000000000000006B /* SonyFirmwareUpdateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000071; };
+		10000000000000000000006C /* SonyNotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000072; };
+		10000000000000000000006D /* SonyNotificationServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000073; };
+		10000000000000000000006E /* SonyFirmwareUpdateControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000074; };
+		1000000000000000000000A1 /* SonyNativeAppearanceRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A1; };
+		1000000000000000000000A2 /* SonyNativeAppearanceRefreshTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A2; };
+		1000000000000000000000A3 /* SonyNoiseModeHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3; };
+		1000000000000000000000A4 /* SonyNoiseModeHUDTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A4; };
+		1000000000000000000000A5 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A5; };
+		1000000000000000000000C0 /* LDACController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C0; };
+		1000000000000000000000C1 /* LDACNativeSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C1; };
+		1000000000000000000000C2 /* LDACNativeOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C2; };
+		1000000000000000000000C3 /* LDACDriverInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C3; };
+		1000000000000000000000C4 /* LDACDriverInstallerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C4; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		900000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 600000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 500000000000000000000001;
+			remoteInfo = "Acouplet";
+		};
+		900000000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 600000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 500000000000000000000001;
+			remoteInfo = "Acouplet";
+		};
+		900000000000000000000003 = {isa = PBXContainerItemProxy; containerPortal = 600000000000000000000001; proxyType = 1; remoteGlobalIDString = 500000000000000000000004; remoteInfo = "Acouplet Controls"; };
+		900000000000000000000004 = {isa = PBXContainerItemProxy; containerPortal = 600000000000000000000001; proxyType = 1; remoteGlobalIDString = 500000000000000000000005; remoteInfo = "Acouplet Battery Publisher"; };
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		400000000000000000000009 /* Embed App Extensions */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 13; files = (100000000000000000000038); name = "Embed App Extensions"; runOnlyForDeploymentPostprocessing = 0; };
+		40000000000000000000000B /* Embed Helpers */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = "Contents/Helpers"; dstSubfolderSpec = 1; files = (100000000000000000000064); name = "Embed Helpers"; runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		2000000000000000000000C6 /* SonyLegacyPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacyPlaybackTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000C5 /* SonyPlaybackConfirmationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyPlaybackConfirmationTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000B0 /* AppUpdater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdater.swift; sourceTree = "<group>"; };
+		2000000000000000000000B1 /* Direct.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Direct.xcconfig; sourceTree = "<group>"; };
+		2000000000000000000000B2 /* Direct-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Direct-Info.plist"; sourceTree = "<group>"; };
+		2000000000000000000000B3 /* Direct.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Direct.entitlements; sourceTree = "<group>"; };
+		2000000000000000000000A8 /* BannerLifetime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHUD/BannerLifetime.swift; sourceTree = "<group>"; };
+		2000000000000000000000A6 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = "<group>"; };
+		2000000000000000000000A7 /* THIRD-PARTY-NOTICES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "THIRD-PARTY-NOTICES.md"; sourceTree = "<group>"; };
+		200000000000000000000001 /* AppMain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMain.swift; sourceTree = "<group>"; };
+		200000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		200000000000000000000003 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
+		200000000000000000000004 /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
+		200000000000000000000007 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
+		200000000000000000000008 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		200000000000000000000009 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = "$(ACOUPLET_ASSET_CATALOG_PATH)"; sourceTree = SOURCE_ROOT; };
+		20000000000000000000000A /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		20000000000000000000000B /* App.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = App.entitlements; sourceTree = "<group>"; };
+		20000000000000000000000C /* SettingsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStoreTests.swift; sourceTree = "<group>"; };
+		20000000000000000000000D /* AppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUITests.swift; sourceTree = "<group>"; };
+		20000000000000000000000E /* Acouplet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Acouplet.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		20000000000000000000000F /* AcoupletTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "AcoupletTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000010 /* AcoupletUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "AcoupletUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000011 /* SonyProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyProtocol.swift; sourceTree = "<group>"; };
+		200000000000000000000012 /* SonyHeadphonesController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyHeadphonesController.swift; sourceTree = "<group>"; };
+		200000000000000000000013 /* SonyProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyProtocolTests.swift; sourceTree = "<group>"; };
+		200000000000000000000014 /* GlobalHotKeyController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHotKeyController.swift; sourceTree = "<group>"; };
+		200000000000000000000015 /* EqualizerEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EqualizerEditorView.swift; sourceTree = "<group>"; };
+		200000000000000000000016 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		200000000000000000000017 /* SonyAudioFeatures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyAudioFeatures.swift; sourceTree = "<group>"; };
+		200000000000000000000018 /* SonyAudioFeaturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyAudioFeaturesTests.swift; sourceTree = "<group>"; };
+		200000000000000000000019 /* SonySystemFeatures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonySystemFeatures.swift; sourceTree = "<group>"; };
+		20000000000000000000001A /* SonySystemFeaturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonySystemFeaturesTests.swift; sourceTree = "<group>"; };
+		20000000000000000000001B /* SonyCommandQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyCommandQueue.swift; sourceTree = "<group>"; };
+		20000000000000000000001C /* SonyCommandQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyCommandQueueTests.swift; sourceTree = "<group>"; };
+		20000000000000000000001D /* SonyBLETransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyBLETransport.swift; sourceTree = "<group>"; };
+		200000000000000000000023 /* SonyBLEIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyBLEIdentity.swift; sourceTree = "<group>"; };
+		20000000000000000000001E /* SonyBLETransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyBLETransportTests.swift; sourceTree = "<group>"; };
+		200000000000000000000024 /* SonyBLEIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyBLEIdentityTests.swift; sourceTree = "<group>"; };
+		20000000000000000000001F /* SonyConnectionAlerts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyConnectionAlerts.swift; sourceTree = "<group>"; };
+		200000000000000000000021 /* SonyConnectionTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyConnectionTransition.swift; sourceTree = "<group>"; };
+		200000000000000000000020 /* SonyConnectionAlertsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyConnectionAlertsTests.swift; sourceTree = "<group>"; };
+		200000000000000000000022 /* SonyConnectionTransitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyConnectionTransitionTests.swift; sourceTree = "<group>"; };
+		200000000000000000000025 /* SonyConnectionControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyConnectionControllerTests.swift; sourceTree = "<group>"; };
+		200000000000000000000026 /* SonyNativeBatterySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNativeBatterySnapshot.swift; sourceTree = "<group>"; };
+		200000000000000000000027 /* SonyNativeBatterySnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNativeBatterySnapshotTests.swift; sourceTree = "<group>"; };
+		200000000000000000000028 /* SonyTouchAssignments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyTouchAssignments.swift; sourceTree = "<group>"; };
+		200000000000000000000029 /* SonyTouchAssignmentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyTouchAssignmentsTests.swift; sourceTree = "<group>"; };
+		20000000000000000000002A /* SonyVoiceGuidance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyVoiceGuidance.swift; sourceTree = "<group>"; };
+		20000000000000000000002B /* SonyVoiceGuidanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyVoiceGuidanceTests.swift; sourceTree = "<group>"; };
+		20000000000000000000002C /* PanelScreenHeight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelScreenHeight.swift; sourceTree = "<group>"; };
+		20000000000000000000002D /* MacAudioRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacAudioRoute.swift; sourceTree = "<group>"; };
+		20000000000000000000002E /* MacAudioRouteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacAudioRouteTests.swift; sourceTree = "<group>"; };
+		20000000000000000000002F /* SonyMultipoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyMultipoint.swift; sourceTree = "<group>"; };
+		200000000000000000000030 /* SonyMultipointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyMultipointTests.swift; sourceTree = "<group>"; };
+		200000000000000000000031 /* SonySourceTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonySourceTransition.swift; sourceTree = "<group>"; };
+		200000000000000000000032 /* SonySourceTransitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonySourceTransitionTests.swift; sourceTree = "<group>"; };
+		200000000000000000000033 /* SonySourceControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonySourceControllerTests.swift; sourceTree = "<group>"; };
+		200000000000000000000034 /* SonyMultipointTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyMultipointTransition.swift; sourceTree = "<group>"; };
+		200000000000000000000035 /* SonyMultipointTransitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyMultipointTransitionTests.swift; sourceTree = "<group>"; };
+		200000000000000000000036 /* SonyMultipointControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyMultipointControllerTests.swift; sourceTree = "<group>"; };
+		200000000000000000000037 /* HeadphoneIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeadphoneIntents.swift; sourceTree = "<group>"; };
+		200000000000000000000038 /* HeadphoneIntentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeadphoneIntentsTests.swift; sourceTree = "<group>"; };
+		200000000000000000000039 /* HeadphoneControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeadphoneControls.swift; sourceTree = "<group>"; };
+		20000000000000000000003D /* EqualizerPresetConfirmationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EqualizerPresetConfirmationTests.swift; sourceTree = "<group>"; };
+		20000000000000000000003B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		20000000000000000000003C /* Controls.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Controls.entitlements; sourceTree = "<group>"; };
+		20000000000000000000003A /* Acouplet Controls.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Acouplet Controls.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		20000000000000000000003E /* SonyPlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyPlayback.swift; sourceTree = "<group>"; };
+		20000000000000000000003F /* SonyPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyPlaybackTests.swift; sourceTree = "<group>"; };
+		200000000000000000000040 /* SonySoundPressure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonySoundPressure.swift; sourceTree = "<group>"; };
+		200000000000000000000041 /* SonySoundPressureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonySoundPressureTests.swift; sourceTree = "<group>"; };
+		200000000000000000000042 /* SonyDeviceActionTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyDeviceActionTransition.swift; sourceTree = "<group>"; };
+		200000000000000000000043 /* SonyDeviceActionTransitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyDeviceActionTransitionTests.swift; sourceTree = "<group>"; };
+		200000000000000000000044 /* SonyPowerOffTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyPowerOffTests.swift; sourceTree = "<group>"; };
+		200000000000000000000045 /* SonyEarTipFit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyEarTipFit.swift; sourceTree = "<group>"; };
+		200000000000000000000046 /* SonyEarTipFitTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyEarTipFitTransition.swift; sourceTree = "<group>"; };
+		200000000000000000000047 /* SonyEarTipFitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyEarTipFitTests.swift; sourceTree = "<group>"; };
+		200000000000000000000048 /* SonyEarTipFitTransitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyEarTipFitTransitionTests.swift; sourceTree = "<group>"; };
+		200000000000000000000049 /* SonyEarTipFitControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyEarTipFitControllerTests.swift; sourceTree = "<group>"; };
+		20000000000000000000004A /* SonyHeadGesturePractice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyHeadGesturePractice.swift; sourceTree = "<group>"; };
+		20000000000000000000004B /* SonyHeadGesturePracticeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyHeadGesturePracticeTests.swift; sourceTree = "<group>"; };
+		20000000000000000000004C /* SonyHeadGesturePracticeControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyHeadGesturePracticeControllerTests.swift; sourceTree = "<group>"; };
+		20000000000000000000004D /* SonyEqualizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyEqualizer.swift; sourceTree = "<group>"; };
+		20000000000000000000004F /* SonyPowerFeatures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyPowerFeatures.swift; sourceTree = "<group>"; };
+		200000000000000000000051 /* SonyLegacyControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacyControls.swift; sourceTree = "<group>"; };
+		20000000000000000000004E /* SonyEqualizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyEqualizerTests.swift; sourceTree = "<group>"; };
+		200000000000000000000050 /* SonyPowerFeaturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyPowerFeaturesTests.swift; sourceTree = "<group>"; };
+		200000000000000000000052 /* SonyLegacyControlsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacyControlsTests.swift; sourceTree = "<group>"; };
+		200000000000000000000053 /* SystemPlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPlayback.swift; sourceTree = "<group>"; };
+		200000000000000000000054 /* SystemPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPlaybackTests.swift; sourceTree = "<group>"; };
+		200000000000000000000055 /* SonyDeviceCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyDeviceCoordinator.swift; sourceTree = "<group>"; };
+		200000000000000000000056 /* SonyDeviceCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyDeviceCoordinatorTests.swift; sourceTree = "<group>"; };
+		200000000000000000000057 /* SonyDeviceCoordinatorLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyDeviceCoordinatorLifecycle.swift; sourceTree = "<group>"; };
+		200000000000000000000058 /* SonyDeviceCoordinatorLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyDeviceCoordinatorLifecycleTests.swift; sourceTree = "<group>"; };
+		20000000000000000000005A /* SonyLegacyEqualizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacyEqualizerTests.swift; sourceTree = "<group>"; };
+		20000000000000000000005B /* SonyNoiseControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNoiseControl.swift; sourceTree = "<group>"; };
+		20000000000000000000005C /* SonyNoiseControlTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNoiseControlTests.swift; sourceTree = "<group>"; };
+		20000000000000000000005D /* SonyLegacyOptimizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacyOptimizer.swift; sourceTree = "<group>"; };
+		20000000000000000000005E /* SonyLegacyOptimizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacyOptimizerTests.swift; sourceTree = "<group>"; };
+		20000000000000000000005F /* SonyLegacyOptimizerTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacyOptimizerTransition.swift; sourceTree = "<group>"; };
+		200000000000000000000060 /* SonyLegacyOptimizerTransitionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacyOptimizerTransitionTests.swift; sourceTree = "<group>"; };
+		200000000000000000000061 /* SonyLegacyOptimizerControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacyOptimizerControllerTests.swift; sourceTree = "<group>"; };
+		200000000000000000000062 /* SonyLegacySoundEffect.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacySoundEffect.swift; sourceTree = "<group>"; };
+		200000000000000000000063 /* SonyLegacySoundEffectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacySoundEffectTests.swift; sourceTree = "<group>"; };
+		200000000000000000000064 /* SonyLegacySoundEffectControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLegacySoundEffectControllerTests.swift; sourceTree = "<group>"; };
+		200000000000000000000065 /* SonyNativeBatteryPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNativeBatteryPublisher.swift; sourceTree = "<group>"; };
+		200000000000000000000066 /* SonyNativeBatteryPublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNativeBatteryPublisherTests.swift; sourceTree = "<group>"; };
+		200000000000000000000067 /* SonyNativeBatteryBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SonyNativeBatteryBridge.m; sourceTree = "<group>"; };
+		200000000000000000000068 /* BatteryHelper.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BatteryHelper.entitlements; sourceTree = "<group>"; };
+		200000000000000000000069 /* Acouplet Battery Publisher */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; path = "Acouplet Battery Publisher"; sourceTree = BUILT_PRODUCTS_DIR; };
+		20000000000000000000006A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		20000000000000000000006B /* SonyPreferencePaneTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyPreferencePaneTypes.swift; sourceTree = "<group>"; };
+		20000000000000000000006C /* SonyPreferencePaneServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyPreferencePaneServer.swift; sourceTree = "<group>"; };
+		20000000000000000000006D /* SonyPreferencePaneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyPreferencePaneTests.swift; sourceTree = "<group>"; };
+		20000000000000000000006E /* SonyLowBatteryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLowBatteryPolicy.swift; sourceTree = "<group>"; };
+		20000000000000000000006F /* SonyLowBatteryPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyLowBatteryPolicyTests.swift; sourceTree = "<group>"; };
+		200000000000000000000070 /* SonyFirmwareUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyFirmwareUpdate.swift; sourceTree = "<group>"; };
+		200000000000000000000071 /* SonyFirmwareUpdateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyFirmwareUpdateTests.swift; sourceTree = "<group>"; };
+		200000000000000000000072 /* SonyNotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNotificationService.swift; sourceTree = "<group>"; };
+		200000000000000000000073 /* SonyNotificationServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNotificationServiceTests.swift; sourceTree = "<group>"; };
+		200000000000000000000074 /* SonyFirmwareUpdateControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyFirmwareUpdateControllerTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000A1 /* SonyNativeAppearanceRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNativeAppearanceRefresh.swift; sourceTree = "<group>"; };
+		2000000000000000000000A2 /* SonyNativeAppearanceRefreshTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNativeAppearanceRefreshTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000A3 /* SonyNoiseModeHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNoiseModeHUD.swift; sourceTree = "<group>"; };
+		2000000000000000000000A4 /* SonyNoiseModeHUDTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonyNoiseModeHUDTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000A5 /* MenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarController.swift; sourceTree = "<group>"; };
+		2000000000000000000000C0 /* LDACController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LDACController.swift; sourceTree = "<group>"; };
+		2000000000000000000000C1 /* LDACNativeSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LDACNativeSession.swift; sourceTree = "<group>"; };
+		2000000000000000000000C2 /* LDACNativeOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LDACNativeOutput.swift; sourceTree = "<group>"; };
+		2000000000000000000000C3 /* LDACDriverInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LDACDriverInstaller.swift; sourceTree = "<group>"; };
+		2000000000000000000000C4 /* LDACDriverInstallerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LDACDriverInstallerTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		400000000000000000000001 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000002 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000003 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		300000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				2000000000000000000000A6 /* LICENSE */,
+				2000000000000000000000A7 /* THIRD-PARTY-NOTICES.md */,
+				300000000000000000000009 /* Helpers */,
+				300000000000000000000002 /* Sources */,
+				300000000000000000000003 /* Resources */,
+				300000000000000000000004 /* Configuration */, 300000000000000000000008 /* Controls */,
+				300000000000000000000005 /* Tests */,
+				300000000000000000000006 /* UITests */,
+				300000000000000000000007 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		300000000000000000000002 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				2000000000000000000000B0 /* AppUpdater.swift */,
+				2000000000000000000000C3 /* LDACDriverInstaller.swift */,
+				2000000000000000000000C2 /* LDACNativeOutput.swift */,
+				2000000000000000000000C1 /* LDACNativeSession.swift */,
+				2000000000000000000000C0 /* LDACController.swift */,
+				2000000000000000000000A1 /* SonyNativeAppearanceRefresh.swift */,
+				2000000000000000000000A3 /* SonyNoiseModeHUD.swift */,
+				2000000000000000000000A5 /* MenuBarController.swift */,
+				200000000000000000000072 /* SonyNotificationService.swift */,
+				200000000000000000000070 /* SonyFirmwareUpdate.swift */,
+				20000000000000000000006E /* SonyLowBatteryPolicy.swift */,
+				20000000000000000000006C /* SonyPreferencePaneServer.swift */,
+				20000000000000000000006B /* SonyPreferencePaneTypes.swift */,
+				20000000000000000000005F /* SonyLegacyOptimizerTransition.swift */,
+				20000000000000000000005D /* SonyLegacyOptimizer.swift */,
+				200000000000000000000062 /* SonyLegacySoundEffect.swift */,
+				20000000000000000000005B /* SonyNoiseControl.swift */,
+				200000000000000000000057 /* SonyDeviceCoordinatorLifecycle.swift */,
+				200000000000000000000055 /* SonyDeviceCoordinator.swift */,
+				200000000000000000000051 /* SonyLegacyControls.swift */, 200000000000000000000053 /* SystemPlayback.swift */, 20000000000000000000004F /* SonyPowerFeatures.swift */, 20000000000000000000004D /* SonyEqualizer.swift */, 20000000000000000000004A /* SonyHeadGesturePractice.swift */, 200000000000000000000046 /* SonyEarTipFitTransition.swift */,
+				200000000000000000000045 /* SonyEarTipFit.swift */,
+				200000000000000000000042 /* SonyDeviceActionTransition.swift */,
+				200000000000000000000040 /* SonySoundPressure.swift */,
+				200000000000000000000037 /* HeadphoneIntents.swift */,
+				200000000000000000000001 /* AppMain.swift */,
+				200000000000000000000002 /* AppDelegate.swift */,
+				200000000000000000000003 /* AppEnvironment.swift */,
+				200000000000000000000004 /* SettingsStore.swift */,
+				200000000000000000000007 /* MenuBarView.swift */,
+				200000000000000000000008 /* SettingsView.swift */,
+				200000000000000000000011 /* SonyProtocol.swift */,
+				200000000000000000000012 /* SonyHeadphonesController.swift */,
+				200000000000000000000014 /* GlobalHotKeyController.swift */,
+				200000000000000000000015 /* EqualizerEditorView.swift */,
+				200000000000000000000017 /* SonyAudioFeatures.swift */,
+				200000000000000000000019 /* SonySystemFeatures.swift */,
+				20000000000000000000001B /* SonyCommandQueue.swift */,
+				20000000000000000000001F /* SonyConnectionAlerts.swift */,
+				200000000000000000000021 /* SonyConnectionTransition.swift */,
+				20000000000000000000001D /* SonyBLETransport.swift */,
+				200000000000000000000023 /* SonyBLEIdentity.swift */,
+				200000000000000000000026 /* SonyNativeBatterySnapshot.swift */,
+				200000000000000000000065 /* SonyNativeBatteryPublisher.swift */,
+				200000000000000000000028 /* SonyTouchAssignments.swift */,
+				20000000000000000000002A /* SonyVoiceGuidance.swift */,
+				20000000000000000000003E /* SonyPlayback.swift */,
+				20000000000000000000002C /* PanelScreenHeight.swift */,
+				200000000000000000000034 /* SonyMultipointTransition.swift */,
+				200000000000000000000031 /* SonySourceTransition.swift */,
+				20000000000000000000002F /* SonyMultipoint.swift */,
+				20000000000000000000002D /* MacAudioRoute.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		300000000000000000000003 /* Resources */ = {
+			isa = PBXGroup;
+			children = (200000000000000000000016 /* AppIcon.icon */, 200000000000000000000009 /* Assets.xcassets */, 20000000000000000000000A /* Localizable.xcstrings */);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		300000000000000000000004 /* Configuration */ = {
+			isa = PBXGroup;
+			children = (20000000000000000000000B /* App.entitlements */, 2000000000000000000000B1 /* Direct.xcconfig */, 2000000000000000000000B2 /* Direct-Info.plist */, 2000000000000000000000B3 /* Direct.entitlements */);
+			path = Configuration;
+			sourceTree = "<group>";
+		};
+		300000000000000000000005 /* Tests */ = {isa = PBXGroup; children = (2000000000000000000000C6 /* SonyLegacyPlaybackTests.swift */, 2000000000000000000000C5 /* SonyPlaybackConfirmationTests.swift */, 2000000000000000000000C4 /* LDACDriverInstallerTests.swift */, 2000000000000000000000A4 /* SonyNoiseModeHUDTests.swift */, 2000000000000000000000A2 /* SonyNativeAppearanceRefreshTests.swift */, 200000000000000000000074 /* SonyFirmwareUpdateControllerTests.swift */, 200000000000000000000073 /* SonyNotificationServiceTests.swift */, 200000000000000000000071 /* SonyFirmwareUpdateTests.swift */, 20000000000000000000006F /* SonyLowBatteryPolicyTests.swift */, 20000000000000000000006D /* SonyPreferencePaneTests.swift */, 200000000000000000000066 /* SonyNativeBatteryPublisherTests.swift */, 200000000000000000000064 /* SonyLegacySoundEffectControllerTests.swift */, 200000000000000000000063 /* SonyLegacySoundEffectTests.swift */, 200000000000000000000061 /* SonyLegacyOptimizerControllerTests.swift */, 200000000000000000000060 /* SonyLegacyOptimizerTransitionTests.swift */, 20000000000000000000005E /* SonyLegacyOptimizerTests.swift */, 20000000000000000000005C /* SonyNoiseControlTests.swift */, 20000000000000000000005A /* SonyLegacyEqualizerTests.swift */, 200000000000000000000058 /* SonyDeviceCoordinatorLifecycleTests.swift */, 200000000000000000000056 /* SonyDeviceCoordinatorTests.swift */, 200000000000000000000052 /* SonyLegacyControlsTests.swift */, 200000000000000000000054 /* SystemPlaybackTests.swift */, 200000000000000000000050 /* SonyPowerFeaturesTests.swift */, 20000000000000000000004E /* SonyEqualizerTests.swift */, 20000000000000000000004C /* SonyHeadGesturePracticeControllerTests.swift */, 20000000000000000000004B /* SonyHeadGesturePracticeTests.swift */, 200000000000000000000049 /* SonyEarTipFitControllerTests.swift */, 200000000000000000000048 /* SonyEarTipFitTransitionTests.swift */, 200000000000000000000047 /* SonyEarTipFitTests.swift */, 200000000000000000000044 /* SonyPowerOffTests.swift */, 200000000000000000000043 /* SonyDeviceActionTransitionTests.swift */, 200000000000000000000041 /* SonySoundPressureTests.swift */, 20000000000000000000003F /* SonyPlaybackTests.swift */, 200000000000000000000038 /* HeadphoneIntentsTests.swift */, 20000000000000000000003D /* EqualizerPresetConfirmationTests.swift */, 200000000000000000000036 /* SonyMultipointControllerTests.swift */, 200000000000000000000035 /* SonyMultipointTransitionTests.swift */, 200000000000000000000033 /* SonySourceControllerTests.swift */, 200000000000000000000032 /* SonySourceTransitionTests.swift */, 200000000000000000000030 /* SonyMultipointTests.swift */, 20000000000000000000002E /* MacAudioRouteTests.swift */, 20000000000000000000002B /* SonyVoiceGuidanceTests.swift */, 200000000000000000000029 /* SonyTouchAssignmentsTests.swift */, 200000000000000000000027 /* SonyNativeBatterySnapshotTests.swift */, 20000000000000000000000C /* SettingsStoreTests.swift */, 200000000000000000000013 /* SonyProtocolTests.swift */, 200000000000000000000018 /* SonyAudioFeaturesTests.swift */, 20000000000000000000001A /* SonySystemFeaturesTests.swift */, 20000000000000000000001E /* SonyBLETransportTests.swift */, 200000000000000000000024 /* SonyBLEIdentityTests.swift */, 200000000000000000000020 /* SonyConnectionAlertsTests.swift */, 200000000000000000000022 /* SonyConnectionTransitionTests.swift */, 200000000000000000000025 /* SonyConnectionControllerTests.swift */, 20000000000000000000001C /* SonyCommandQueueTests.swift */); path = Tests; sourceTree = "<group>"; };
+		300000000000000000000006 /* UITests */ = {isa = PBXGroup; children = (20000000000000000000000D /* AppUITests.swift */); path = UITests; sourceTree = "<group>"; };
+		300000000000000000000007 /* Products */ = {
+			isa = PBXGroup;
+			children = (200000000000000000000069 /* Acouplet Battery Publisher */, 20000000000000000000003A /* Acouplet Controls.appex */, 20000000000000000000000E /* Acouplet.app */, 20000000000000000000000F /* AcoupletTests.xctest */, 200000000000000000000010 /* AcoupletUITests.xctest */);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		300000000000000000000008 /* Controls */ = {isa = PBXGroup; children = (200000000000000000000039 /* HeadphoneControls.swift */, 20000000000000000000003B /* Info.plist */, 20000000000000000000003C /* Controls.entitlements */); path = Controls; sourceTree = "<group>"; };
+		300000000000000000000009 /* Helpers */ = {isa = PBXGroup; children = (2000000000000000000000A8 /* BannerLifetime.swift */, 200000000000000000000067, 200000000000000000000068, 20000000000000000000006A); path = Helpers; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		500000000000000000000001 /* Acouplet */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000002;
+			buildPhases = (40000000000000000000000F, 400000000000000000000004, 400000000000000000000001, 400000000000000000000005, 40000000000000000000000B, 40000000000000000000000D, 40000000000000000000000E, 400000000000000000000010, 400000000000000000000011);
+			buildRules = ();
+			dependencies = (A00000000000000000000004);
+			name = "Acouplet";
+			productName = "Acouplet";
+			productReference = 20000000000000000000000E /* Acouplet.app */;
+			productType = "com.apple.product-type.application";
+		};
+		500000000000000000000002 /* AcoupletTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000003;
+			buildPhases = (400000000000000000000006, 400000000000000000000002);
+			buildRules = ();
+			dependencies = (A00000000000000000000001);
+			name = "AcoupletTests";
+			productName = "AcoupletTests";
+			productReference = 20000000000000000000000F /* AcoupletTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		500000000000000000000003 /* AcoupletUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000004;
+			buildPhases = (400000000000000000000007, 400000000000000000000003);
+			buildRules = ();
+			dependencies = (A00000000000000000000002);
+			name = "AcoupletUITests";
+			productName = "AcoupletUITests";
+			productReference = 200000000000000000000010 /* AcoupletUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		500000000000000000000004 /* Acouplet Controls */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000005;
+			buildPhases = (400000000000000000000008, 40000000000000000000000A);
+			buildRules = ();
+			dependencies = ();
+			name = "Acouplet Controls";
+			productName = "Acouplet Controls";
+			productReference = 20000000000000000000003A /* Acouplet Controls.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		500000000000000000000005 /* Acouplet Battery Publisher */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000006;
+			buildPhases = (40000000000000000000000C);
+			buildRules = ();
+			dependencies = ();
+			name = "Acouplet Battery Publisher";
+			productName = "Acouplet Battery Publisher";
+			productReference = 200000000000000000000069;
+			productType = "com.apple.product-type.tool";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		600000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					500000000000000000000001 = {CreatedOnToolsVersion = 16.0;};
+					500000000000000000000002 = {CreatedOnToolsVersion = 16.0; TestTargetID = 500000000000000000000001;};
+					500000000000000000000003 = {CreatedOnToolsVersion = 16.0; TestTargetID = 500000000000000000000001;};
+				};
+			};
+			buildConfigurationList = 800000000000000000000001;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, tr, Base);
+			mainGroup = 300000000000000000000001;
+			productRefGroup = 300000000000000000000007 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (500000000000000000000005 /* Acouplet Battery Publisher */, 500000000000000000000004 /* Acouplet Controls */, 500000000000000000000001 /* Acouplet */, 500000000000000000000002 /* AcoupletTests */, 500000000000000000000003 /* AcoupletUITests */);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		400000000000000000000005 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (1000000000000000000000A6 /* LICENSE in Resources */, 1000000000000000000000A7 /* THIRD-PARTY-NOTICES.md in Resources */, 100000000000000000000012 /* AppIcon.icon in Resources */, 100000000000000000000009 /* Assets.xcassets in Resources */, 10000000000000000000000A /* Localizable.xcstrings in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+		40000000000000000000000A = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (10000000000000000000004E /* Assets.xcassets in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		400000000000000000000010 /* Embed Sparkle */ = {isa = PBXShellScriptBuildPhase; alwaysOutOfDate = 1; buildActionMask = 2147483647; files = (); inputPaths = ("$(SRCROOT)/Packaging/embed-sparkle.sh"); name = "Embed Sparkle"; outputPaths = (); runOnlyForDeploymentPostprocessing = 0; shellPath = /bin/sh; shellScript = "set -eu\n/bin/sh \"$SRCROOT/Packaging/embed-sparkle.sh\"\n"; };
+		40000000000000000000000D /* Sign Debug Helper */ = {isa = PBXShellScriptBuildPhase; alwaysOutOfDate = 1; buildActionMask = 2147483647; files = (); inputPaths = ("$(SRCROOT)/Helpers/BatteryHelper.entitlements"); name = "Sign Debug Helper"; outputPaths = (); runOnlyForDeploymentPostprocessing = 0; shellPath = /bin/sh; shellScript = "set -eu\nif [ \"$CONFIGURATION\" = Debug ] && [ \"${ACOUPLET_PUBLIC_APIS_ONLY:-NO}\" != YES ]; then\n    helper=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/Acouplet Battery Publisher\"\n    /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --options runtime --entitlements \"$SRCROOT/Helpers/BatteryHelper.entitlements\" --timestamp=none --generate-entitlement-der \"$helper\"\n    /usr/bin/codesign --verify --strict \"$helper\"\nfi\n"; };
+		40000000000000000000000E /* Build Native HUD */ = {isa = PBXShellScriptBuildPhase; alwaysOutOfDate = 1; buildActionMask = 2147483647; files = (); inputPaths = ("$(SRCROOT)/Helpers/NativeHUD/build.sh", "$(SRCROOT)/Helpers/NativeHUD/SystemBannerUI.swift", "$(SRCROOT)/Helpers/NativeHUD/NativeHUDABI.h", "$(SRCROOT)/Helpers/NativeHUD/NativeHUDABI.c", "$(SRCROOT)/Helpers/NativeHUD/BannerLifetime.swift", "$(SRCROOT)/Helpers/NativeHUD/SonyNativeHUD.swift"); name = "Build Native HUD"; outputPaths = ("$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Frameworks/SonyNativeHUD.dylib"); runOnlyForDeploymentPostprocessing = 0; shellPath = /bin/sh; shellScript = "set -eu\nif [ \"${ACOUPLET_PUBLIC_APIS_ONLY:-NO}\" = YES ]; then\n    rm -f \"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Frameworks/SonyNativeHUD.dylib\" \"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/Acouplet Battery Publisher\"\n    rm -rf \"$BUILT_PRODUCTS_DIR/Acouplet Battery Publisher.dSYM\" \"$DWARF_DSYM_FOLDER_PATH/Acouplet Battery Publisher.dSYM\"\n    exit 0\nfi\n/bin/sh \"$SRCROOT/Helpers/NativeHUD/build.sh\" \"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Frameworks/SonyNativeHUD.dylib\" \"$DERIVED_FILE_DIR/NativeHUD\"\n"; };
+		40000000000000000000000F /* Prepare Artwork */ = {isa = PBXShellScriptBuildPhase; alwaysOutOfDate = 1; buildActionMask = 2147483647; files = (); inputPaths = ("$(SRCROOT)/Packaging/prepare-no-sony-artwork.py", "$(SRCROOT)/Resources/Assets.xcassets", "$(SRCROOT)/Resources/AppIcon.icon"); name = "Prepare Artwork"; outputPaths = ("$(DERIVED_FILE_DIR)/PreparedAssets.xcassets"); runOnlyForDeploymentPostprocessing = 0; shellPath = /bin/sh; shellScript = "set -eu\nif [ \"${ACOUPLET_NO_SONY_ARTWORK:-YES}\" = YES ]; then\n    /usr/bin/python3 \"$SRCROOT/Packaging/prepare-no-sony-artwork.py\" \"$SRCROOT/Resources/Assets.xcassets\" \"$DERIVED_FILE_DIR/PreparedAssets.xcassets\"\nelse\n    if [ \"${ACOUPLET_NO_SONY_ARTWORK:-}\" != NO ] || [ -z \"${ACOUPLET_SONY_ARTWORK_DIR:-}\" ]; then\n        echo \"Set ACOUPLET_SONY_ARTWORK_DIR to an external asset catalog, or build with ACOUPLET_NO_SONY_ARTWORK=YES.\" >&2\n        exit 1\n    fi\n    /usr/bin/python3 \"$SRCROOT/Packaging/prepare-no-sony-artwork.py\" \"$SRCROOT/Resources/Assets.xcassets\" \"$DERIVED_FILE_DIR/PreparedAssets.xcassets\" \"$ACOUPLET_SONY_ARTWORK_DIR\"\nfi\n"; };
+		400000000000000000000011 /* Build LDAC Helpers */ = {isa = PBXShellScriptBuildPhase; alwaysOutOfDate = 1; buildActionMask = 2147483647; files = (); inputPaths = ("$(SRCROOT)/Packaging/build-ldac.sh"); name = "Build LDAC Helpers"; outputPaths = (); runOnlyForDeploymentPostprocessing = 0; shellPath = /bin/sh; shellScript = "set -eu\n/bin/sh \"$SRCROOT/Packaging/build-ldac.sh\"\n"; };
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		400000000000000000000004 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (1000000000000000000000C3, 1000000000000000000000C2, 1000000000000000000000C1, 1000000000000000000000C0, 1000000000000000000000B0 /* AppUpdater.swift in Sources */, 1000000000000000000000A8, 1000000000000000000000A5, 1000000000000000000000A3, 1000000000000000000000A1, 10000000000000000000006C, 10000000000000000000006A, 100000000000000000000068, 100000000000000000000066, 100000000000000000000065, 100000000000000000000061, 10000000000000000000005E, 10000000000000000000005B, 100000000000000000000059, 100000000000000000000057, 100000000000000000000053, 100000000000000000000051, 10000000000000000000004F, 10000000000000000000004C, 10000000000000000000004A, 100000000000000000000048, 100000000000000000000045, 100000000000000000000041, 100000000000000000000040, 10000000000000000000003D, 10000000000000000000003B, 100000000000000000000039, 100000000000000000000033, 100000000000000000000030, 10000000000000000000002D, 10000000000000000000002B, 100000000000000000000029, 100000000000000000000028, 100000000000000000000026, 100000000000000000000024, 100000000000000000000022, 10000000000000000000001F, 10000000000000000000001D, 10000000000000000000001B, 100000000000000000000019, 100000000000000000000001, 100000000000000000000002, 100000000000000000000003, 100000000000000000000004, 100000000000000000000007, 100000000000000000000008, 10000000000000000000000D, 10000000000000000000000E, 100000000000000000000010, 100000000000000000000011, 100000000000000000000013, 100000000000000000000015, 100000000000000000000017); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000006 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (1000000000000000000000C6, 1000000000000000000000C5, 1000000000000000000000C4, 1000000000000000000000A4, 1000000000000000000000A2, 10000000000000000000006E, 10000000000000000000006D, 10000000000000000000006B, 100000000000000000000069, 100000000000000000000067, 100000000000000000000062, 100000000000000000000060, 10000000000000000000005F, 10000000000000000000005D, 10000000000000000000005C, 10000000000000000000005A, 100000000000000000000058, 100000000000000000000056, 100000000000000000000054, 100000000000000000000052, 100000000000000000000050, 10000000000000000000004D, 10000000000000000000004B, 100000000000000000000049, 100000000000000000000047, 100000000000000000000046, 100000000000000000000044, 100000000000000000000043, 100000000000000000000042, 10000000000000000000003F, 10000000000000000000003E, 10000000000000000000003C, 10000000000000000000003A, 100000000000000000000034, 100000000000000000000036, 100000000000000000000032, 100000000000000000000031, 10000000000000000000002F, 10000000000000000000002E, 10000000000000000000002C, 10000000000000000000002A, 100000000000000000000027, 100000000000000000000025, 100000000000000000000023, 100000000000000000000021, 100000000000000000000020, 10000000000000000000001E, 10000000000000000000001C, 10000000000000000000001A, 10000000000000000000000B, 10000000000000000000000F, 100000000000000000000014, 100000000000000000000016, 100000000000000000000018); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000007 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (10000000000000000000000C); runOnlyForDeploymentPostprocessing = 0; };
+		400000000000000000000008 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000035, 100000000000000000000037); runOnlyForDeploymentPostprocessing = 0; };
+		40000000000000000000000C = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000063); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A00000000000000000000001 = {isa = PBXTargetDependency; target = 500000000000000000000001; targetProxy = 900000000000000000000001; };
+		A00000000000000000000002 = {isa = PBXTargetDependency; target = 500000000000000000000001; targetProxy = 900000000000000000000002; };
+		A00000000000000000000003 = {isa = PBXTargetDependency; target = 500000000000000000000004; targetProxy = 900000000000000000000003; };
+		A00000000000000000000004 = {isa = PBXTargetDependency; target = 500000000000000000000005; targetProxy = 900000000000000000000004; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		700000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ACOUPLET_PUBLIC_APIS_ONLY = NO; ACOUPLET_NO_SONY_ARTWORK = YES; ACOUPLET_SWIFT_PUBLIC_APIS_ONLY_YES = ACOUPLET_PUBLIC_APIS_ONLY; ACOUPLET_SWIFT_PUBLIC_APIS_ONLY_NO = ""; ACOUPLET_SWIFT_NO_SONY_ARTWORK_YES = ACOUPLET_NO_SONY_ARTWORK; ACOUPLET_SWIFT_NO_SONY_ARTWORK_NO = ""; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(ACOUPLET_SWIFT_PUBLIC_APIS_ONLY_$(ACOUPLET_PUBLIC_APIS_ONLY)) $(ACOUPLET_SWIFT_NO_SONY_ARTWORK_$(ACOUPLET_NO_SONY_ARTWORK))"; ACOUPLET_ASSET_CATALOG_PATH = "$(DERIVED_FILE_DIR)/PreparedAssets.xcassets"; ACOUPLET_PUBLIC_EXCLUDED_FILES_NO = ""; ACOUPLET_PUBLIC_EXCLUDED_FILES_YES = "Acouplet?Battery?Publisher SonyNativeAppearanceRefresh.swift SonyNativeBatteryPublisher.swift SonyNativeBatterySnapshot.swift SonyNotificationService.swift SystemPlayback.swift LDACController.swift LDACNativeSession.swift LDACNativeOutput.swift LDACDriverInstaller.swift"; EXCLUDED_SOURCE_FILE_NAMES = "$(inherited) $(ACOUPLET_PUBLIC_EXCLUDED_FILES_$(ACOUPLET_PUBLIC_APIS_ONLY))"; ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = dwarf; MACOSX_DEPLOYMENT_TARGET = 15.4; ONLY_ACTIVE_ARCH = YES; SDKROOT = macosx; SWIFT_OPTIMIZATION_LEVEL = "-Onone";}; name = Debug; };
+		700000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ACOUPLET_PUBLIC_APIS_ONLY = NO; ACOUPLET_NO_SONY_ARTWORK = YES; ACOUPLET_SWIFT_PUBLIC_APIS_ONLY_YES = ACOUPLET_PUBLIC_APIS_ONLY; ACOUPLET_SWIFT_PUBLIC_APIS_ONLY_NO = ""; ACOUPLET_SWIFT_NO_SONY_ARTWORK_YES = ACOUPLET_NO_SONY_ARTWORK; ACOUPLET_SWIFT_NO_SONY_ARTWORK_NO = ""; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(ACOUPLET_SWIFT_PUBLIC_APIS_ONLY_$(ACOUPLET_PUBLIC_APIS_ONLY)) $(ACOUPLET_SWIFT_NO_SONY_ARTWORK_$(ACOUPLET_NO_SONY_ARTWORK))"; ACOUPLET_ASSET_CATALOG_PATH = "$(DERIVED_FILE_DIR)/PreparedAssets.xcassets"; ACOUPLET_PUBLIC_EXCLUDED_FILES_NO = ""; ACOUPLET_PUBLIC_EXCLUDED_FILES_YES = "Acouplet?Battery?Publisher SonyNativeAppearanceRefresh.swift SonyNativeBatteryPublisher.swift SonyNativeBatterySnapshot.swift SonyNotificationService.swift SystemPlayback.swift LDACController.swift LDACNativeSession.swift LDACNativeOutput.swift LDACDriverInstaller.swift"; EXCLUDED_SOURCE_FILE_NAMES = "$(inherited) $(ACOUPLET_PUBLIC_EXCLUDED_FILES_$(ACOUPLET_PUBLIC_APIS_ONLY))"; ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; MACOSX_DEPLOYMENT_TARGET = 15.4; SDKROOT = macosx; SWIFT_COMPILATION_MODE = wholemodule;}; name = Release; };
+		700000000000000000000003 /* App Debug */ = {isa = XCBuildConfiguration; baseConfigurationReference = 2000000000000000000000B1 /* Direct.xcconfig */; buildSettings = {ACOUPLET_DISTRIBUTION = development; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_ENTITLEMENTS = "$(ACOUPLET_APP_ENTITLEMENTS_$(ACOUPLET_SPARKLE_ENABLED))"; INFOPLIST_FILE = "$(ACOUPLET_APP_INFO_$(ACOUPLET_SPARKLE_ENABLED))"; CODE_SIGN_STYLE = Automatic; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = "$(ACOUPLET_PUBLIC_APIS_ONLY)"; ENABLE_HARDENED_RUNTIME = YES; ENABLE_PREVIEWS = YES; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Meriç Bağlayan"; INFOPLIST_KEY_CFBundleDisplayName = "Acouplet"; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; INFOPLIST_KEY_LSUIElement = YES; INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Acouplet uses Bluetooth to read and change your Sony headphone settings."; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = dev.baglayan.Acouplet.debug; PRODUCT_MODULE_NAME = Acouplet; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited) MENU_BAR_APP $(ACOUPLET_SWIFT_SPARKLE_$(ACOUPLET_SPARKLE_ENABLED))"; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0;}; name = Debug; };
+		700000000000000000000004 /* App Release */ = {isa = XCBuildConfiguration; baseConfigurationReference = 2000000000000000000000B1 /* Direct.xcconfig */; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_ENTITLEMENTS = "$(ACOUPLET_APP_ENTITLEMENTS_$(ACOUPLET_SPARKLE_ENABLED))"; INFOPLIST_FILE = "$(ACOUPLET_APP_INFO_$(ACOUPLET_SPARKLE_ENABLED))"; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = 5743Y47SC7; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = "$(ACOUPLET_PUBLIC_APIS_ONLY)"; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Meriç Bağlayan"; INFOPLIST_KEY_CFBundleDisplayName = "Acouplet"; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; INFOPLIST_KEY_LSUIElement = YES; INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Acouplet uses Bluetooth to read and change your Sony headphone settings."; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = dev.baglayan.Acouplet; PRODUCT_MODULE_NAME = Acouplet; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) MENU_BAR_APP $(ACOUPLET_SWIFT_SPARKLE_$(ACOUPLET_SPARKLE_ENABLED))"; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0;}; name = Release; };
+		700000000000000000000005 /* Tests Debug */ = {isa = XCBuildConfiguration; buildSettings = {ACOUPLET_TEST_FRAMEWORK_SEARCH_NO = "$(SRCROOT)/.build/Sparkle-2.10.0"; ACOUPLET_TEST_FRAMEWORK_SEARCH_YES = ""; FRAMEWORK_SEARCH_PATHS = "$(inherited) $(ACOUPLET_TEST_FRAMEWORK_SEARCH_$(ACOUPLET_PUBLIC_APIS_ONLY))";BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "dev.baglayan.Acouplet.tests"; PRODUCT_MODULE_NAME = AcoupletTests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited) MENU_BAR_APP"; SWIFT_VERSION = 6.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Acouplet.app/Contents/MacOS/Acouplet";}; name = Debug; };
+		700000000000000000000006 /* Tests Release */ = {isa = XCBuildConfiguration; buildSettings = {ACOUPLET_TEST_FRAMEWORK_SEARCH_NO = "$(SRCROOT)/.build/Sparkle-2.10.0"; ACOUPLET_TEST_FRAMEWORK_SEARCH_YES = ""; FRAMEWORK_SEARCH_PATHS = "$(inherited) $(ACOUPLET_TEST_FRAMEWORK_SEARCH_$(ACOUPLET_PUBLIC_APIS_ONLY))";BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "dev.baglayan.Acouplet.tests"; PRODUCT_MODULE_NAME = AcoupletTests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) MENU_BAR_APP"; SWIFT_VERSION = 6.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Acouplet.app/Contents/MacOS/Acouplet";}; name = Release; };
+		700000000000000000000007 /* UI Tests Debug */ = {isa = XCBuildConfiguration; buildSettings = {GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "dev.baglayan.Acouplet.uitests"; PRODUCT_MODULE_NAME = AcoupletUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited) MENU_BAR_APP"; SWIFT_VERSION = 6.0; TEST_TARGET_NAME = "Acouplet";}; name = Debug; };
+		700000000000000000000008 /* UI Tests Release */ = {isa = XCBuildConfiguration; buildSettings = {GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "dev.baglayan.Acouplet.uitests"; PRODUCT_MODULE_NAME = AcoupletUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) MENU_BAR_APP"; SWIFT_VERSION = 6.0; TEST_TARGET_NAME = "Acouplet";}; name = Release; };
+		700000000000000000000009 /* Controls Debug */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = Controls/Controls.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_FILE = Controls/Info.plist; INFOPLIST_KEY_CFBundleDisplayName = "Acouplet"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 27.0; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = dev.baglayan.Acouplet.debug.controls; PRODUCT_MODULE_NAME = AcoupletControls; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0; }; name = Debug; };
+		70000000000000000000000A /* Controls Release */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = Controls/Controls.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = 5743Y47SC7; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_FILE = Controls/Info.plist; INFOPLIST_KEY_CFBundleDisplayName = "Acouplet"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 27.0; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = dev.baglayan.Acouplet.controls; PRODUCT_MODULE_NAME = AcoupletControls; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0; }; name = Release; };
+		70000000000000000000000B /* Helper Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_OBJC_ARC = YES; CODE_SIGN_ENTITLEMENTS = Helpers/BatteryHelper.entitlements; CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO; CODE_SIGN_STYLE = Automatic; CREATE_INFOPLIST_SECTION_IN_BINARY = YES; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = NO; ENABLE_HARDENED_RUNTIME = YES; INFOPLIST_FILE = Helpers/Info.plist; MARKETING_VERSION = 0.2.0; OTHER_LDFLAGS = ("$(inherited)", "-framework", Foundation, "-framework", IOKit, "-framework", IOBluetooth); PRODUCT_BUNDLE_IDENTIFIER = dev.baglayan.Acouplet.battery-helper; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; }; name = Debug; };
+		70000000000000000000000C /* Helper Release */ = {isa = XCBuildConfiguration; buildSettings = {ACOUPLET_HELPER_DEBUG_INFORMATION_FORMAT_NO = "dwarf-with-dsym"; ACOUPLET_HELPER_DEBUG_INFORMATION_FORMAT_YES = dwarf; DEBUG_INFORMATION_FORMAT = "$(ACOUPLET_HELPER_DEBUG_INFORMATION_FORMAT_$(ACOUPLET_PUBLIC_APIS_ONLY))"; CLANG_ENABLE_OBJC_ARC = YES; CODE_SIGN_ENTITLEMENTS = Helpers/BatteryHelper.entitlements; CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = 5743Y47SC7; CREATE_INFOPLIST_SECTION_IN_BINARY = YES; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = NO; ENABLE_HARDENED_RUNTIME = YES; INFOPLIST_FILE = Helpers/Info.plist; MARKETING_VERSION = 0.2.0; OTHER_LDFLAGS = ("$(inherited)", "-framework", Foundation, "-framework", IOKit, "-framework", IOBluetooth); PRODUCT_BUNDLE_IDENTIFIER = dev.baglayan.Acouplet.battery-helper; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; }; name = Release; };
+		70000000000000000000000D /* AppStore */ = {isa = XCBuildConfiguration; buildSettings = {ACOUPLET_PUBLIC_APIS_ONLY = YES; ACOUPLET_NO_SONY_ARTWORK = YES; ACOUPLET_SWIFT_PUBLIC_APIS_ONLY_YES = ACOUPLET_PUBLIC_APIS_ONLY; ACOUPLET_SWIFT_PUBLIC_APIS_ONLY_NO = ""; ACOUPLET_SWIFT_NO_SONY_ARTWORK_YES = ACOUPLET_NO_SONY_ARTWORK; ACOUPLET_SWIFT_NO_SONY_ARTWORK_NO = ""; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(ACOUPLET_SWIFT_PUBLIC_APIS_ONLY_$(ACOUPLET_PUBLIC_APIS_ONLY)) $(ACOUPLET_SWIFT_NO_SONY_ARTWORK_$(ACOUPLET_NO_SONY_ARTWORK))"; ACOUPLET_ASSET_CATALOG_PATH = "$(DERIVED_FILE_DIR)/PreparedAssets.xcassets"; ACOUPLET_PUBLIC_EXCLUDED_FILES_NO = ""; ACOUPLET_PUBLIC_EXCLUDED_FILES_YES = "Acouplet?Battery?Publisher SonyNativeAppearanceRefresh.swift SonyNativeBatteryPublisher.swift SonyNativeBatterySnapshot.swift SonyNotificationService.swift SystemPlayback.swift LDACController.swift LDACNativeSession.swift LDACNativeOutput.swift LDACDriverInstaller.swift"; EXCLUDED_SOURCE_FILE_NAMES = "$(inherited) $(ACOUPLET_PUBLIC_EXCLUDED_FILES_$(ACOUPLET_PUBLIC_APIS_ONLY))"; ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; MACOSX_DEPLOYMENT_TARGET = 15.4; SDKROOT = macosx; SWIFT_COMPILATION_MODE = wholemodule;}; name = AppStore; };
+		70000000000000000000000E /* App AppStore */ = {isa = XCBuildConfiguration; buildSettings = {ACOUPLET_SPARKLE_ENABLED = NO; EXCLUDED_SOURCE_FILE_NAMES = "$(inherited) AppUpdater.swift"; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_ENTITLEMENTS = Configuration/App.entitlements; CODE_SIGN_STYLE = Automatic; PROVISIONING_PROFILE_SPECIFIER = "$(ACOUPLET_APP_STORE_PROFILE)"; DEVELOPMENT_TEAM = 5743Y47SC7; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Meriç Bağlayan"; INFOPLIST_KEY_CFBundleDisplayName = "Acouplet"; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; INFOPLIST_KEY_LSUIElement = YES; INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Acouplet uses Bluetooth to read and change your Sony headphone settings."; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = dev.baglayan.Acouplet; PRODUCT_MODULE_NAME = Acouplet; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) MENU_BAR_APP"; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0;}; name = AppStore; };
+		70000000000000000000000F /* Tests AppStore */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "dev.baglayan.Acouplet.tests"; PRODUCT_MODULE_NAME = AcoupletTests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) MENU_BAR_APP"; SWIFT_VERSION = 6.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Acouplet.app/Contents/MacOS/Acouplet";}; name = AppStore; };
+		700000000000000000000010 /* UI Tests AppStore */ = {isa = XCBuildConfiguration; buildSettings = {GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "dev.baglayan.Acouplet.uitests"; PRODUCT_MODULE_NAME = AcoupletUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) MENU_BAR_APP"; SWIFT_VERSION = 6.0; TEST_TARGET_NAME = "Acouplet";}; name = AppStore; };
+		700000000000000000000011 /* Controls AppStore */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = Controls/Controls.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = 5743Y47SC7; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_FILE = Controls/Info.plist; INFOPLIST_KEY_CFBundleDisplayName = "Acouplet"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 27.0; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = dev.baglayan.Acouplet.controls; PRODUCT_MODULE_NAME = AcoupletControls; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_STRICT_CONCURRENCY = complete; SWIFT_VERSION = 6.0; }; name = AppStore; };
+		700000000000000000000012 /* Helper AppStore */ = {isa = XCBuildConfiguration; buildSettings = {ACOUPLET_HELPER_DEBUG_INFORMATION_FORMAT_NO = "dwarf-with-dsym"; ACOUPLET_HELPER_DEBUG_INFORMATION_FORMAT_YES = dwarf; DEBUG_INFORMATION_FORMAT = "$(ACOUPLET_HELPER_DEBUG_INFORMATION_FORMAT_$(ACOUPLET_PUBLIC_APIS_ONLY))"; CODE_SIGNING_ALLOWED = NO; CLANG_ENABLE_OBJC_ARC = YES; CODE_SIGN_ENTITLEMENTS = Helpers/BatteryHelper.entitlements; CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = 5743Y47SC7; CREATE_INFOPLIST_SECTION_IN_BINARY = YES; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; INFOPLIST_FILE = Helpers/Info.plist; MARKETING_VERSION = 0.2.0; OTHER_LDFLAGS = ("$(inherited)", "-framework", Foundation, "-framework", IOKit, "-framework", IOBluetooth); PRODUCT_BUNDLE_IDENTIFIER = dev.baglayan.Acouplet.battery-helper; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; }; name = AppStore; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		800000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (700000000000000000000001, 700000000000000000000002, 70000000000000000000000D); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		800000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (700000000000000000000003, 700000000000000000000004, 70000000000000000000000E); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		800000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (700000000000000000000005, 700000000000000000000006, 70000000000000000000000F); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		800000000000000000000004 = {isa = XCConfigurationList; buildConfigurations = (700000000000000000000007, 700000000000000000000008, 700000000000000000000010); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		800000000000000000000005 = {isa = XCConfigurationList; buildConfigurations = (700000000000000000000009, 70000000000000000000000A, 700000000000000000000011); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		800000000000000000000006 = {isa = XCConfigurationList; buildConfigurations = (70000000000000000000000B, 70000000000000000000000C, 700000000000000000000012); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = 600000000000000000000001 /* Project object */;
+}

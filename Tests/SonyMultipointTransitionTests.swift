@@ -1,0 +1,328 @@
+import XCTest
+@testable import Acouplet
+
+final class SonyMultipointTransitionTests: XCTestCase {
+    func testOnlyKnownAvailableDifferentValuesCanQueueTheIdentifiedSlot() throws {
+        XCTAssertNil(SonyMultipointTransition(enabled: true, model: SonySystemFeatures(), session: 1))
+        XCTAssertNil(SonyMultipointTransition(enabled: true, model: model(enabled: nil), session: 1))
+        XCTAssertNil(SonyMultipointTransition(enabled: true, model: model(available: nil), session: 1))
+        XCTAssertNil(SonyMultipointTransition(enabled: true, model: model(available: false), session: 1))
+        XCTAssertNil(SonyMultipointTransition(enabled: false, model: model(), session: 1))
+        for enabled in [false, true] {
+            let state = model(enabled: !enabled, slot: 0xD4)
+            let request = UUID()
+            var transition = try XCTUnwrap(SonyMultipointTransition(enabled: enabled, model: state, session: 3, requestID: request))
+            XCTAssertEqual(transition.requestID, request)
+            XCTAssertEqual(transition.originalEnabled, !enabled)
+            XCTAssertEqual(transition.targetEnabled, enabled)
+            XCTAssertEqual(transition.slot, 0xD4)
+            XCTAssertEqual(transition.expectedPayload, [0xD8, 0xD4, 0, enabled ? 0 : 1])
+            XCTAssertFalse(transition.timeout())
+            XCTAssertFalse(transition.commandTransmitted(transition.requestPayload, model: state, session: 2))
+            XCTAssertFalse(transition.commandTransmitted([0xD8, 0xD2, 0, enabled ? 0 : 1], model: state, session: 3))
+            XCTAssertFalse(transition.requestReadback(model: state, session: 3))
+            XCTAssertTrue(transition.commandTransmitted(transition.requestPayload, model: state, session: 3))
+            XCTAssertEqual(transition.phase, .awaitingResponse)
+            XCTAssertNil(transition.expectedPayload)
+            XCTAssertFalse(transition.commandTransmitted(transition.requestPayload, model: state, session: 3))
+        }
+        for changed in [model(enabled: true), model(enabled: nil), model(available: false), model(slot: 0xD4)] {
+            var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: model(), session: 1))
+            XCTAssertFalse(transition.validateForTransmission(model: changed, session: 1))
+            XCTAssertEqual(transition.phase, .failed)
+            XCTAssertNotNil(transition.failureMessage)
+        }
+    }
+
+    func testKnownMultipointAlertsRequireTransmissionAndPreserveTheirReplyContracts() throws {
+        let state = model()
+        for prefix: [UInt8] in [[0x99, 0, 6], [0x99, 0, 7], [0x99, 6, 1, 1, 6]] {
+            for actionType: UInt8 in [0, 1, 2] {
+                var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+                let alert = try XCTUnwrap(SonyConnectionAlert(payload: prefix + [actionType]))
+                XCTAssertFalse(transition.receiveAlert(alert, session: 1))
+                XCTAssertTrue(transition.commandTransmitted(transition.requestPayload, model: state, session: 1))
+                XCTAssertFalse(transition.receiveAlert(alert, session: 0))
+                XCTAssertTrue(transition.receiveAlert(alert, session: 1))
+                XCTAssertEqual(transition.alert, alert)
+                XCTAssertTrue(transition.awaitingUser)
+                XCTAssertFalse(transition.timeout())
+                XCTAssertFalse(transition.requestReadback(model: state, session: 1))
+                XCTAssertFalse(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true))
+                if actionType == 0 {
+                    XCTAssertNil(transition.respond(to: alert, action: .positive))
+                    XCTAssertNil(transition.respond(to: alert, action: .negative))
+                    XCTAssertTrue(transition.acknowledge(alert))
+                } else {
+                    XCTAssertFalse(transition.acknowledge(alert))
+                    if actionType == 2 { XCTAssertNil(transition.respond(to: alert, action: .negative)) }
+                    let reply = try XCTUnwrap(transition.respond(to: alert, action: .positive))
+                    XCTAssertEqual(reply, [0x98, prefix[1], prefix[2], 1])
+                    XCTAssertEqual(transition.phase, .replyQueued(alert, .positive))
+                    XCTAssertFalse(transition.timeout())
+                    XCTAssertFalse(transition.commandTransmitted(Array(reply.dropLast()) + [0], model: state, session: 1))
+                    XCTAssertTrue(transition.commandTransmitted(reply, model: state, session: 1))
+                }
+                XCTAssertEqual(transition.phase, .queuedReadback)
+                XCTAssertFalse(transition.timeout())
+                XCTAssertEqual(transition.expectedPayload, [0xD6, 0xD2])
+                XCTAssertTrue(transition.commandTransmitted([0xD6, 0xD2], model: state, session: 1))
+                XCTAssertEqual(transition.phase, .verifying)
+                XCTAssertTrue(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true))
+                XCTAssertEqual(transition.phase, .complete)
+                XCTAssertTrue(transition.isFinished)
+                XCTAssertNil(transition.failureMessage)
+            }
+        }
+    }
+
+    func testUnrelatedAndUnknownAlertsCannotPauseOrCreateReplies() throws {
+        let state = model()
+        var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+        for payload: [UInt8] in [[0x99, 0, 0x74, 1], [0x99, 6, 0x11, 0, 1], [0x99, 0, 1, 1], [0x99, 0, 6, 0xFF]] {
+            let alert = try XCTUnwrap(SonyConnectionAlert(payload: payload))
+            XCTAssertFalse(transition.receiveAlert(alert, session: 1))
+            XCTAssertNil(transition.respond(to: alert, action: .positive))
+            XCTAssertFalse(transition.acknowledge(alert))
+            XCTAssertEqual(transition.phase, .awaitingResponse)
+        }
+        XCTAssertTrue(transition.timeout())
+        XCTAssertTrue(transition.isFinished)
+        XCTAssertFalse(transition.requestReadback(model: state, session: 1))
+    }
+
+    func testOnlyOwnedFreshReadbackCanCompleteAndReportedMismatchOrUnknownFails() throws {
+        for target in [false, true] {
+            let state = model(enabled: !target)
+            var waiting = try XCTUnwrap(SonyMultipointTransition(enabled: target, model: state, session: 4))
+            let response: [UInt8] = [0xD7, 0xD2, 0, target ? 0 : 1]
+            waiting.commandTransmitted(waiting.requestPayload, model: state, session: 4)
+            XCTAssertFalse(waiting.receiveReadback(response, model: state, session: 4, readbackOwned: true))
+            XCTAssertTrue(waiting.requestReadback(model: state, session: 4))
+            XCTAssertFalse(waiting.receiveReadback(response, model: state, session: 4, readbackOwned: true))
+            waiting.commandTransmitted([0xD6, 0xD2], model: state, session: 4)
+            XCTAssertFalse(waiting.receiveReadback(response, model: state, session: 4))
+            XCTAssertFalse(waiting.receiveReadback(response, model: state, session: 3, readbackOwned: true))
+            XCTAssertFalse(waiting.receiveReadback([0xD9] + response.dropFirst(), model: state, session: 4, readbackOwned: true))
+            XCTAssertFalse(waiting.receiveReadback([0xD7, 0xD4, 0, target ? 0 : 1], model: state, session: 4, readbackOwned: true))
+            for invalid in [[0xD7, 0xD2], [0xD7, 0xD2, 1, 0], [0xD7, 0xD2, 0, 0xFF], [0xD7, 0xD2, 0, target ? 1 : 0], response + [0]] {
+                var failed = waiting
+                XCTAssertTrue(failed.receiveReadback(invalid, model: state, session: 4, readbackOwned: true))
+                XCTAssertEqual(failed.phase, .failed)
+                XCTAssertNotNil(failed.failureMessage)
+                XCTAssertFalse(failed.receiveReadback(response, model: state, session: 4, readbackOwned: true))
+            }
+            XCTAssertTrue(waiting.receiveReadback(response, model: state, session: 4, readbackOwned: true))
+            XCTAssertEqual(waiting.phase, .complete)
+            XCTAssertFalse(waiting.controlLost(session: 4))
+            XCTAssertFalse(waiting.timeout())
+        }
+    }
+
+    func testAlertDuringVerificationRequiresNewPostReplyReadbackOwnership() throws {
+        let state = model()
+        var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+        transition.requestReadback(model: state, session: 1)
+        transition.commandTransmitted([0xD6, 0xD2], model: state, session: 1)
+        let alert = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 7, 1]))
+        XCTAssertTrue(transition.receiveAlert(alert, session: 1))
+        XCTAssertFalse(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true))
+        let reply = try XCTUnwrap(transition.respond(to: alert, action: .positive))
+        transition.commandTransmitted(reply, model: state, session: 1)
+        XCTAssertFalse(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true))
+        transition.commandTransmitted([0xD6, 0xD2], model: state, session: 1)
+        XCTAssertFalse(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: false))
+        XCTAssertTrue(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true))
+        XCTAssertEqual(transition.phase, .complete)
+    }
+
+    func testNegativeReplyCancelsOnlyAfterTransmissionAndCannotBeReplayed() throws {
+        let state = model()
+        var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+        let alert = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 6, 1]))
+        transition.receiveAlert(alert, session: 1)
+        let reply = try XCTUnwrap(transition.respond(to: alert, action: .negative))
+        XCTAssertEqual(reply, [0x98, 0, 6, 0])
+        XCTAssertFalse(transition.isFinished)
+        XCTAssertTrue(transition.commandTransmitted(reply, model: state, session: 1))
+        XCTAssertEqual(transition.phase, .cancelled)
+        XCTAssertNil(transition.expectedPayload)
+        XCTAssertFalse(transition.commandTransmitted(reply, model: state, session: 1))
+        XCTAssertFalse(transition.controlLost(session: 1))
+        XCTAssertFalse(transition.controlReady(model: state, session: 2))
+        XCTAssertFalse(transition.receiveAlert(alert, session: 1))
+        XCTAssertFalse(transition.retryRecovery())
+    }
+
+    func testRecoveryReidentifiesSlotInNewSessionAndOnlyReadsWithoutSetterReplay() throws {
+        let state = model()
+        var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 4))
+        let originalRequest = transition.requestPayload
+        let requestID = transition.requestID
+        transition.commandTransmitted(originalRequest, model: state, session: 4)
+        XCTAssertFalse(transition.controlLost(session: 3))
+        XCTAssertTrue(transition.controlLost(session: 4))
+        XCTAssertEqual(transition.phase, .recovering)
+        XCTAssertNil(transition.expectedPayload)
+        XCTAssertFalse(transition.timeout())
+        XCTAssertFalse(transition.commandTransmitted(originalRequest, model: state, session: 4))
+        XCTAssertFalse(transition.controlReady(model: state, session: 4))
+        XCTAssertFalse(transition.controlReady(model: SonySystemFeatures(supportedFunctions: [0xD4]), session: 6))
+        let discovered = model(enabled: nil, slot: 0xD4, available: nil)
+        XCTAssertTrue(transition.controlReady(model: discovered, session: 6))
+        XCTAssertEqual(transition.slot, 0xD4)
+        XCTAssertEqual(transition.session, 6)
+        XCTAssertEqual(transition.requestID, requestID)
+        XCTAssertEqual(transition.originalEnabled, false)
+        XCTAssertEqual(transition.targetEnabled, true)
+        XCTAssertEqual(transition.expectedPayload, [0xD6, 0xD4])
+        XCTAssertFalse(transition.commandTransmitted(originalRequest, model: discovered, session: 6))
+        XCTAssertFalse(transition.commandTransmitted(transition.requestPayload, model: discovered, session: 6))
+        XCTAssertFalse(transition.receiveReadback([0xD7, 0xD4, 0, 0], model: discovered, session: 6, readbackOwned: true))
+        XCTAssertTrue(transition.commandTransmitted([0xD6, 0xD4], model: discovered, session: 6))
+        XCTAssertFalse(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 4, readbackOwned: true))
+        XCTAssertTrue(transition.receiveReadback([0xD7, 0xD4, 0, 0], model: discovered, session: 6, readbackOwned: true))
+        XCTAssertEqual(transition.phase, .complete)
+        XCTAssertFalse(transition.retryRecovery())
+    }
+
+    func testCancellationIntentSurvivesLossBeforeReplyAndCannotBecomeSuccess() throws {
+        let state = model()
+        for enabled in [false, true] {
+            var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+            transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+            let alert = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 7, 1]))
+            transition.receiveAlert(alert, session: 1)
+            let reply = try XCTUnwrap(transition.respond(to: alert, action: .negative))
+            transition.controlLost(session: 1)
+            transition.controlReady(model: state, session: 2)
+            XCTAssertFalse(transition.commandTransmitted(reply, model: state, session: 2))
+            transition.commandTransmitted([0xD6, 0xD2], model: state, session: 2)
+            XCTAssertTrue(transition.receiveReadback([0xD7, 0xD2, 0, enabled ? 0 : 1], model: state, session: 2, readbackOwned: true))
+            XCTAssertEqual(transition.phase, enabled ? .failed : .cancelled)
+        }
+    }
+
+    func testQueuedLossAndRecoveryFailureAreTerminalAndVerificationCanTimeOut() throws {
+        let state = model()
+        var queued = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        XCTAssertFalse(queued.canRetryRecovery)
+        XCTAssertTrue(queued.controlLost(session: 1))
+        XCTAssertEqual(queued.phase, .failed)
+        XCTAssertFalse(queued.canRetryRecovery)
+        XCTAssertFalse(queued.retryRecovery())
+        XCTAssertFalse(queued.controlReady(model: state, session: 2))
+        var sent = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        XCTAssertFalse(sent.recoveryFailed())
+        sent.commandTransmitted(sent.requestPayload, model: state, session: 1)
+        sent.controlLost(session: 1)
+        var recovering = sent
+        XCTAssertTrue(recovering.recoveryFailed())
+        XCTAssertEqual(recovering.phase, .failed)
+        XCTAssertFalse(recovering.controlReady(model: state, session: 2))
+        sent.controlReady(model: state, session: 2)
+        XCTAssertFalse(sent.timeout())
+        sent.commandTransmitted([0xD6, 0xD2], model: state, session: 2)
+        XCTAssertTrue(sent.timeout())
+        XCTAssertEqual(sent.phase, .failed)
+        XCTAssertNil(sent.expectedPayload)
+    }
+
+    func testRetryAfterFailedVerificationReadsAgainWithoutReplayingOrLosingCancellation() throws {
+        let state = model()
+        for cancel in [false, true] {
+            var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+            let requestID = transition.requestID
+            transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+            if cancel {
+                let alert = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 7, 1]))
+                transition.receiveAlert(alert, session: 1)
+                _ = transition.respond(to: alert, action: .negative)
+                transition.controlLost(session: 1)
+                transition.recoveryFailed()
+            } else {
+                transition.timeout()
+            }
+            XCTAssertEqual(transition.phase, .failed)
+            XCTAssertTrue(transition.canRetryRecovery)
+            XCTAssertTrue(transition.retryRecovery())
+            XCTAssertEqual(transition.phase, .recovering)
+            XCTAssertFalse(transition.canRetryRecovery)
+            XCTAssertNil(transition.failureMessage)
+            XCTAssertNil(transition.expectedPayload)
+            XCTAssertFalse(transition.retryRecovery())
+            XCTAssertFalse(transition.commandTransmitted(transition.requestPayload, model: state, session: 1))
+            XCTAssertTrue(transition.controlReady(model: state, session: 3))
+            XCTAssertEqual(transition.requestID, requestID)
+            XCTAssertEqual(transition.expectedPayload, [0xD6, 0xD2])
+            XCTAssertFalse(transition.commandTransmitted(transition.requestPayload, model: state, session: 3))
+            transition.commandTransmitted([0xD6, 0xD2], model: state, session: 3)
+            XCTAssertTrue(transition.receiveReadback([0xD7, 0xD2, 0, cancel ? 1 : 0], model: state, session: 3, readbackOwned: true))
+            XCTAssertEqual(transition.phase, cancel ? .cancelled : .complete)
+        }
+    }
+
+    func testDirectiveRecheckRequiresFinishedTransmittedSameSessionAndKeepsCancellation() throws {
+        let state = model()
+        var unsent = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        XCTAssertFalse(unsent.recheckAfterDirective(session: 1))
+        unsent.controlLost(session: 1)
+        XCTAssertFalse(unsent.recheckAfterDirective(session: 1))
+        for phase: SonyMultipointTransition.Phase in [.complete, .cancelled, .failed] {
+            var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+            let requestID = transition.requestID
+            transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+            XCTAssertFalse(transition.recheckAfterDirective(session: 1))
+            if phase == .cancelled {
+                let alert = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 7, 1]))
+                transition.receiveAlert(alert, session: 1)
+                let reply = try XCTUnwrap(transition.respond(to: alert, action: .negative))
+                transition.commandTransmitted(reply, model: state, session: 1)
+            } else if phase == .complete {
+                transition.requestReadback(model: state, session: 1)
+                transition.commandTransmitted([0xD6, 0xD2], model: state, session: 1)
+                transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true)
+            } else {
+                transition.timeout()
+            }
+            XCTAssertEqual(transition.phase, phase)
+            XCTAssertEqual(transition.canRetryRecovery, phase == .failed)
+            let finished = transition
+            XCTAssertFalse(transition.controlLost(session: 1))
+            XCTAssertFalse(transition.recheckAfterDirective(session: 0))
+            XCTAssertFalse(transition.recheckAfterDirective(session: 2))
+            XCTAssertEqual(transition, finished)
+            XCTAssertTrue(transition.recheckAfterDirective(session: 1))
+            XCTAssertEqual(transition.phase, .recovering)
+            XCTAssertNil(transition.failureMessage)
+            XCTAssertNil(transition.expectedPayload)
+            XCTAssertFalse(transition.recheckAfterDirective(session: 1))
+            let discovered = model(enabled: nil, slot: 0xD4, available: nil)
+            XCTAssertTrue(transition.controlReady(model: discovered, session: 3))
+            XCTAssertEqual(transition.requestID, requestID)
+            XCTAssertEqual(transition.expectedPayload, [0xD6, 0xD4])
+            XCTAssertFalse(transition.commandTransmitted(transition.requestPayload, model: discovered, session: 3))
+            XCTAssertFalse(transition.receiveReadback([0xD7, 0xD4, 0, 0], model: discovered, session: 3, readbackOwned: true))
+            transition.commandTransmitted([0xD6, 0xD4], model: discovered, session: 3)
+            if phase == .cancelled {
+                var changed = transition
+                XCTAssertTrue(changed.receiveReadback([0xD7, 0xD4, 0, 0], model: discovered, session: 3, readbackOwned: true))
+                XCTAssertEqual(changed.phase, .failed)
+            }
+            XCTAssertTrue(transition.receiveReadback([0xD7, 0xD4, 0, phase == .cancelled ? 1 : 0], model: discovered, session: 3, readbackOwned: true))
+            XCTAssertEqual(transition.phase, phase == .cancelled ? .cancelled : .complete)
+        }
+    }
+
+    private func model(enabled: Bool? = false, slot: UInt8 = 0xD2, available: Bool? = true) -> SonySystemFeatures {
+        var model = SonySystemFeatures(supportedFunctions: [slot])
+        let title = Array("MULTIPOINT_SETTING".utf8)
+        model.update([0xD1, slot, 0, 1, UInt8(title.count)] + title + [0])
+        if let available { model.update([0xD3, slot, available ? 0 : 1]) }
+        if let enabled { model.update([0xD7, slot, 0, enabled ? 0 : 1]) }
+        return model
+    }
+}

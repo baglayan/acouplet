@@ -1,0 +1,250 @@
+import XCTest
+@testable import Acouplet
+
+final class SonyCommandQueueTests: XCTestCase {
+    func testDiscardingUnsentCommandPreservesTheNextWireSequence() throws {
+        var queue = SonyCommandQueue()
+        let sent = try XCTUnwrap(queue.enqueue(payload: [0x56, 0]))
+        XCTAssertNil(queue.enqueue(payload: [0xA8, 0x20, 20]))
+        XCTAssertNil(queue.enqueue(payload: [0xA6, 0x20]))
+        XCTAssertNil(queue.enqueue(payload: [0x36, 2], type: 0x0E))
+        let unsent = try XCTUnwrap(queue.handleAcknowledgment(sequence: 1 - sent.sequence).nextFrame)
+        let next = try XCTUnwrap(queue.discardUnsentPending())
+        XCTAssertEqual(next.payload, [0xA6, 0x20])
+        XCTAssertEqual(next.sequence, unsent.sequence)
+        let last = try XCTUnwrap(queue.handleAcknowledgment(sequence: 1 - next.sequence).nextFrame)
+        XCTAssertEqual(last, SonyFrame(type: 0x0E, sequence: sent.sequence, payload: [0x36, 2]))
+        XCTAssertTrue(queue.handleAcknowledgment(sequence: 1 - last.sequence).accepted)
+        let following = try XCTUnwrap(queue.enqueue(payload: [0xA2, 1]))
+        XCTAssertEqual(following.sequence, next.sequence)
+        XCTAssertNil(queue.discardUnsentPending())
+        XCTAssertEqual(queue.enqueue(payload: [0xA2, 1])?.sequence, following.sequence)
+    }
+
+    func testFirstCommandRequiresInverseACKSequence() throws {
+        var queue = SonyCommandQueue()
+        let command = try XCTUnwrap(queue.enqueue(payload: [0x00, 0x00]))
+        XCTAssertEqual(command, SonyFrame(type: 0x0C, sequence: 0, payload: [0x00, 0x00]))
+        XCTAssertEqual(queue.pending, command)
+        let acknowledgment = SonyFrameCodec.encode(type: 0x01, sequence: 1 - command.sequence, payload: [])
+        XCTAssertEqual(Array(acknowledgment), [0x3E, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x3C])
+        let decoded = try XCTUnwrap(SonyFrameCodec.decode(acknowledgment))
+        let result = queue.handleAcknowledgment(sequence: decoded.sequence)
+        XCTAssertTrue(result.accepted)
+        XCTAssertNil(result.nextFrame)
+        XCTAssertNil(queue.pending)
+    }
+
+    func testMixedTableBurstWaitsForEachACKAndPreservesFIFO() {
+        var queue = SonyCommandQueue()
+        let first = SonyFrame(type: 0x0C, sequence: 0, payload: [0x66, 0x17])
+        let second = SonyFrame(type: 0x0E, sequence: 1, payload: [0x06, 0x00])
+        let third = SonyFrame(type: 0x0C, sequence: 0, payload: [0xE8, 0x01, 0x00])
+        XCTAssertEqual(queue.enqueue(payload: first.payload, type: first.type), first)
+        XCTAssertNil(queue.enqueue(payload: second.payload, type: second.type))
+        XCTAssertNil(queue.enqueue(payload: third.payload, type: third.type))
+        XCTAssertEqual(queue.pending, first)
+        let firstACK = queue.handleAcknowledgment(sequence: 1)
+        XCTAssertTrue(firstACK.accepted)
+        XCTAssertEqual(firstACK.nextFrame, second)
+        XCTAssertEqual(queue.pending, second)
+        let secondACK = queue.handleAcknowledgment(sequence: 0)
+        XCTAssertTrue(secondACK.accepted)
+        XCTAssertEqual(secondACK.nextFrame, third)
+        XCTAssertEqual(queue.pending, third)
+        let thirdACK = queue.handleAcknowledgment(sequence: 1)
+        XCTAssertTrue(thirdACK.accepted)
+        XCTAssertNil(thirdACK.nextFrame)
+        XCTAssertNil(queue.pending)
+    }
+
+    func testWrongInvalidAndUnsolicitedACKsDoNotAdvance() {
+        var queue = SonyCommandQueue()
+        XCTAssertFalse(queue.handleAcknowledgment(sequence: 1).accepted)
+        _ = queue.enqueue(payload: [0x06, 0x00])
+        _ = queue.enqueue(payload: [0x06, 0x00], type: 0x0E)
+        let previous = queue
+        for sequence: UInt8 in [0, 2, 0xFF] {
+            let result = queue.handleAcknowledgment(sequence: sequence)
+            XCTAssertFalse(result.accepted)
+            XCTAssertNil(result.nextFrame)
+            XCTAssertEqual(queue, previous)
+        }
+        XCTAssertTrue(queue.handleAcknowledgment(sequence: 1).accepted)
+        let afterFirstACK = queue
+        XCTAssertFalse(queue.handleAcknowledgment(sequence: 1).accepted)
+        XCTAssertEqual(queue, afterFirstACK)
+        XCTAssertTrue(queue.handleAcknowledgment(sequence: 0).accepted)
+        XCTAssertFalse(queue.handleAcknowledgment(sequence: 0).accepted)
+        XCTAssertNil(queue.pending)
+    }
+
+    func testSequenceWrapsAcrossTablesAndSeparateBursts() throws {
+        var queue = SonyCommandQueue()
+        for index in 0..<8 {
+            let type: UInt8 = index.isMultiple(of: 2) ? 0x0C : 0x0E
+            let frame = try XCTUnwrap(queue.enqueue(payload: [UInt8(index)], type: type))
+            XCTAssertEqual(frame.sequence, UInt8(index % 2))
+            XCTAssertEqual(frame.type, type)
+            XCTAssertEqual(frame.payload, [UInt8(index)])
+            XCTAssertTrue(queue.handleAcknowledgment(sequence: 1 - frame.sequence).accepted)
+            XCTAssertNil(queue.pending)
+        }
+    }
+
+    func testNewInstanceDiscardsUnacknowledgedAndQueuedFrames() throws {
+        var queue = SonyCommandQueue()
+        _ = queue.enqueue(payload: [0x3C, 0x3D, 0x3E], type: 0x0E)
+        _ = queue.enqueue(payload: [0xE8, 0x01, 0x01])
+        XCTAssertEqual(queue.pending?.payload, [0x3C, 0x3D, 0x3E])
+        queue = SonyCommandQueue()
+        XCTAssertNil(queue.pending)
+        XCTAssertFalse(queue.handleAcknowledgment(sequence: 1).accepted)
+        let frame = try XCTUnwrap(queue.enqueue(payload: [0x00, 0x00]))
+        XCTAssertEqual(frame.sequence, 0)
+        XCTAssertTrue(queue.handleAcknowledgment(sequence: 1).accepted)
+        XCTAssertNil(queue.pending)
+    }
+
+    @MainActor
+    func testObservedReadTimeoutRetriesIdenticalFrameOnceWithoutResettingSession() async throws {
+        for query: [UInt8] in [[0xF6, 0x0F], [0xF6, 0x0C], [0x22, 0x05], [0xF2, 0x05], [0xA6, 0x01]] {
+            let controller = try controllerWithPendingRead(query)
+            defer { controller.simulateControlLoss() }
+            let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+            let session = controller.simulatedControlSession
+            let noise = controller.noiseControlDisplayState
+            let count = controller.simulatedTransmittedFrames.filter { $0 == frame }.count
+            controller.simulateAcknowledgmentTimeout()
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertEqual(controller.noiseControlDisplayState, noise)
+            XCTAssertEqual(controller.simulatedPendingFrame, frame)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, count + 1)
+            controller.simulateAcknowledgmentTimeout()
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isDeviceConnected)
+            XCTAssertNil(controller.simulatedPendingFrame)
+            XCTAssertEqual(controller.lastErrorMessage, "Headphones did not acknowledge a command.")
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, count + 1)
+        }
+    }
+
+    @MainActor
+    func testReadRetryKeepsQueuedNoiseChangeBehindTheRealAcknowledgment() async throws {
+        let controller = try controllerWithPendingRead([0xF6, 0x0F])
+        defer { controller.simulateControlLoss() }
+        let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+        controller.setNoiseControl(.anc)
+        controller.simulateAcknowledgmentTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.simulatedPendingFrame, frame)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0x68 })
+        let acknowledgment = SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: [])
+        controller.simulateProtocolData(acknowledgment)
+        let next = try XCTUnwrap(controller.simulatedPendingFrame)
+        XCTAssertNotEqual(next, frame)
+        let count = controller.simulatedTransmittedFrames.count
+        controller.simulateProtocolData(acknowledgment)
+        XCTAssertEqual(controller.simulatedPendingFrame, next)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.count, count)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0x68 }.count, 1)
+        XCTAssertTrue(controller.isReady)
+    }
+
+    @MainActor
+    func testReadRetryDoesNotReopenAResponseAlreadyConsumedBeforeAcknowledgment() async throws {
+        let query: [UInt8] = [0xF6, 0x0F]
+        let controller = try controllerWithPendingRead(query)
+        defer { controller.simulateControlLoss() }
+        let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF7, 0x0F, 0]))
+        XCTAssertEqual(controller.systemFeatures[.headGestures]?.enabled, true)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 1, payload: [0xF9, 0x0F, 1]))
+        XCTAssertEqual(controller.systemFeatures[.headGestures]?.enabled, false)
+        controller.simulateAcknowledgmentTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF7, 0x0F, 0]))
+        XCTAssertEqual(controller.systemFeatures[.headGestures]?.enabled, false)
+        controller.simulateSystemReadTimeout(query)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedPendingFrame, frame)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        XCTAssertNotEqual(controller.simulatedPendingFrame, frame)
+    }
+
+    @MainActor
+    func testLateRetryWriteCompletionCannotRearmAcknowledgmentAfterACKOrControlLoss() async throws {
+        for disconnect in [false, true] {
+            let controller = try controllerWithPendingRead([0xF6, 0x0F])
+            defer { controller.simulateControlLoss() }
+            let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+            let session = controller.simulatedControlSession
+            controller.defersSimulatedWrites = true
+            controller.simulateAcknowledgmentTimeout()
+            for _ in 0..<4 { await Task.yield() }
+            if disconnect {
+                controller.simulateControlLoss()
+                controller.simulateDeviceConnection(named: "WF-1000XM5")
+            } else {
+                controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+            }
+            let pending = controller.simulatedPendingFrame
+            controller.completeSimulatedWrite()
+            controller.simulateAcknowledgmentTimeout()
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []), session: session)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedPendingFrame, pending)
+        }
+    }
+
+    @MainActor
+    func testSetterAndUnrelatedReadTimeoutsDoNotRetry() async throws {
+        for setter in [false, true] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            controller.simulateDeviceConnection(named: "WF-1000XM5")
+            defer { controller.simulateControlLoss() }
+            if setter { controller.setNoiseControl(.anc) }
+            else { controller.refresh() }
+            let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+            let count = controller.simulatedTransmittedFrames.count
+            controller.simulateAcknowledgmentTimeout()
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertFalse(controller.isReady)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.count, count)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, 1)
+        }
+    }
+
+    @MainActor
+    private func controllerWithPendingRead(_ query: [UInt8]) throws -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        if query == [0xF2, 0x05] {
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
+                payload: [1, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+            acknowledgeSimulatedCommands(controller)
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
+                payload: [7, 0, 2, 0x6B, 1, 0xF5, 1]))
+            acknowledgeSimulatedCommands(controller)
+            for payload: [UInt8] in [[0x61, 0x17, 1, 0, 1, 20, 1], [0x63, 0x17, 0],
+                                    [0x67, 0x17, 1, 1, 1, 0, 8], [0xF3, 5, 0], [0xF7, 5, 1]] {
+                controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+                acknowledgeSimulatedCommands(controller)
+            }
+        }
+        controller.refresh()
+        while let frame = controller.simulatedPendingFrame, frame.payload != query {
+            replyToOrdinaryNoiseMetadata(frame, controller: controller)
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(try XCTUnwrap(controller.simulatedPendingFrame).payload, query)
+        return controller
+    }
+}

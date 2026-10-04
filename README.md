@@ -1,44 +1,49 @@
-# XM5 Control for macOS
+# Acouplet
 
-A native SwiftUI menu-bar controller for Sony WH-1000XM5 headphones.
+A menu bar app for Sony Bluetooth headphones, earbuds and speakers.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+- Noise cancellation, ambient sound and voice focus.
+- Battery levels, equalizer, DSEE and listening presets.
+- Multipoint connections and audio-source selection.
+- Touch controls, device settings and earbud fit tests where supported.
+- Experimental LDAC playback.
+- English and Turkish interfaces.
 
-## Current features
+This is an early alpha, primarily tested on WF-1000XM5. Other models are
+recognized, but not every feature has been tested on every model. Available
+controls depend on what the device supports.
 
-- Finds a paired WH/WF-1000XM5 through macOS IOBluetooth.
-- Opens Sony's `Serial HPC` service over RFCOMM.
-- Implements the MDR V2 handshake and framed transport.
-- Reads live noise-control state and notifications.
-- Controls Off, Noise Cancelling, and Ambient modes.
-- Controls ambient level and Focus on Voice when supported.
-- Reads the headset battery level and charging state over MDR V2.
-- Shows live battery or listening mode in the macOS menu bar.
-- Includes Focus, Office, and Aware one-click listening presets.
-- Reads and changes Sony equalizer presets, including Bright, Vocal, Bass Boost, and Speech.
-- Includes a live custom EQ editor for Clear Bass and five frequency bands, with reusable personal presets.
-- Provides a permission-free global `⌥⌘A` shortcut to toggle Noise Cancelling and Ambient mode.
-- Supports native launch at login and optional automatic control-link reconnection.
-- Uses capped reconnect backoff, distinguishes Bluetooth audio from Sony control-link availability, and periodically resyncs phone-side changes.
-- Provides copyable connection diagnostics including firmware, protocol channel, last sync, and last error.
-- Uses a transparent user-supplied headphone hero with mode-aware visuals.
+## Getting started for users
 
-## Development
+Requires macOS 15.4 or later. Testing has primarily used Apple silicon and
+macOS 27.2.
 
-Open `XM5 Control.xcodeproj` in Xcode 26 or newer. The app targets macOS 14 or newer.
+After downloading the release .dmg file, dragAcouplet to Applications,
+open it, and allow Bluetooth access. Pair your device in
+macOS Bluetooth settings first. If another headphone-control app is
+running, close it before connecting through Acouplet.
 
-The development bundle identifier is `local.xm5control`. Replace it with a globally unique identifier before signing or distribution.
+For LDAC, enable the experimental feature in "More Settings…". The app includes its
+audio driver installer; follow the setup prompt and restart the Mac after
+installation. Restarting only the app does not reload the driver.
 
-The headphones must be paired and powered on. Only one process can own the Sony RFCOMM channel at a time, so quit other Sony-control utilities while testing.
+When reporting a problem, you may open an issue on this repository.
+Please include your device model, macOS version, app version
+and steps to reproduce it.
 
-The active ANC, ambient, preset EQ, and manual EQ curve are device settings and can be read by Sony Sound Connect. Named presets created by XM5 Control are stored locally on the Mac; applying one sends its curve to the headphones, but its custom name is not inserted into Sony's app-private preset library.
+## Building from source
 
-## Landing page
+See [Development](NATIVE_MACOS.md) for build requirements, options and tests.
 
-The React + Vite landing page lives in [`website/`](website/). See its [setup instructions](website/README.md) for local development and Vercel configuration.
+Sony product photographs are excluded from this repository because they are
+third-party artwork, not assets covered by this project's MIT license. Source
+builds use the included vector icons. An external photo catalog can be supplied
+at build time.
 
-## Open source
+## License
 
-XM5 Control is open source under the [MIT License](LICENSE). You can use, modify, and distribute it, including in commercial projects, as long as the original copyright and license notice are included.
+Built upon [Maadlou/xm5-control-macos](https://github.com/Maadlou/xm5-control-macos).
+Application code is MIT-licensed. See [LICENSE](LICENSE) and
+[third-party notices](THIRD-PARTY-NOTICES.md).
 
-Contributions are welcome. Please open an issue before starting a large feature or protocol change so the work can be coordinated.
+Acouplet is an independent project, not affiliated with Sony or Apple.

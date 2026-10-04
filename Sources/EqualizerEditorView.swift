@@ -1,248 +1,404 @@
+import AppKit
+import Combine
 import SwiftUI
 
 struct EqualizerEditorView: View {
     @EnvironmentObject private var headphones: SonyHeadphonesController
     @EnvironmentObject private var settings: SettingsStore
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var profileName = ""
+    @State private var presetChange: PresetChange?
+    @State private var confirmationWidth: CGFloat?
+    @State private var syncDraft: EqualizerSettings?
+
+    struct PresetChange: Identifiable {
+        let id = UUID()
+        let profile: SavedEqualizerProfile
+        let replacement: EqualizerSettings?
+
+        @MainActor
+        func makeAlert() -> NSAlert {
+            let alert = NSAlert()
+            alert.messageText = replacement == nil ? String(localized: "Delete Preset?") : String(localized: "Replace Preset?")
+            alert.informativeText = replacement == nil
+                ? String(localized: "The saved preset “\(profile.name)” will be deleted from this Mac. This cannot be undone.")
+                : String(localized: "The saved settings for “\(profile.name)” will be replaced. This cannot be undone.")
+            let confirm = alert.addButton(withTitle: replacement == nil ? String(localized: "Delete") : String(localized: "Replace"))
+            confirm.hasDestructiveAction = true
+            confirm.keyEquivalent = ""
+            let cancel = alert.addButton(withTitle: String(localized: "Cancel"))
+            cancel.keyEquivalent = "\u{1B}"
+            alert.window.defaultButtonCell = nil
+            return alert
+        }
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider().opacity(0.55)
-            ScrollView {
-                VStack(spacing: 16) {
-                    curvePreview
-                    controls
-                    savedProfiles
+        Form {
+            Section {
+                LabeledContent("Device") {
+                    Text(headphones.deviceName).foregroundStyle(.primary)
                 }
-                .padding(20)
+                equalizerStatus
             }
-            Divider().opacity(0.55)
-            footer
-        }
-        .frame(width: 430, height: 590)
-        .background(.ultraThinMaterial)
-        .onAppear {
-            if headphones.equalizerPreset == .manual {
-                settings.customEqualizerDraft = headphones.customEqualizer
+            Section("Custom Equalizer") {
+                let displayedDraft = settings.customEqualizerDraft
+                HStack(alignment: .top, spacing: 8) {
+                    ForEach(displayedDraft.layout.indices, id: \.self) { index in
+                        equalizerColumn(displayedDraft.layout[index].title, value: Binding(
+                            get: { Double(displayedDraft[index]) },
+                            set: { value in
+                                var draft = settings.customEqualizerDraft
+                                guard draft.layout == displayedDraft.layout,
+                                      draft.levelSteps == displayedDraft.levelSteps else { return }
+                                draft[index] = Int(value)
+                                apply(draft)
+                            }
+                        ))
+                    }
+                }
+                .padding(.vertical, 8)
+                Button("Reset Flat") {
+                    var draft = settings.customEqualizerDraft
+                    draft.values = Array(repeating: 0, count: draft.layout.count)
+                    apply(draft)
+                }
+                    .tint(.primary)
+            }
+            Section {
+                HStack {
+                    TextField("Preset name", text: $profileName)
+                        .accessibilityLabel("Preset name")
+                        .onSubmit(saveProfile)
+                    Button("Save", action: saveProfile)
+                        .tint(.primary)
+                }
+                ForEach(settings.equalizerProfiles) { profile in
+                    HStack {
+                        Button(profile.name) { apply(profile.settings) }
+                            .tint(.primary)
+                            .disabled(headphones.isReady && headphones.equalizer.settingsPayload(profile.settings) == nil)
+                        Spacer()
+                        Button(role: .destructive) {
+                            confirmationWidth = editorWidth
+                            presetChange = PresetChange(profile: profile, replacement: nil)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Delete \(profile.name)")
+                    }
+                }
+            } header: {
+                Text("Saved Presets")
+            } footer: {
+                Text("Saved on this Mac.")
             }
         }
+        .formStyle(.grouped)
+        .disabled(headphones.multipointTransition?.isFinished == false || headphones.deviceActionTransition?.isFinished == false)
+        .tint(.accentColor)
+        .transaction { $0.animation = nil }
+        .frame(width: editorWidth, height: 620)
+        .windowResizeAnchorIfAvailable(.topLeading)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: editorWidth)
+        .toolbar {
+            Button(action: syncEqualizer) { Label("Sync Equalizer", systemImage: "arrow.clockwise") }
+                .tint(.primary)
+                .help("Read the headphone equalizer into this draft.")
+                .disabled(!canRead || headphones.isEqualizerUpdatePending || headphones.pendingChanges[.equalizerReadback] != nil)
+        }
+        .onAppear { alignDraftLayout() }
+        .onChange(of: headphones.equalizer.flatSettings) { _, _ in alignDraftLayout() }
+        .onChange(of: headphones.equalizerReadbackID) { _, _ in finishSync() }
+        .onChange(of: settings.customEqualizerDraft) { _, _ in syncDraft = nil }
+        .onChange(of: presetChange?.id) { _, id in
+            if id == nil { confirmationWidth = nil }
+        }
+        .onChange(of: headphones.isReady) { _, ready in
+            if !ready { syncDraft = nil }
+        }
+        .onChange(of: headphones.settingErrors[.equalizerReadback]) { _, error in
+            if error != nil { syncDraft = nil }
+        }
+        .background(EqualizerPresetConfirmation(change: $presetChange) { change in
+            if let replacement = change.replacement {
+                settings.customEqualizerDraft = replacement
+                saveProfile(named: change.profile.name)
+            } else {
+                settings.deleteEqualizerProfile(id: change.profile.id)
+            }
+        }.frame(width: 0, height: 0).accessibilityHidden(true))
         .accessibilityIdentifier("equalizer.editor")
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "waveform.path.ecg")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.tint)
-                .frame(width: 38, height: 38)
-                .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Custom Equalizer")
-                    .font(.system(size: 17, weight: .semibold, design: .rounded))
-                Text(headphones.isReady ? "Changes apply live to your XM5" : "Edit and save while disconnected")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button { headphones.refreshEqualizer() } label: {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.borderless)
-            .disabled(!headphones.isReady)
-            .help("Read the current EQ from the headphones")
-            .accessibilityLabel("Sync equalizer from headphones")
-            Button { dismiss() } label: { Image(systemName: "xmark.circle.fill") }
-                .buttonStyle(.borderless)
-                .font(.system(size: 18))
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("Close equalizer editor")
-        }
-        .padding(18)
+    private var editorWidth: CGFloat {
+        confirmationWidth ?? (settings.customEqualizerDraft.layout.count > 6 ? 720 : 520)
     }
 
-    private var curvePreview: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.primary.opacity(0.05))
-            VStack(spacing: 0) {
-                Spacer()
-                Divider().opacity(0.28)
-                Spacer()
-            }
-            EqualizerCurve(values: settings.customEqualizerDraft.bands)
-                .stroke(
-                    LinearGradient(colors: [.cyan, .blue, .purple], startPoint: .leading, endPoint: .trailing),
-                    style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
-                )
-                .padding(.horizontal, 22)
-                .padding(.vertical, 15)
-                .shadow(color: .blue.opacity(0.25), radius: 8)
-        }
-        .frame(height: 92)
-        .accessibilityHidden(true)
+    private var canRead: Bool {
+        headphones.isReady && headphones.powerOffState == nil && !headphones.isRunningHeadphoneTest && headphones.connectionTransition?.isFinished != false && headphones.multipointTransition?.isFinished != false
+            && headphones.deviceActionTransition?.isFinished != false && headphones.equalizer.parameterQueryPayload != nil
     }
 
-    private var controls: some View {
-        VStack(spacing: 13) {
-            equalizerRow(title: "Clear Bass", symbol: "speaker.wave.3.fill", value: clearBassBinding)
-            Divider().opacity(0.45)
-            ForEach(EqualizerSettings.bandLabels.indices, id: \.self) { index in
-                equalizerRow(
-                    title: EqualizerSettings.bandLabels[index],
-                    symbol: "waveform",
-                    value: bandBinding(index)
-                )
-            }
-        }
-        .padding(15)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    private var canApply: Bool {
+        canRead && headphones.equalizer.settingsPayload(settings.customEqualizerDraft) != nil
     }
 
-    private func equalizerRow(title: String, symbol: String, value: Binding<Double>) -> some View {
-        HStack(spacing: 10) {
-            Label(title, systemImage: symbol)
-                .font(.system(size: 11, weight: .medium))
-                .frame(width: 92, alignment: .leading)
-            Slider(value: value, in: -10...10, step: 1)
-            Text(signed(Int(value.wrappedValue)))
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(value.wrappedValue == 0 ? Color.secondary : Color.primary)
-                .frame(width: 30)
-        }
+    private var isApplied: Bool {
+        headphones.equalizerPreset == .manual && headphones.equalizer.settings == settings.customEqualizerDraft
     }
 
-    @ViewBuilder
-    private var savedProfiles: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("MAC PRESETS")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.secondary)
-                .tracking(0.7)
-
-            HStack(spacing: 8) {
-                TextField("Preset name", text: $profileName)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(saveProfile)
-                Button("Save") { saveProfile() }
-                    .buttonStyle(.borderedProminent)
+    private var equalizerStatus: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                if headphones.isRunningHeadphoneTest {
+                    Text("Finish the current headphone test before applying changes.")
+                } else if headphones.powerOffState != nil {
+                    Text("Draft saved on this Mac. Reconnect controls before applying changes.")
+                } else if !headphones.isReady {
+                    Text("Draft saved on this Mac. Headphones unavailable.")
+                } else if headphones.isEqualizerUpdatePending {
+                    Text("Applying equalizer…")
+                } else if headphones.pendingChanges[.equalizerReadback] != nil {
+                    Text("Reading equalizer…")
+                } else if let error = headphones.settingErrors[.equalizer] ?? headphones.settingErrors[.equalizerReadback] {
+                    Text(error)
+                } else if headphones.equalizer.available == false {
+                    Text("Equalizer is unavailable in the current headphone mode.")
+                } else if headphones.equalizer.requiresManualSelection {
+                    Text("Choose Manual to apply this draft.")
+                } else if !headphones.equalizer.canEdit {
+                    Text("Custom equalizer controls are not available for this device.")
+                } else if !canApply {
+                    Text("This draft uses a different equalizer layout. Sync to use this device’s settings.")
+                } else if isApplied {
+                    Text("Applied to headphones.")
+                } else {
+                    Text("Draft saved on this Mac.")
+                    if let title = headphones.equalizer.presetTitle { Text("Headphones: \(title)") }
+                }
             }
-
-            if settings.equalizerProfiles.isEmpty {
-                Text("Saved on this Mac. Applying one writes its curve to the headphones, where Sound Connect can read the active Manual EQ.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 4)
-            } else {
-                VStack(spacing: 6) {
-                    ForEach(settings.equalizerProfiles) { profile in
-                        HStack {
-                            Button {
-                                apply(profile.settings)
-                            } label: {
-                                Label(profile.name, systemImage: "play.fill")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .buttonStyle(.plain)
-                            Button {
-                                settings.deleteEqualizerProfile(id: profile.id)
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
-                            .foregroundStyle(.secondary)
-                            .accessibilityLabel("Delete \(profile.name)")
-                        }
-                        .padding(.horizontal, 11)
-                        .frame(height: 32)
-                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .padding(.trailing, 20)
+            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+            .overlay(alignment: .trailing) {
+                if headphones.isEqualizerUpdatePending || headphones.pendingChanges[.equalizerReadback] != nil {
+                    ProgressView().controlSize(.mini)
+                        .accessibilityLabel(headphones.isEqualizerUpdatePending ? String(localized: "Applying equalizer") : String(localized: "Reading equalizer"))
+                }
+            }
+            if headphones.isReady {
+                if headphones.equalizer.requiresManualSelection {
+                    Button("Use Manual") { headphones.setEqualizerPreset(.manual) }
+                        .disabled(!canRead || headphones.isEqualizerUpdatePending
+                                  || headphones.pendingChanges[.equalizerReadback] != nil)
+                        .tint(.primary)
+                } else {
+                    Button(headphones.settingErrors[.equalizer] == nil ? String(localized: "Apply") : String(localized: "Retry")) {
+                        apply(settings.customEqualizerDraft)
                     }
+                    .accessibilityLabel("Apply equalizer to headphones")
+                    .disabled(!canApply || headphones.isEqualizerUpdatePending
+                              || headphones.pendingChanges[.equalizerReadback] != nil
+                              || (isApplied && headphones.settingErrors[.equalizer] == nil))
+                    .tint(.primary)
                 }
             }
         }
+        .font(.caption)
+        .foregroundStyle(.primary)
+        .accessibilityIdentifier("equalizer.status")
     }
 
-    private var footer: some View {
-        HStack {
-            Button("Reset Flat") { apply(.flat) }
-                .buttonStyle(.borderless)
-            Spacer()
-            if headphones.isApplyingChange {
-                ProgressView().controlSize(.small)
-            } else {
-                Label(headphones.isReady ? "Live" : "Offline", systemImage: headphones.isReady ? "checkmark.circle.fill" : "icloud.slash")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(headphones.isReady ? Color.green : Color.secondary)
-            }
+    private func syncEqualizer() {
+        syncDraft = settings.customEqualizerDraft
+        headphones.refreshEqualizer(trackConfirmation: true)
+    }
+
+    private func finishSync() {
+        guard let syncDraft, settings.customEqualizerDraft == syncDraft,
+              !headphones.isEqualizerUpdatePending, headphones.pendingChanges[.equalizerReadback] == nil,
+              headphones.settingErrors[.equalizerReadback] == nil else { return }
+        self.syncDraft = nil
+        if headphones.equalizerPreset == .manual, let curve = headphones.equalizer.settings {
+            settings.customEqualizerDraft = curve
         }
-        .padding(.horizontal, 20)
-        .frame(height: 48)
     }
 
-    private var clearBassBinding: Binding<Double> {
-        Binding(
-            get: { Double(settings.customEqualizerDraft.clearBass) },
-            set: { value in
-                var draft = settings.customEqualizerDraft
-                draft.clearBass = max(-10, min(10, Int(value.rounded())))
-                apply(draft)
-            }
-        )
+    private func alignDraftLayout() {
+        guard let flat = headphones.equalizer.flatSettings,
+              settings.customEqualizerDraft.layout != flat.layout || settings.customEqualizerDraft.levelSteps != flat.levelSteps else { return }
+        settings.customEqualizerDraft = headphones.equalizer.settings ?? flat
     }
 
-    private func bandBinding(_ index: Int) -> Binding<Double> {
-        Binding(
-            get: { Double(settings.customEqualizerDraft[band: index]) },
-            set: { value in
-                var draft = settings.customEqualizerDraft
-                draft[band: index] = Int(value.rounded())
-                apply(draft)
-            }
-        )
+    private func equalizerColumn(_ title: String, value: Binding<Double>) -> some View {
+        VStack(spacing: 8) {
+            Text(title).font(.caption).foregroundStyle(.primary)
+            EqualizerFader(value: value, title: title, range: settings.customEqualizerDraft.levelRange,
+                           color: .controlAccentColor)
+                .frame(width: 28, height: 180)
+            Text(Int(value.wrappedValue).formatted(.number.sign(strategy: .always())))
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func apply(_ equalizer: EqualizerSettings) {
+        syncDraft = nil
         settings.customEqualizerDraft = equalizer
-        headphones.setCustomEqualizer(equalizer)
+        if !headphones.equalizer.requiresManualSelection {
+            headphones.setCustomEqualizer(equalizer)
+        }
     }
 
     private func saveProfile() {
-        let profile = settings.saveEqualizerProfile(named: profileName)
+        let name = settings.equalizerProfileName(for: profileName)
+        if let profile = settings.equalizerProfiles.first(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) {
+            confirmationWidth = editorWidth
+            presetChange = PresetChange(profile: profile, replacement: settings.customEqualizerDraft)
+        } else {
+            saveProfile(named: name)
+        }
+    }
+
+    private func saveProfile(named name: String) {
+        let profile = settings.saveEqualizerProfile(named: name)
         profileName = ""
         apply(profile.settings)
     }
+}
 
-    private func signed(_ value: Int) -> String {
-        value > 0 ? "+\(value)" : "\(value)"
+struct EqualizerPresetConfirmation: NSViewRepresentable {
+    @Binding var change: EqualizerEditorView.PresetChange?
+    let onConfirm: (EqualizerEditorView.PresetChange) -> Void
+
+    func makeNSView(context: Context) -> ConfirmationView {
+        ConfirmationView()
+    }
+
+    func updateNSView(_ nsView: ConfirmationView, context: Context) {
+        nsView.change = $change
+        nsView.onConfirm = onConfirm
+        if change == nil {
+            nsView.cancel()
+        } else {
+            nsView.schedulePresentation()
+        }
+    }
+
+    static func dismantleNSView(_ nsView: ConfirmationView, coordinator: ()) {
+        nsView.cancel()
+        nsView.change = nil
+        nsView.onConfirm = nil
+    }
+
+    final class ConfirmationView: NSView {
+        var change: Binding<EqualizerEditorView.PresetChange?>?
+        var onConfirm: ((EqualizerEditorView.PresetChange) -> Void)?
+        private var alert: NSAlert?
+        private var closeObservation: AnyCancellable?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            closeObservation = nil
+            guard let window else {
+                cancel()
+                return
+            }
+            closeObservation = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)
+                .filter { [weak window] notification in notification.object as? NSWindow === window }
+                .sink { [weak self] _ in self?.cancel() }
+            schedulePresentation()
+        }
+
+        func schedulePresentation() {
+            DispatchQueue.main.async { [weak self] in self?.present() }
+        }
+
+        private func present() {
+            guard let request = change?.wrappedValue else {
+                cancel()
+                return
+            }
+            guard alert == nil, let window, window.isVisible else { return }
+            let alert = request.makeAlert()
+            self.alert = alert
+            alert.beginSheetModal(for: window) { [weak self, weak alert] response in
+                guard let self, let alert, self.alert === alert else { return }
+                self.alert = nil
+                self.finish(response, for: request)
+                self.schedulePresentation()
+            }
+        }
+
+        func finish(_ response: NSApplication.ModalResponse, for request: EqualizerEditorView.PresetChange) {
+            guard change?.wrappedValue?.id == request.id else { return }
+            change?.wrappedValue = nil
+            if response == .alertFirstButtonReturn { onConfirm?(request) }
+        }
+
+        func cancel() {
+            let presented = alert
+            alert = nil
+            if let presented, let parent = presented.window.sheetParent {
+                parent.endSheet(presented.window, returnCode: .cancel)
+            }
+            let binding = change
+            guard let requestID = binding?.wrappedValue?.id else { return }
+            DispatchQueue.main.async {
+                if binding?.wrappedValue?.id == requestID { binding?.wrappedValue = nil }
+            }
+        }
     }
 }
 
-private struct EqualizerCurve: Shape {
-    let values: [Int]
+private struct EqualizerFader: NSViewRepresentable {
+    @Binding var value: Double
+    let title: String
+    let range: ClosedRange<Int>?
+    let color: NSColor
+    @Environment(\.isEnabled) private var isEnabled
 
-    func path(in rect: CGRect) -> Path {
-        let points = (0..<5).map { index -> CGPoint in
-            let x = rect.minX + rect.width * CGFloat(index) / 4
-            let value = CGFloat(index < values.count ? values[index] : 0)
-            let y = rect.midY - value / 10 * rect.height / 2
-            return CGPoint(x: x, y: y)
+    func makeNSView(context: Context) -> NSSlider {
+        let slider = NSSlider(value: value, minValue: Double(range?.lowerBound ?? 0), maxValue: Double(range?.upperBound ?? 0),
+                              target: context.coordinator, action: #selector(Coordinator.changeValue(_:)))
+        slider.isVertical = true
+        if #available(macOS 26.0, *) {
+            slider.neutralValue = 0
+            slider.tintProminence = .primary
         }
-        var path = Path()
-        guard let first = points.first else { return path }
-        path.move(to: first)
-        for index in 1..<points.count {
-            let previous = points[index - 1]
-            let current = points[index]
-            let midpoint = (previous.x + current.x) / 2
-            path.addCurve(
-                to: current,
-                control1: CGPoint(x: midpoint, y: previous.y),
-                control2: CGPoint(x: midpoint, y: current.y)
-            )
+        slider.numberOfTickMarks = range?.count ?? 0
+        slider.allowsTickMarkValuesOnly = true
+        slider.setAccessibilityLabel(title)
+        return slider
+    }
+
+    func updateNSView(_ slider: NSSlider, context: Context) {
+        context.coordinator.value = $value
+        slider.setAccessibilityLabel(title)
+        slider.minValue = Double(range?.lowerBound ?? 0)
+        slider.maxValue = Double(range?.upperBound ?? 0)
+        slider.numberOfTickMarks = range?.count ?? 0
+        slider.doubleValue = value
+        slider.trackFillColor = color
+        slider.isEnabled = isEnabled && range != nil
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var value: Binding<Double>
+
+        init(value: Binding<Double>) {
+            self.value = value
         }
-        return path
+
+        @objc func changeValue(_ slider: NSSlider) {
+            value.wrappedValue = slider.doubleValue
+        }
     }
 }

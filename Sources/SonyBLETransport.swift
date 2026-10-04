@@ -1,0 +1,340 @@
+import CoreBluetooth
+import Foundation
+
+struct SonyBLEWriteBuffer {
+    private var queued: [Data] = []
+    private var hasStartedWrite = false
+
+    var isEmpty: Bool { queued.isEmpty }
+
+    static func maximumLength(from data: Data, hostMaximum: Int) -> Int? {
+        guard data.count == 2, hostMaximum > 0 else { return nil }
+        let length = data.reduce(0) { ($0 << 8) | Int($1) }
+        return length > 0 ? min(length, hostMaximum) : nil
+    }
+
+    mutating func append(_ data: Data) {
+        precondition(!data.isEmpty)
+        queued.append(data)
+    }
+
+    mutating func discardUnsentPending() -> Bool {
+        guard !queued.isEmpty, !hasStartedWrite else { return false }
+        queued.removeFirst()
+        return true
+    }
+
+    mutating func next(maximumLength: Int, canSend: Bool) -> (data: Data, completesWrite: Bool)? {
+        precondition(maximumLength > 0)
+        guard canSend, !queued.isEmpty else { return nil }
+        let data = Data(queued[0].prefix(maximumLength))
+        queued[0].removeFirst(data.count)
+        let completesWrite = queued[0].isEmpty
+        hasStartedWrite = !completesWrite
+        if completesWrite { queued.removeFirst() }
+        return (data, completesWrite)
+    }
+}
+
+@MainActor
+final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate, @preconcurrency CBPeripheralDelegate {
+    var onReady: ((UUID, String?) -> Void)?
+    var onData: ((Data) -> Void)?
+    var onDisconnect: ((String?) -> Void)?
+    private(set) var isReady = false
+    private(set) var isWaitingForConnection = false
+    var shouldCancelAutomaticConnection: Bool { waitsForConnection && !isReady }
+
+    private static let serviceUUID = CBUUID(string: "5B833E20-6BC7-4802-8E9A-723CECA4BD8F")
+    private static let writeUUID = CBUUID(string: "5B833C60-6BC7-4802-8E9A-723CECA4BD8F")
+    private static let notifyUUID = CBUUID(string: "5B833C61-6BC7-4802-8E9A-723CECA4BD8F")
+    private static let lengthUUID = CBUUID(string: "5B833C91-6BC7-4802-8E9A-723CECA4BD8F")
+    private var manager: CBCentralManager?
+    private var peripheral: CBPeripheral?
+    private var expectedHash: String?
+    private var preferredIdentifier: UUID?
+    private var expectedModel: SonyDeviceModel = .unknown
+    private var deviceName: String?
+    private var candidates: [UUID: (CBPeripheral, String)] = [:]
+    private var writeCharacteristic: CBCharacteristic?
+    private var notifyCharacteristic: CBCharacteristic?
+    private var lengthCharacteristic: CBCharacteristic?
+    private var maximumLength: Int?
+    private var writes = SonyBLEWriteBuffer()
+    private var completions: [(isCurrent: (() -> Bool)?, cancelled: () -> Void, completed: () -> Void)] = []
+    private var isDraining = false
+    private var sessionID: UUID?
+    private var setupTimeout: Task<Void, Never>?
+    private let waitsForConnection: Bool
+    private var selectionTask: Task<Void, Never>?
+    private var writeTimeout: Task<Void, Never>?
+
+    init(waitForConnection: Bool) {
+        waitsForConnection = waitForConnection
+        super.init()
+    }
+
+    #if DEBUG
+    func simulateWaitingForConnection() {
+        isWaitingForConnection = true
+    }
+    #endif
+
+    nonisolated static func matchingName(peripheralName: String?, advertisedName: String?, model: SonyDeviceModel) -> String? {
+        let names = [advertisedName, peripheralName].compactMap { $0 }.filter { SonyDeviceModel(name: $0) != .unknown }
+        guard let name = names.first else { return nil }
+        let foundModel = SonyDeviceModel(name: name)
+        guard model == .unknown || model == foundModel,
+              names.allSatisfy({ SonyDeviceModel(name: $0) == foundModel }) else { return nil }
+        return name
+    }
+
+    nonisolated static func setupTimeoutDuration(waitForConnection: Bool, isWaitingForConnection: Bool) -> Duration? {
+        waitForConnection && isWaitingForConnection ? nil : .seconds(20)
+    }
+
+    func start(model: SonyDeviceModel, identityHash: String, preferredIdentifier: UUID? = nil) {
+        stop()
+        expectedHash = identityHash
+        expectedModel = model
+        self.preferredIdentifier = preferredIdentifier
+        sessionID = UUID()
+        manager = CBCentralManager(delegate: self, queue: .main, options: [CBCentralManagerOptionShowPowerAlertKey: false])
+        scheduleSetupTimeout()
+    }
+
+    private func scheduleSetupTimeout() {
+        setupTimeout?.cancel()
+        setupTimeout = nil
+        guard let id = sessionID,
+              let duration = Self.setupTimeoutDuration(waitForConnection: waitsForConnection, isWaitingForConnection: isWaitingForConnection) else { return }
+        setupTimeout = Task { [weak self] in
+            do { try await Task.sleep(for: duration) } catch { return }
+            guard let self, self.sessionID == id, !self.isReady else { return }
+            self.fail(String(localized: "Sony BLE control connection timed out."))
+        }
+    }
+
+    func stop() {
+        sessionID = nil
+        setupTimeout?.cancel()
+        setupTimeout = nil
+        selectionTask?.cancel()
+        selectionTask = nil
+        writeTimeout?.cancel()
+        writeTimeout = nil
+        isReady = false
+        isWaitingForConnection = false
+        if manager?.isScanning == true { manager?.stopScan() }
+        peripheral?.delegate = nil
+        if let peripheral { manager?.cancelPeripheralConnection(peripheral) }
+        manager?.delegate = nil
+        manager = nil
+        peripheral = nil
+        expectedHash = nil
+        preferredIdentifier = nil
+        deviceName = nil
+        candidates.removeAll()
+        writeCharacteristic = nil
+        notifyCharacteristic = nil
+        lengthCharacteristic = nil
+        maximumLength = nil
+        writes = SonyBLEWriteBuffer()
+        completions.removeAll()
+    }
+
+    @discardableResult
+    func write(_ data: Data, isCurrent: (() -> Bool)? = nil, onCancelled: @escaping () -> Void = {},
+               onQueued: (() -> Void)? = nil, completion: @escaping () -> Void) -> Bool {
+        guard isReady, !data.isEmpty else { return false }
+        writes.append(data)
+        completions.append((isCurrent, onCancelled, completion))
+        let wasDraining = isDraining
+        isDraining = true
+        onQueued?()
+        isDraining = wasDraining
+        drain()
+        return true
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        guard central === manager else { return }
+        switch central.state {
+        case .poweredOn:
+            guard peripheral == nil, !central.isScanning else { return }
+            if let preferredIdentifier,
+               let target = central.retrievePeripherals(withIdentifiers: [preferredIdentifier]).first {
+                connect(target, name: target.name, central: central)
+                return
+            }
+            central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+        case .poweredOff:
+            fail(String(localized: "Bluetooth is turned off."))
+        case .unauthorized:
+            fail(String(localized: "Bluetooth access is not allowed."))
+        case .unsupported:
+            fail(String(localized: "Bluetooth LE is not supported on this Mac."))
+        case .unknown, .resetting:
+            if peripheral != nil { fail(String(localized: "Bluetooth was reset.")) }
+        @unknown default:
+            fail(String(localized: "Bluetooth is unavailable."))
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didDiscover target: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        guard central === manager, peripheral == nil,
+              let data = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
+              let advertisement = SonyBLEIdentity.advertisement(from: data),
+              advertisement.supportsGATT, advertisement.hash == expectedHash,
+              let name = Self.matchingName(peripheralName: target.name, advertisedName: advertisementData[CBAdvertisementDataLocalNameKey] as? String, model: expectedModel) else { return }
+        candidates[target.identifier] = (target, name)
+        guard selectionTask == nil, let id = sessionID else { return }
+        selectionTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            guard let self, self.sessionID == id, let central = self.manager else { return }
+            self.selectionTask = nil
+            guard self.candidates.count == 1, let (target, name) = self.candidates.values.first else {
+                self.fail(String(localized: "Multiple Sony devices found. Choose a device before connecting to BLE controls."))
+                return
+            }
+            self.candidates.removeAll()
+            self.connect(target, name: name, central: central)
+        }
+    }
+
+    private func connect(_ target: CBPeripheral, name: String?, central: CBCentralManager) {
+        central.stopScan()
+        peripheral = target
+        deviceName = name
+        target.delegate = self
+        isWaitingForConnection = true
+        scheduleSetupTimeout()
+        central.connect(target, options: nil)
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect target: CBPeripheral) {
+        guard central === manager, target === peripheral else { return }
+        isWaitingForConnection = false
+        scheduleSetupTimeout()
+        target.discoverServices([Self.serviceUUID])
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect target: CBPeripheral, error: Error?) {
+        guard central === manager, target === peripheral else { return }
+        fail(error?.localizedDescription ?? String(localized: "Could not connect to Sony BLE controls."))
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral target: CBPeripheral, error: Error?) {
+        guard central === manager, target === peripheral else { return }
+        let message = error?.localizedDescription
+        stop()
+        onDisconnect?(message)
+    }
+
+    func peripheral(_ target: CBPeripheral, didDiscoverServices error: Error?) {
+        guard target === peripheral else { return }
+        if let error { fail(error.localizedDescription); return }
+        guard let service = target.services?.first(where: { $0.uuid == Self.serviceUUID }) else {
+            fail(String(localized: "This connection does not expose Sony BLE controls."))
+            return
+        }
+        target.discoverCharacteristics([Self.writeUUID, Self.notifyUUID, Self.lengthUUID], for: service)
+    }
+
+    func peripheral(_ target: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
+        guard target === peripheral, invalidatedServices.contains(where: { $0.uuid == Self.serviceUUID }) else { return }
+        fail(String(localized: "Sony BLE control services changed. Reconnect to continue."))
+    }
+
+    func peripheral(_ target: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard target === peripheral, service.uuid == Self.serviceUUID else { return }
+        if let error { fail(error.localizedDescription); return }
+        let characteristics = service.characteristics ?? []
+        guard let writer = characteristics.first(where: { $0.uuid == Self.writeUUID }), writer.properties.contains(.writeWithoutResponse),
+              let notifier = characteristics.first(where: { $0.uuid == Self.notifyUUID }), notifier.properties.contains(.notify),
+              let length = characteristics.first(where: { $0.uuid == Self.lengthUUID }), length.properties.contains(.read) else {
+            fail(String(localized: "Sony BLE control characteristics are unavailable."))
+            return
+        }
+        writeCharacteristic = writer
+        notifyCharacteristic = notifier
+        lengthCharacteristic = length
+        target.readValue(for: length)
+    }
+
+    func peripheral(_ target: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard target === peripheral, characteristic === lengthCharacteristic || characteristic === notifyCharacteristic else { return }
+        if let error { fail(error.localizedDescription); return }
+        guard let data = characteristic.value else {
+            fail(String(localized: "Sony BLE controls returned no data."))
+            return
+        }
+        if characteristic === lengthCharacteristic {
+            guard !isReady, let length = SonyBLEWriteBuffer.maximumLength(from: data, hostMaximum: target.maximumWriteValueLength(for: .withoutResponse)),
+                  let notifier = notifyCharacteristic else {
+                fail(String(localized: "Sony BLE controls returned an invalid write length."))
+                return
+            }
+            maximumLength = length
+            target.setNotifyValue(true, for: notifier)
+        } else if isReady {
+            onData?(data)
+        }
+    }
+
+    func peripheral(_ target: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard target === peripheral, characteristic === notifyCharacteristic else { return }
+        if let error { fail(error.localizedDescription); return }
+        guard characteristic.isNotifying, maximumLength != nil else {
+            fail(String(localized: "Sony BLE notifications are unavailable."))
+            return
+        }
+        guard !isReady else { return }
+        setupTimeout?.cancel()
+        setupTimeout = nil
+        isReady = true
+        onReady?(target.identifier, deviceName)
+    }
+
+    func peripheralIsReady(toSendWriteWithoutResponse target: CBPeripheral) {
+        guard target === peripheral else { return }
+        drain()
+    }
+
+    private func drain() {
+        guard !isDraining, isReady, let target = peripheral, let writer = writeCharacteristic,
+              let maximumLength, let id = sessionID else { return }
+        isDraining = true
+        defer { isDraining = false }
+        while sessionID == id, !writes.isEmpty {
+            if completions[0].isCurrent?() == false, writes.discardUnsentPending() {
+                writeTimeout?.cancel()
+                writeTimeout = nil
+                let completion = completions.removeFirst()
+                completion.cancelled()
+                continue
+            }
+            guard let chunk = writes.next(maximumLength: maximumLength, canSend: target.canSendWriteWithoutResponse) else { break }
+            target.writeValue(chunk.data, for: writer, type: .withoutResponse)
+            if chunk.completesWrite {
+                writeTimeout?.cancel()
+                writeTimeout = nil
+                let completion = completions.removeFirst()
+                completion.completed()
+            }
+        }
+        guard sessionID == id, !writes.isEmpty, writeTimeout == nil else { return }
+        writeTimeout = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            guard !Task.isCancelled, let self, self.sessionID == id, !self.writes.isEmpty else { return }
+            self.drain()
+            guard !Task.isCancelled, self.sessionID == id, !self.writes.isEmpty else { return }
+            self.fail(String(localized: "Sony BLE control writes timed out."))
+        }
+    }
+
+    private func fail(_ message: String) {
+        stop()
+        onDisconnect?(message)
+    }
+}

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.baglayan.Acouplet.LDACOutput</string>
+    <key>CFBundleName</key>
+    <string>Acouplet LDAC Output</string>
+    <key>CFBundleExecutable</key>
+    <string>AcoupletVirtualOutput</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleVersion</key>
+    <string>60</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.27</string>
+    <key>AcoupletLDACDriverRevision</key>
+    <integer>2</integer>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.4</string>
+    <key>AudioServerPlugIn_MachServices</key>
+    <array>
+        <string>com.apple.BTAudioHALPlugin.xpc</string>
+    </array>
+    <key>CFPlugInFactories</key>
+    <dict>
+        <key>9E0BB7B0-D69F-4B55-A3E9-DB2784C237CA</key>
+        <string>AcoupletVirtualOutput_Create</string>
+    </dict>
+    <key>CFPlugInTypes</key>
+    <dict>
+        <key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+        <array>
+            <string>9E0BB7B0-D69F-4B55-A3E9-DB2784C237CA</string>
+        </array>
+    </dict>
+</dict>
+</plist>

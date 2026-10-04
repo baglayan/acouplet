@@ -1,0 +1,273 @@
+import Foundation
+
+struct SonyMultipointDevice: Equatable, Identifiable, Sendable {
+    let address: String
+    let connectionID: UInt8
+    let classOfDevice: UInt32
+    let name: String
+
+    var id: String { address }
+    var isConnected: Bool { connectionID != 0 }
+}
+
+struct SonyMultipointInventory: Equatable, Sendable {
+    let devices: [SonyMultipointDevice]
+    let playbackRightID: UInt8
+
+    var selectedSource: SonyMultipointDevice? {
+        guard playbackRightID != 0 else { return nil }
+        return devices.first { $0.connectionID == playbackRightID }
+    }
+
+    fileprivate init?(payload: [UInt8]) {
+        guard payload.count >= 4 else { return nil }
+        var offset = 3
+        var receivedDevices: [SonyMultipointDevice] = []
+        for _ in 0..<payload[2] {
+            guard offset + 22 < payload.count,
+                  let address = multipointAddress(payload[offset..<(offset + 17)]) else { return nil }
+            let connectionID = payload[offset + 17]
+            let classOfDevice = UInt32(payload[offset + 18]) << 16
+                | UInt32(payload[offset + 19]) << 8 | UInt32(payload[offset + 20])
+            let nameLength = Int(payload[offset + 21])
+            offset += 22
+            guard (1...128).contains(nameLength), offset + nameLength < payload.count,
+                  let name = String(bytes: payload[offset..<(offset + nameLength)], encoding: .utf8) else { return nil }
+            receivedDevices.append(SonyMultipointDevice(address: address, connectionID: connectionID,
+                                                        classOfDevice: classOfDevice, name: name))
+            offset += nameLength
+        }
+        let connectedIDs = receivedDevices.filter(\.isConnected).map(\.connectionID)
+        guard offset + 1 == payload.count,
+              Set(receivedDevices.map(\.address)).count == receivedDevices.count,
+              Set(connectedIDs).count == connectedIDs.count else { return nil }
+        devices = receivedDevices
+        playbackRightID = payload[offset]
+    }
+}
+
+enum SonySourceControlResult: Equatable, Sendable {
+    case success, failure, callInProgress, a2dpNotConnected, voiceAssistantPriority
+    case unknown(UInt8)
+
+    init(rawValue: UInt8) {
+        self = switch rawValue {
+        case 0x00: .success
+        case 0x01: .failure
+        case 0x02: .callInProgress
+        case 0x03: .a2dpNotConnected
+        case 0x04: .voiceAssistantPriority
+        default: .unknown(rawValue)
+        }
+    }
+
+    var errorMessage: String? {
+        switch self {
+        case .success: nil
+        case .failure: String(localized: "The headphones could not change the audio source.")
+        case .callInProgress: String(localized: "Finish the phone call before changing the audio source.")
+        case .a2dpNotConnected: "The device is not connected for Bluetooth audio."
+        case .voiceAssistantPriority: String(localized: "Finish using the voice assistant before changing the audio source.")
+        case .unknown: String(localized: "The headphones reported an unknown audio source result.")
+        }
+    }
+}
+
+struct SonySourceSelectionResult: Equatable, Sendable {
+    let address: String
+    let result: SonySourceControlResult
+
+    func matches(address: String) -> Bool {
+        self.address == multipointAddress(Array(address.utf8)[...])
+    }
+}
+
+enum SonyPeripheralAction: UInt8, Sendable {
+    case disconnect = 0x00
+    case connect = 0x01
+    case unpair = 0x02
+}
+
+enum SonyPeripheralResult: Equatable, Sendable {
+    case disconnectionSuccess, disconnectionFailure, disconnectionInProgress, disconnectionBusy
+    case connectionSuccess, connectionFailure, connectionInProgress, connectionBusy
+    case unpairingSuccess, unpairingFailure, unpairingInProgress, unpairingBusy
+    case pairingSuccess, pairingFailure, pairingInProgress, pairingBusy
+    case unknown(UInt8)
+
+    init(rawValue: UInt8) {
+        self = switch rawValue {
+        case 0x00: .disconnectionSuccess
+        case 0x01: .disconnectionFailure
+        case 0x02: .disconnectionInProgress
+        case 0x03: .disconnectionBusy
+        case 0x10: .connectionSuccess
+        case 0x11: .connectionFailure
+        case 0x12: .connectionInProgress
+        case 0x13: .connectionBusy
+        case 0x20: .unpairingSuccess
+        case 0x21: .unpairingFailure
+        case 0x22: .unpairingInProgress
+        case 0x23: .unpairingBusy
+        case 0x30: .pairingSuccess
+        case 0x31: .pairingFailure
+        case 0x32: .pairingInProgress
+        case 0x33: .pairingBusy
+        default: .unknown(rawValue)
+        }
+    }
+
+    var isSuccess: Bool {
+        switch self {
+        case .disconnectionSuccess, .connectionSuccess, .unpairingSuccess, .pairingSuccess: true
+        default: false
+        }
+    }
+
+    var isInProgress: Bool {
+        switch self {
+        case .disconnectionInProgress, .connectionInProgress, .unpairingInProgress, .pairingInProgress: true
+        default: false
+        }
+    }
+
+    func matches(action: SonyPeripheralAction) -> Bool {
+        switch self {
+        case .disconnectionSuccess, .disconnectionFailure, .disconnectionInProgress, .disconnectionBusy: action == .disconnect
+        case .connectionSuccess, .connectionFailure, .connectionInProgress, .connectionBusy: action == .connect
+        case .unpairingSuccess, .unpairingFailure, .unpairingInProgress, .unpairingBusy: action == .unpair
+        case .pairingSuccess, .pairingFailure, .pairingInProgress, .pairingBusy, .unknown: false
+        }
+    }
+}
+
+struct SonyPeripheralActionResult: Equatable, Sendable {
+    let action: UInt8
+    let result: SonyPeripheralResult
+    let address: String
+
+    func matches(action: SonyPeripheralAction, address: String) -> Bool {
+        self.action == action.rawValue && self.address == multipointAddress(Array(address.utf8)[...])
+    }
+}
+
+struct SonyMultipoint: Equatable, Sendable {
+    let supportsInventory: Bool
+    let supportsSourceControl: Bool
+    private(set) var maxPairedDevices: UInt8?
+    private(set) var maxConnectedDevices: UInt8?
+    private(set) var multipleConnectionFileTransfer: Bool?
+    private(set) var bluetoothMode: UInt8?
+    private(set) var available: Bool?
+    private(set) var inventory: SonyMultipointInventory?
+    private(set) var inventoryIsStale = false
+    private(set) var keeping: Bool?
+    private(set) var lastKeepingResult: SonySourceControlResult?
+    private(set) var lastSourceResult: SonySourceSelectionResult?
+    private(set) var lastPeripheralResult: SonyPeripheralActionResult?
+
+    init(supportedFunctions: Set<UInt8> = []) {
+        supportsInventory = !supportedFunctions.isDisjoint(with: [0x32, 0x33])
+        supportsSourceControl = supportedFunctions.contains(0x31)
+    }
+
+    var queryPayloads: [[UInt8]] {
+        (supportsInventory ? (maxPairedDevices == nil ? [[0x30, 0x02]] : []) + [[0x32, 0x02], [0x36, 0x02]] : [])
+            + (supportsSourceControl ? [[0x36, 0x01]] : [])
+    }
+
+    var devices: [SonyMultipointDevice] { inventory?.devices ?? [] }
+    var selectedSource: SonyMultipointDevice? { inventory?.selectedSource }
+
+    var pairingMode: Bool? {
+        switch bluetoothMode {
+        case 0x00: false
+        case 0x01: true
+        default: nil
+        }
+    }
+
+    var canManageDevices: Bool {
+        supportsInventory && available == true && pairingMode != nil && inventory != nil && !inventoryIsStale
+    }
+
+    var canControlSources: Bool { supportsSourceControl && canManageDevices && keeping != nil }
+
+    func sourceSwitchPayload(address: String) -> [UInt8]? {
+        guard canControlSources, let address = multipointAddress(Array(address.utf8)[...]),
+              devices.contains(where: { $0.address == address && $0.isConnected }) else { return nil }
+        return [0x3C, 0x01] + Array(address.utf8)
+    }
+
+    func keepingSetPayload(_ enabled: Bool) -> [UInt8]? {
+        guard canControlSources, !enabled || selectedSource != nil else { return nil }
+        return [0x38, 0x01, enabled ? 0x00 : 0x01]
+    }
+
+    func peripheralActionPayload(_ action: SonyPeripheralAction, address: String) -> [UInt8]? {
+        guard canManageDevices, let address = multipointAddress(Array(address.utf8)[...]),
+              let device = devices.first(where: { $0.address == address }) else { return nil }
+        switch action {
+        case .connect:
+            guard !device.isConnected, let maxConnectedDevices,
+                  devices.filter(\.isConnected).count < Int(maxConnectedDevices) else { return nil }
+        case .disconnect: guard device.isConnected else { return nil }
+        case .unpair: break
+        }
+        return [0x3C, 0x02, action.rawValue] + Array(address.utf8)
+    }
+
+    func pairingModeSetPayload(_ enabled: Bool) -> [UInt8]? {
+        guard canManageDevices else { return nil }
+        return [0x34, 0x02, enabled ? 0x01 : 0x00, 0x00]
+    }
+
+    @discardableResult
+    mutating func update(_ payload: [UInt8]) -> Bool {
+        guard payload.count >= 2 else { return false }
+        switch (payload[0], payload[1]) {
+        case (0x31, 0x02):
+            guard supportsInventory, payload.count == 5 else { return false }
+            maxPairedDevices = payload[2]
+            maxConnectedDevices = payload[3]
+            multipleConnectionFileTransfer = payload[4] <= 1 ? payload[4] == 0 : nil
+        case (0x33, 0x02), (0x35, 0x02):
+            guard supportsInventory, payload.count == 4 else { return false }
+            bluetoothMode = payload[2]
+            available = payload[3] <= 1 ? payload[3] == 0 : nil
+        case (0x37, 0x02), (0x39, 0x02):
+            guard supportsInventory else { return false }
+            guard let receivedInventory = SonyMultipointInventory(payload: payload) else {
+                inventoryIsStale = true
+                return false
+            }
+            inventory = receivedInventory
+            inventoryIsStale = false
+        case (0x37, 0x01):
+            guard supportsSourceControl, payload.count == 3 else { return false }
+            keeping = payload[2] <= 1 ? payload[2] == 0 : nil
+        case (0x39, 0x01):
+            guard supportsSourceControl, payload.count == 4 else { return false }
+            keeping = payload[2] <= 1 ? payload[2] == 0 : nil
+            lastKeepingResult = SonySourceControlResult(rawValue: payload[3])
+        case (0x3D, 0x01):
+            guard supportsSourceControl, payload.count == 20,
+                  let address = multipointAddress(payload[3...]) else { return false }
+            lastSourceResult = SonySourceSelectionResult(address: address, result: SonySourceControlResult(rawValue: payload[2]))
+        case (0x3D, 0x02):
+            guard supportsInventory, payload.count == 21,
+                  let address = multipointAddress(payload[4...]) else { return false }
+            lastPeripheralResult = SonyPeripheralActionResult(action: payload[2], result: SonyPeripheralResult(rawValue: payload[3]), address: address)
+        default:
+            return false
+        }
+        return true
+    }
+}
+
+private func multipointAddress(_ bytes: ArraySlice<UInt8>) -> String? {
+    guard bytes.count == 17, bytes.enumerated().allSatisfy({ index, byte in
+        index % 3 == 2 ? byte == 0x3A : (0x30...0x39).contains(byte) || (0x41...0x46).contains(byte) || (0x61...0x66).contains(byte)
+    }) else { return nil }
+    return String(decoding: bytes, as: UTF8.self).uppercased()
+}

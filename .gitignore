@@ -1,6 +1,21 @@
 .DS_Store
 DerivedData/
+Research/
+plans/
 work/
 *.xcuserstate
 xcuserdata/
 
+.build/
+__pycache__/
+dist/
+public-source/
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.pfx
+*.key
+*.keychain
+*.keychain-db

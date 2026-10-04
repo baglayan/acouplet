@@ -1,0 +1,307 @@
+import XCTest
+@testable import Acouplet
+
+@MainActor
+final class SonyLegacySoundEffectControllerTests: XCTestCase {
+    func testDiscoveryRequiresWrittenExactQueriesAndMalformedRepliesKeepOwnership() throws {
+        let controller = beginDiscovery()
+        defer { controller.simulateControlLoss() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(payloads(controller).contains([0x40, 1, 1]))
+        for reply in replies { deliver(reply, to: controller) }
+        XCTAssertNil(controller.legacySurround.presets)
+        XCTAssertNil(controller.legacySurround.status)
+        XCTAssertNil(controller.legacySurround.presetID)
+        XCTAssertNil(controller.legacySoundPosition.positionType)
+        let noiseQuery = try XCTUnwrap(controller.simulatedPendingFrame)
+        XCTAssertEqual(noiseQuery.payload, [0x66, 2])
+        controller.defersSimulatedWrites = true
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - noiseQuery.sequence, payload: []))
+        controller.defersSimulatedWrites = false
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x40, 1, 1])
+        for reply in replies { deliver(reply, to: controller) }
+        XCTAssertNil(controller.legacySurround.presets)
+        XCTAssertFalse(payloads(controller).contains([0x40, 1, 1]))
+        controller.completeSimulatedWrite()
+        acknowledgeAll(controller)
+        for reply in replies { deliver(reply, type: 0x0E, to: controller) }
+        deliver([0x41, 1, 1, 3, 2, 65], to: controller)
+        deliver([0x43, 1, 0, 0], to: controller)
+        deliver([0x47, 1], to: controller)
+        deliver([0x41, 2, 1, 0], to: controller)
+        deliver([0x43, 3, 0], to: controller)
+        deliver([0x47, 3, 0], to: controller)
+        XCTAssertNil(controller.legacySurround.presets)
+        XCTAssertNil(controller.legacySurround.status)
+        XCTAssertNil(controller.legacySurround.presetID)
+        XCTAssertNil(controller.legacySoundPosition.positionType)
+        for reply in replies { deliver(reply, to: controller) }
+        XCTAssertTrue(controller.legacySurround.canSet)
+        XCTAssertTrue(controller.legacySoundPosition.canSet)
+        XCTAssertEqual(controller.legacySoundEffect(.surround).presets?.map(\.id), [0, 2, 3])
+        XCTAssertEqual(controller.legacySoundEffect(.soundPosition).positionType, 1)
+        deliver([0x41, 1, 1, 0, 0], to: controller)
+        deliver([0x43, 1, 1], to: controller)
+        deliver([0x47, 1, 2], to: controller)
+        XCTAssertEqual(controller.legacySurround.presets?.map(\.id), [0, 2, 3])
+        XCTAssertEqual(controller.legacySurround.status, 0)
+        XCTAssertEqual(controller.legacySurround.presetID, 0)
+    }
+
+    func testConfirmationRequiresTransmissionMatchingInquiryAndTable() {
+        let controller = readyController()
+        defer { controller.simulateControlLoss() }
+        controller.defersSimulatedWrites = true
+        controller.setLegacySoundEffect(.surround, preset: 3)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x48, 1, 3])
+        controller.defersSimulatedWrites = false
+        deliver([0x49, 1, 3], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        XCTAssertFalse(payloads(controller).contains([0x48, 1, 3]))
+        controller.completeSimulatedWrite()
+        acknowledgeAll(controller)
+        XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        deliver([0x49, 1, 3], type: 0x0E, to: controller)
+        deliver([0x49, 2, 3], to: controller)
+        deliver([0x49, 1, 2], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        deliver([0x49, 1, 3], to: controller)
+        XCTAssertNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        XCTAssertEqual(controller.legacySurround.presetID, 3)
+        XCTAssertEqual(controller.legacySoundPosition.presetID, 3)
+        controller.setLegacySoundEffect(.soundPosition, preset: 0x11)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x48, 2, 0x11])
+        acknowledgeAll(controller)
+        deliver([0x49, 1, 0x11], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.soundPosition)])
+        deliver([0x49, 2, 0x11], to: controller)
+        XCTAssertNil(controller.pendingChanges[.legacySoundEffect(.soundPosition)])
+        XCTAssertEqual(controller.legacySoundPosition.selectedTitle, "Rear Left")
+    }
+
+    func testUnavailableStatusBlocksNewWritesButKeepsAuthoritativeAppliedState() {
+        let controller = readyController()
+        defer { controller.simulateControlLoss() }
+        controller.setLegacySoundEffect(.surround, preset: 3)
+        acknowledgeAll(controller)
+        deliver([0x45, 1, 1], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        deliver([0x49, 1, 3], to: controller)
+        XCTAssertNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        XCTAssertEqual(controller.legacySurround.presetID, 3)
+        XCTAssertFalse(controller.legacySurround.canSet)
+        let writes = payloads(controller)
+        controller.setLegacySoundEffect(.surround, preset: 2)
+        XCTAssertEqual(payloads(controller), writes)
+        deliver([0x45, 1, 0], to: controller)
+        XCTAssertTrue(controller.legacySurround.canSet)
+    }
+
+    func testOldParameterReadCannotUndoNotificationOrConfirmALaterWrite() {
+        let controller = readyController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        let queriesBefore = payloads(controller).filter { $0 == [0x46, 1] }.count
+        deliver([0x49, 1, 2], to: controller)
+        controller.setLegacySoundEffect(.surround, preset: 3)
+        acknowledgeAll(controller)
+        deliver([0x47, 1, 0], to: controller)
+        XCTAssertEqual(controller.legacySurround.presetID, 2)
+        XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        acknowledgeAll(controller)
+        XCTAssertEqual(payloads(controller).filter { $0 == [0x46, 1] }.count, queriesBefore + 1)
+        deliver([0x47, 1, 3], to: controller)
+        XCTAssertNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        XCTAssertEqual(controller.legacySurround.presetID, 3)
+        XCTAssertEqual(controller.legacySoundPosition.presetID, 0)
+    }
+
+    func testOldAvailabilityReplyCannotReenableAfterNewerNotification() {
+        let controller = beginDiscovery()
+        defer { controller.simulateControlLoss() }
+        acknowledgeAll(controller)
+        for reply in replies where reply != [0x43, 1, 0] { deliver(reply, to: controller) }
+        deliver([0x45, 1, 0], to: controller)
+        XCTAssertTrue(controller.legacySurround.canSet)
+        let queriesBefore = payloads(controller).filter { $0 == [0x42, 1] }.count
+        deliver([0x45, 1, 1], to: controller)
+        deliver([0x43, 1, 0], to: controller)
+        XCTAssertEqual(controller.legacySurround.available, false)
+        XCTAssertFalse(controller.legacySurround.canSet)
+        XCTAssertTrue(controller.legacySoundPosition.canSet)
+        acknowledgeAll(controller)
+        XCTAssertEqual(payloads(controller).filter { $0 == [0x42, 1] }.count, queriesBefore)
+        deliver([0x43, 1, 0], to: controller)
+        XCTAssertFalse(controller.legacySurround.canSet)
+        deliver([0x45, 1, 0], to: controller)
+        XCTAssertTrue(controller.legacySurround.canSet)
+    }
+
+    func testTimedOutWriteKeepsStalePickerDisabledUntilFreshOwnedStateArrives() async {
+        let controller = readyController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        controller.setLegacySoundEffect(.surround, preset: 2)
+        acknowledgeAll(controller)
+        XCTAssertTrue(payloads(controller).contains([0x48, 1, 2]))
+        controller.simulateLegacySoundEffectSettingTimeout(.surround)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        XCTAssertEqual(controller.legacySurround.presetID, 0)
+        XCTAssertFalse(controller.canSetLegacySoundEffect(.surround))
+        XCTAssertNotNil(controller.settingErrors[.legacySoundEffect(.surround)])
+        let writes = payloads(controller)
+        controller.setLegacySoundEffect(.surround, preset: 0)
+        XCTAssertEqual(payloads(controller), writes)
+        let queriesBefore = writes.filter { $0 == [0x46, 1] }.count
+        deliver([0x47, 1, 0], to: controller)
+        XCTAssertFalse(controller.canSetLegacySoundEffect(.surround))
+        XCTAssertNotNil(controller.settingErrors[.legacySoundEffect(.surround)])
+        acknowledgeAll(controller)
+        XCTAssertEqual(payloads(controller).filter { $0 == [0x46, 1] }.count, queriesBefore + 1)
+        deliver([0x47, 1, 2], to: controller)
+        XCTAssertTrue(controller.canSetLegacySoundEffect(.surround))
+        XCTAssertNil(controller.settingErrors[.legacySoundEffect(.surround)])
+        XCTAssertEqual(controller.legacySurround.presetID, 2)
+        controller.setLegacySoundEffect(.surround, preset: 0)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x48, 1, 0])
+    }
+
+    func testQueuedWriteRevalidatesAvailabilityBeforeTransmission() {
+        let controller = readyController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        controller.setLegacySoundEffect(.surround, preset: 3)
+        XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.surround)])
+        deliver([0x45, 1, 1], to: controller)
+        acknowledgeAll(controller)
+        XCTAssertFalse(payloads(controller).contains { $0.first == 0x48 })
+        XCTAssertFalse(controller.isReady)
+        XCTAssertNotNil(controller.lastErrorMessage)
+        XCTAssertTrue(controller.pendingChanges.isEmpty)
+    }
+
+    func testReadDeadlineStartsOnTransmissionAndUnansweredMetadataEndsTheSession() async {
+        for query: [UInt8] in [[0x40, 1, 1], [0x42, 1], [0x46, 1]] {
+            let controller = beginDiscovery()
+            defer { controller.simulateControlLoss() }
+            let session = controller.simulatedControlSession
+            controller.simulateLegacySoundEffectReadTimeout(query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            acknowledgeAll(controller)
+            controller.simulateLegacySoundEffectReadTimeout(query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertFalse(controller.isReady)
+            XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            XCTAssertNotNil(controller.lastErrorMessage)
+            for reply in replies { deliver(reply, session: session, to: controller) }
+            XCTAssertFalse(controller.legacySurround.canSet)
+            XCTAssertFalse(controller.legacySoundPosition.canSet)
+            XCTAssertTrue(controller.pendingChanges.isEmpty)
+        }
+    }
+
+    func testUnansweredOldPollCannotLeaveANewWritePendingForever() async {
+        let controller = readyController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        controller.setLegacySoundEffect(.soundPosition, preset: 0x12)
+        acknowledgeAll(controller)
+        XCTAssertTrue(payloads(controller).contains([0x48, 2, 0x12]))
+        XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.soundPosition)])
+        let session = controller.simulatedControlSession
+        controller.simulateLegacySoundEffectReadTimeout([0x46, 2])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertFalse(controller.isReady)
+        XCTAssertGreaterThan(controller.simulatedControlSession, session)
+        XCTAssertTrue(controller.pendingChanges.isEmpty)
+        deliver([0x47, 2, 0x12], session: session, to: controller)
+        XCTAssertNil(controller.legacySoundPosition.presetID)
+    }
+
+    func testResetDiscardsOldReadsWritesAndDeadlinesWithoutBlockingFreshDiscovery() async {
+        let controller = readyController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        controller.setLegacySoundEffect(.surround, preset: 3)
+        let session = controller.simulatedControlSession
+        controller.simulateControlLoss()
+        deliver([0x49, 1, 3], session: session, to: controller)
+        XCTAssertNil(controller.legacySurround.presets)
+        XCTAssertNil(controller.legacySoundPosition.positionType)
+        XCTAssertTrue(controller.pendingChanges.isEmpty)
+        negotiate(controller)
+        for query: [UInt8] in [[0x40, 1, 1], [0x42, 1], [0x46, 1]] {
+            controller.simulateLegacySoundEffectReadTimeout(query)
+        }
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        acknowledgeAll(controller)
+        for reply in replies { deliver(reply, to: controller) }
+        for query: [UInt8] in [[0x40, 1, 1], [0x42, 1], [0x46, 1]] {
+            controller.simulateLegacySoundEffectReadTimeout(query)
+        }
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.legacySurround.canSet)
+        XCTAssertTrue(controller.legacySoundPosition.canSet)
+        controller.setLegacySoundEffect(.surround, preset: 2)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x48, 1, 2])
+    }
+
+    private func beginDiscovery() -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM3", controlBusy: true)
+        negotiate(controller)
+        return controller
+    }
+
+    private func negotiate(_ controller: SonyHeadphonesController) {
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
+            payload: [0x01, 0, 2, 0x10]), beginConnection: true)
+        acknowledgeAll(controller)
+        let name = Array("WH-1000XM3".utf8)
+        deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
+        deliver([0x05, 3, 0x20, 0], to: controller)
+        deliver([0x07, 0, 3, 0x62, 0x41, 0x42], to: controller)
+        acknowledgeAll(controller)
+        deliver([0x61, 2, 2, 3, 1, 2, 0, 20, 1, 15], to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        deliver([0x67, 2, 1, 2, 0, 1, 0, 12], to: controller)
+    }
+
+    private func readyController() -> SonyHeadphonesController {
+        let controller = beginDiscovery()
+        acknowledgeAll(controller)
+        for reply in replies { deliver(reply, to: controller) }
+        XCTAssertTrue(controller.legacySurround.canSet)
+        XCTAssertTrue(controller.legacySoundPosition.canSet)
+        return controller
+    }
+
+    private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, session: UInt64? = nil,
+                         to controller: SonyHeadphonesController) {
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), session: session)
+    }
+
+    private func acknowledgeAll(_ controller: SonyHeadphonesController) {
+        for _ in 0..<100 {
+            guard let frame = controller.simulatedPendingFrame else { return }
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        }
+        XCTFail("The simulated command queue did not drain.")
+    }
+
+    private func payloads(_ controller: SonyHeadphonesController) -> [[UInt8]] {
+        controller.simulatedTransmittedFrames.filter { $0.type == 0x0C }.map(\.payload)
+    }
+
+    private var replies: [[UInt8]] {
+        [[0x41, 1, 3, 0, 0, 2, 0, 3, 0], [0x43, 1, 0], [0x47, 1, 0],
+         [0x41, 2, 1], [0x43, 2, 0], [0x47, 2, 0]]
+    }
+}
