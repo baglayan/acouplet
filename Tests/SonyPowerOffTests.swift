@@ -204,7 +204,7 @@ final class SonyPowerOffTests: XCTestCase {
     }
 
     @MainActor
-    func testMenuEntrySurvivesPhysicallyDisconnectedRecoveryFailureUntilControlsBecomeReady() throws {
+    func testMenuEntryTracksExplicitRecoveryAndHidesAfterDisconnectedFailure() throws {
         for useBluetoothLE in [false, true] {
             let controller = readyController()
             controller.powerOff(expectedSession: try XCTUnwrap(controller.powerOffSession))
@@ -216,6 +216,12 @@ final class SonyPowerOffTests: XCTestCase {
             if useBluetoothLE { controller.connectBluetoothLE() } else { controller.connect() }
             XCTAssertNil(controller.powerOffState)
             XCTAssertFalse(controller.isDeviceConnected)
+            XCTAssertFalse(controller.showsMenuBarIcon)
+            if useBluetoothLE {
+                XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: false, priorBluetoothLE: true, classicConnected: false))
+            } else {
+                XCTAssertNotNil(controller.simulateClassicConnection())
+            }
             XCTAssertTrue(controller.showsMenuBarIcon)
 
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
@@ -225,7 +231,7 @@ final class SonyPowerOffTests: XCTestCase {
             XCTAssertNil(controller.powerOffState)
             XCTAssertFalse(controller.isDeviceConnected)
             XCTAssertEqual(controller.deviceModel, .wfXM5)
-            XCTAssertTrue(controller.showsMenuBarIcon)
+            XCTAssertFalse(controller.showsMenuBarIcon)
 
             controller.simulateControlLoss(deviceConnected: true)
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
@@ -240,6 +246,40 @@ final class SonyPowerOffTests: XCTestCase {
             controller.simulateControlLoss(deviceConnected: false)
             XCTAssertFalse(controller.isDeviceConnected)
             XCTAssertNil(controller.powerOffState)
+            XCTAssertFalse(controller.showsMenuBarIcon)
+        }
+    }
+
+    @MainActor
+    func testDisconnectedRecoveryTimeoutAndStopDoNotRetainMenuEntryDuringAutomaticBLEWait() throws {
+        for ending in ["classicFailure", "bleTimeout", "disconnect", "stop"] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            controller.powerOff(expectedSession: try XCTUnwrap(controller.powerOffSession))
+            acknowledgeAll(controller)
+            controller.simulateControlLoss(deviceConnected: false)
+            XCTAssertTrue(controller.showsMenuBarIcon)
+            controller.connect()
+            XCTAssertNil(controller.powerOffState)
+            XCTAssertFalse(controller.showsMenuBarIcon)
+            if ending == "classicFailure" {
+                let complete = try XCTUnwrap(controller.simulateClassicConnection())
+                XCTAssertTrue(controller.showsMenuBarIcon)
+                complete(-1, false)
+            } else {
+                XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: false, priorBluetoothLE: true, classicConnected: false))
+                XCTAssertTrue(controller.showsMenuBarIcon)
+                switch ending {
+                case "bleTimeout": controller.simulateBLEDisconnect(String(localized: "Sony BLE control connection timed out."))
+                case "disconnect": controller.simulateBLEDisconnect(nil)
+                default: controller.stop()
+                }
+            }
+            XCTAssertFalse(controller.isDeviceConnected)
+            XCTAssertFalse(controller.showsMenuBarIcon)
+            if ending == "stop" { controller.systemDidWake() }
+            XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: true, priorBluetoothLE: true, classicConnected: false))
+            XCTAssertFalse(controller.hasPendingManualBLEConnection)
             XCTAssertFalse(controller.showsMenuBarIcon)
         }
     }

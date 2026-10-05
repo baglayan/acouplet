@@ -19,6 +19,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     private var imageState: (model: SonyDeviceModel, leftConnected: Bool?, rightConnected: Bool?, batteries: SonyBatteries, chargingCase: Bool)?
     private var measuredContentSize = NSSize.zero
     private var wantsPopover = false
+    private var retriedControllers = Set<ObjectIdentifier>()
     private var dismissalObservations = Set<AnyCancellable>()
     private var foregroundApplicationPID: Int32?
 
@@ -158,6 +159,15 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         noiseModeHUD.setAnchorView(statusItem.isVisible ? button : nil)
         #endif
         if !statusItem.isVisible { closeMenu() }
+        retryVisibleControls()
+    }
+
+    private func retryVisibleControls() {
+        guard wantsPopover, popover.isShown else { return }
+        let headphones = devices.selectedController
+        let identifier = ObjectIdentifier(headphones)
+        guard retriedControllers.insert(identifier).inserted else { return }
+        if !headphones.retryControlsIfNeeded() { retriedControllers.remove(identifier) }
     }
 
     private func updatePopoverSize() {
@@ -217,6 +227,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     }
 
     func popoverWillShow(_ notification: Notification) {
+        retriedControllers.removeAll()
         let shownAt = ProcessInfo.processInfo.systemUptime
         dismissalObservations.removeAll()
         if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] event in
@@ -242,8 +253,13 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             .store(in: &dismissalObservations)
     }
 
+    func popoverDidShow(_ notification: Notification) {
+        retryVisibleControls()
+    }
+
     func popoverWillClose(_ notification: Notification) {
         wantsPopover = false
+        retriedControllers.removeAll()
         dismissalObservations.removeAll()
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         noiseModeHUD.setMenuVisible(false)

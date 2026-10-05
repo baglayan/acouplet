@@ -404,6 +404,12 @@ final class SonyHeadGesturePracticeControllerTests: XCTestCase {
             XCTAssertEqual(payloads(controller).filter { $0 == SonyHeadGesturePractice.enterPayload }.count, 1)
             if useBluetoothLE { controller.connectBluetoothLE() } else { controller.connect() }
             XCTAssertNil(controller.headGesturePracticeTransition)
+            XCTAssertFalse(controller.showsMenuBarIcon)
+            if useBluetoothLE {
+                XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: false, priorBluetoothLE: true, classicConnected: false))
+            } else {
+                XCTAssertNotNil(controller.simulateClassicConnection())
+            }
             XCTAssertTrue(controller.showsMenuBarIcon)
             XCTAssertFalse(controller.isDeviceConnected)
             controller.simulateDeviceConnection(named: "WF-1000XM5")

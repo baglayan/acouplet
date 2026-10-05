@@ -4,6 +4,206 @@ import IOBluetooth
 
 final class SonyConnectionControllerTests: XCTestCase {
     @MainActor
+    func testVisibleControlsRetryReopensOnlyAnIdleConnectedControlLink() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateBluetoothInitialization()
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        controller.simulateSonyLink(to: device)
+        XCTAssertFalse(controller.retryControlsIfNeeded())
+        controller.simulateControlLoss()
+        XCTAssertTrue(controller.retryControlsIfNeeded())
+        for _ in 0..<10 { XCTAssertFalse(controller.retryControlsIfNeeded()) }
+        XCTAssertEqual(device.openedChannels, [7, 7])
+        XCTAssertTrue(controller.simulatedHandshakeTimeoutPending)
+        controller.simulateDeviceConnection(named: "WH-1000XM4")
+        XCTAssertFalse(controller.retryControlsIfNeeded())
+        XCTAssertEqual(device.openedChannels, [7, 7])
+    }
+
+    @MainActor
+    func testVisibleControlsRetryPreservesCooldownSuppressionAndUserOperations() {
+        for scenario in 0..<10 {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            if scenario != 0 { controller.simulateBluetoothInitialization() }
+            let device = ServiceDiscoveryDevice()
+            device.service = ServiceDiscoveryRecord()
+            controller.simulateSonyLink(to: device)
+            controller.simulateControlLoss()
+            switch scenario {
+            case 0: break
+            case 1: device.connected = false
+            case 2: controller.setReconnectAutomatically(false)
+            case 3: controller.simulateScheduledRetry()
+            case 4: controller.systemWillSleep()
+            case 5: XCTAssertNotNil(controller.simulateClassicConnection())
+            default:
+                controller.simulateDeviceConnection(named: "WF-1000XM5")
+                switch scenario {
+                case 6: controller.powerOff(expectedSession: controller.simulatedControlSession)
+                case 7: XCTAssertTrue(controller.beginEarTipFit())
+                case 8: XCTAssertTrue(controller.beginHeadGesturePractice())
+                default: controller.setConnectionMode(.lowLatency)
+                }
+                controller.simulateControlLoss()
+            }
+            let state = controller.linkState
+            let retry = controller.retrySecondsRemaining
+            for _ in 0..<10 { XCTAssertFalse(controller.retryControlsIfNeeded(), "Scenario \(scenario)") }
+            XCTAssertEqual(device.openedChannels, [7])
+            XCTAssertTrue(device.discoveryCallbacks.isEmpty)
+            XCTAssertEqual(controller.linkState, state)
+            XCTAssertEqual(controller.retrySecondsRemaining, retry)
+        }
+    }
+
+    @MainActor
+    func testVisibleControlsRetryWaitsForAnOutstandingServiceQueryAfterTimeout() async {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateBluetoothInitialization()
+        let device = ServiceDiscoveryDevice()
+        controller.simulateSonyLink(to: device)
+        XCTAssertFalse(controller.retryControlsIfNeeded())
+        controller.simulateHandshakeTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertFalse(controller.retryControlsIfNeeded())
+        XCTAssertEqual(device.discoveryCallbacks.count, 1)
+        device.service = ServiceDiscoveryRecord()
+        device.complete()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.retryControlsIfNeeded())
+        XCTAssertEqual(device.openedChannels, [7])
+    }
+
+    @MainActor
+    func testCachedSonyServiceOpensWithoutAnotherDiscovery() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        controller.simulateSonyLink(to: device)
+        XCTAssertTrue(device.discoveryCallbacks.isEmpty)
+        XCTAssertEqual(device.openedChannels, [7])
+    }
+
+    @MainActor
+    func testMissingSonyServiceIsDiscoveredBeforeOpeningWithoutDuplicateQueries() async {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        let device = ServiceDiscoveryDevice()
+        controller.simulateSonyLink(to: device)
+        controller.simulateSonyLink(to: device)
+        controller.simulateAutomaticRefresh()
+        XCTAssertEqual(device.discoveryCallbacks.count, 1)
+        XCTAssertTrue(device.openedChannels.isEmpty)
+        XCTAssertEqual(controller.linkState, .opening)
+        XCTAssertTrue(controller.simulatedHandshakeTimeoutPending)
+        device.service = ServiceDiscoveryRecord()
+        device.complete()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(device.openedChannels, [7])
+        XCTAssertEqual(device.serviceLookups, 2)
+        device.complete()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(device.openedChannels, [7])
+    }
+
+    @MainActor
+    func testMissingOrFailedSonyServiceDiscoveryStopsWithoutOpening() async {
+        for (startStatus, completionStatus) in [(kIOReturnSuccess, kIOReturnSuccess),
+                                               (kIOReturnSuccess, kIOReturnError),
+                                               (kIOReturnError, kIOReturnSuccess)] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            let device = ServiceDiscoveryDevice()
+            device.discoveryStartStatus = startStatus
+            controller.simulateSonyLink(to: device)
+            device.complete(status: completionStatus)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertEqual(device.discoveryCallbacks.count, 1)
+            XCTAssertTrue(device.openedChannels.isEmpty)
+            XCTAssertEqual(controller.linkState, .failed(String(localized: "Sony control service is unavailable")))
+            XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
+        }
+    }
+
+    @MainActor
+    func testSonyServiceDiscoveryDoesNotConnectAnAbsentDevice() async {
+        for disconnectBeforeQuery in [false, true] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            let device = ServiceDiscoveryDevice()
+            device.connected = !disconnectBeforeQuery
+            controller.simulateSonyLink(to: device)
+            if !disconnectBeforeQuery {
+                device.connected = false
+                device.service = ServiceDiscoveryRecord()
+                device.complete()
+                for _ in 0..<4 { await Task.yield() }
+            }
+            XCTAssertEqual(device.discoveryCallbacks.count, disconnectBeforeQuery ? 0 : 1)
+            XCTAssertTrue(device.openedChannels.isEmpty)
+            XCTAssertFalse(controller.isDeviceConnected)
+            XCTAssertEqual(controller.linkState, .disconnected)
+        }
+    }
+
+    @MainActor
+    func testSonyServiceDiscoveryIgnoresCallbacksAfterTimeoutSleepOrReplacement() async {
+        for interruption in 0..<3 {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            let device = ServiceDiscoveryDevice()
+            controller.simulateSonyLink(to: device)
+            switch interruption {
+            case 0: controller.simulateHandshakeTimeout()
+            case 1: controller.systemWillSleep()
+            default:
+                controller.simulateControlLoss()
+                controller.simulateSonyLink(to: device)
+            }
+            for _ in 0..<4 { await Task.yield() }
+            let state = controller.linkState
+            device.service = ServiceDiscoveryRecord()
+            device.complete()
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(device.openedChannels.isEmpty)
+            XCTAssertEqual(controller.linkState, state)
+            if interruption == 2 {
+                XCTAssertEqual(device.discoveryCallbacks.count, 1)
+                controller.simulateSonyLink(to: device)
+                XCTAssertEqual(device.openedChannels, [7])
+            }
+        }
+    }
+
+    @MainActor
+    func testSonyServiceDiscoveryWaitsForOutstandingCallbackBeforeAnotherQuery() async {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        let device = ServiceDiscoveryDevice()
+        controller.simulateSonyLink(to: device)
+        controller.simulateHandshakeTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        for _ in 0..<10 { controller.simulateSonyLink(to: device) }
+        XCTAssertEqual(device.discoveryCallbacks.count, 1)
+        XCTAssertTrue(device.openedChannels.isEmpty)
+        device.complete()
+        for _ in 0..<4 { await Task.yield() }
+        controller.simulateSonyLink(to: device)
+        XCTAssertEqual(device.discoveryCallbacks.count, 2)
+        device.complete()
+        for _ in 0..<4 { await Task.yield() }
+        device.service = ServiceDiscoveryRecord()
+        device.complete(1)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(device.openedChannels, [7])
+    }
+
+    @MainActor
     func testConnectionPreferenceOwnershipSurvivesControlResetAndChangesOnlyForAcceptedRequests() throws {
         let controller = SonyHeadphonesController(startAutomatically: false, simulatedReady: true)
         defer { controller.simulateControlLoss() }
@@ -1083,6 +1283,7 @@ final class SonyConnectionControllerTests: XCTestCase {
         XCTAssertNil(controller.retrySecondsRemaining)
         controller.simulateAutomaticRefresh()
         XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertFalse(controller.retryControlsIfNeeded())
         controller.refresh()
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0, 0])
         XCTAssertEqual(controller.linkState, .handshaking)
@@ -1367,5 +1568,43 @@ final class SonyConnectionControllerTests: XCTestCase {
             count += 1
         }
         XCTAssertNil(controller.simulatedPendingFrame)
+    }
+}
+
+private final class ServiceDiscoveryRecord: IOBluetoothSDPServiceRecord {
+    override func getRFCOMMChannelID(_ channelID: UnsafeMutablePointer<BluetoothRFCOMMChannelID>!) -> IOReturn {
+        channelID.pointee = 7
+        return kIOReturnSuccess
+    }
+}
+
+private final class ServiceDiscoveryDevice: IOBluetoothDevice {
+    var connected = true
+    var service: IOBluetoothSDPServiceRecord?
+    var discoveryStartStatus = kIOReturnSuccess
+    var discoveryCallbacks: [AnyObject] = []
+    var openedChannels: [BluetoothRFCOMMChannelID] = []
+    var serviceLookups = 0
+
+    override func isConnected() -> Bool { connected }
+
+    override func getServiceRecord(for uuid: IOBluetoothSDPUUID!) -> IOBluetoothSDPServiceRecord! {
+        serviceLookups += 1
+        return service
+    }
+
+    override func performSDPQuery(_ target: Any!) -> IOReturn {
+        discoveryCallbacks.append(target as AnyObject)
+        return discoveryStartStatus
+    }
+
+    override func openRFCOMMChannelAsync(_ channel: AutoreleasingUnsafeMutablePointer<IOBluetoothRFCOMMChannel?>!,
+                                        withChannelID channelID: BluetoothRFCOMMChannelID, delegate: Any!) -> IOReturn {
+        openedChannels.append(channelID)
+        return kIOReturnSuccess
+    }
+
+    func complete(_ index: Int = 0, status: IOReturn = kIOReturnSuccess) {
+        discoveryCallbacks[index].sdpQueryComplete?(self, status: status)
     }
 }

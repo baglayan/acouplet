@@ -559,6 +559,12 @@ final class SonyEarTipFitControllerTests: XCTestCase {
             XCTAssertEqual(payloads(controller).filter { $0 == start }.count, 1)
             if useBluetoothLE { controller.connectBluetoothLE() } else { controller.connect() }
             XCTAssertNil(controller.earTipFitTransition)
+            XCTAssertFalse(controller.showsMenuBarIcon)
+            if useBluetoothLE {
+                XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: false, priorBluetoothLE: true, classicConnected: false))
+            } else {
+                XCTAssertNotNil(controller.simulateClassicConnection())
+            }
             XCTAssertTrue(controller.showsMenuBarIcon)
             XCTAssertFalse(controller.isDeviceConnected)
             controller.simulateDeviceConnection(named: "WF-1000XM5")
