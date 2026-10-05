@@ -25,14 +25,18 @@ struct SonyHeadGesturePractice: Equatable, Sendable {
     private(set) var mode: Mode?
     private(set) var receivedGesture: Gesture?
     private(set) var gestureRevision: UInt64 = 0
+    private var gestureCounts: [Gesture: Int] = [:]
 
     init(supportedFunctions: Set<UInt8> = []) {
         isSupported = supportedFunctions.contains(0xFF)
     }
 
+    func count(for gesture: Gesture) -> Int { gestureCounts[gesture, default: 0] }
+
     mutating func resetGestureEvents() {
         receivedGesture = nil
         gestureRevision = 0
+        gestureCounts = [:]
     }
 
     @discardableResult
@@ -50,6 +54,7 @@ struct SonyHeadGesturePractice: Equatable, Sendable {
             guard payload.count == 3, let gesture = Gesture(rawValue: payload[2]) else { return false }
             receivedGesture = gesture
             gestureRevision &+= 1
+            gestureCounts[gesture, default: 0] += 1
         default:
             return false
         }

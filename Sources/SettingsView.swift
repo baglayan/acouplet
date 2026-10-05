@@ -514,73 +514,128 @@ private struct HeadGesturePracticeSheet: View {
     @EnvironmentObject private var headphones: SonyHeadphonesController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @State private var target = SonyHeadGesturePractice.Gesture.nod
     @State private var feedbackAfterRevision: UInt64 = 0
+    @State private var countAtSelection = 0
+
+    private var detectedGesture: SonyHeadGesturePractice.Gesture? {
+        headphones.headGesturePractice.gestureRevision > feedbackAfterRevision ? headphones.headGesturePractice.receivedGesture : nil
+    }
+
+    private var matchingGestureCount: Int {
+        min(3, max(0, headphones.headGesturePractice.count(for: target) - countAtSelection))
+    }
 
     var body: some View {
         if let transition = headphones.headGesturePracticeTransition, transition.id == transitionID {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("Practice Head Gestures").font(.title2).fontWeight(.semibold)
-                    .accessibilityIdentifier("gesture.title")
-                VStack(alignment: .leading, spacing: 20) {
-                    if let message = transition.message {
-                        Text(message).fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier("gesture.message")
-                    } else if transition.phase == .practicing {
-                        Picker("Gesture", selection: $target) {
-                            Text("Nod").tag(SonyHeadGesturePractice.Gesture.nod)
-                            Text("Shake").tag(SonyHeadGesturePractice.Gesture.shake)
-                        }
-                        .pickerStyle(.segmented)
-                        .accessibilityIdentifier("gesture.target")
-                        Text(target == .nod ? String(localized: "Face forward, then nod your head up and down.") : String(localized: "Face forward, then shake your head from side to side."))
-                            .fixedSize(horizontal: false, vertical: true)
-                        GroupBox {
-                            VStack(alignment: .leading, spacing: 8) {
-                                if headphones.headGesturePractice.gestureRevision > feedbackAfterRevision,
-                                   let gesture = headphones.headGesturePractice.receivedGesture {
-                                    Label {
-                                        Text("\(gesture.title) detected")
-                                    } icon: {
-                                        Image(systemName: gesture == target ? "checkmark.circle.fill" : "arrow.trianglehead.clockwise")
-                                            .foregroundStyle(gesture == target ? Color.green : Color.primary)
-                                    }
-                                        .font(.headline)
-                                        .accessibilityIdentifier("gesture.detected")
-                                } else {
-                                    Label {
-                                        Text("Waiting for a gesture…")
-                                    } icon: {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .hidden()
-                                            .accessibilityHidden(true)
-                                    }
-                                        .font(.headline)
-                                        .accessibilityIdentifier("gesture.waiting")
-                                }
-                                Text("\(headphones.headGesturePractice.gestureRevision) gestures detected")
-                                    .font(.caption).monospacedDigit()
-                                    .accessibilityIdentifier("gesture.count")
-                            }
-                            .accessibilityElement(children: .contain)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                        }
-                        Text("If a gesture is not detected, face forward and remain still for a moment before trying again.")
-                            .font(.callout).fixedSize(horizontal: false, vertical: true)
-                    } else if transition.phase == .finished {
-                        Text("Practice has ended.")
-                    } else {
-                        Text("Wear both earbuds and face forward.")
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if transition.waitingForReport {
-                        HeadphoneTestProgress(title: transition.phase == .checking ? String(localized: "Preparing practice…") : transition.phase == .entering ? String(localized: "Starting practice…") : String(localized: "Ending practice…"))
-                            .accessibilityIdentifier("gesture.progress")
-                    }
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 16) {
+                    Text("Practice Head Gestures").font(.headline)
+                        .accessibilityIdentifier("gesture.title")
                     Spacer(minLength: 0)
+                    Picker("Gesture", selection: $target) {
+                        Text("Nod").tag(SonyHeadGesturePractice.Gesture.nod)
+                        Text("Shake").tag(SonyHeadGesturePractice.Gesture.shake)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 136)
+                    .disabled(transition.phase != .ready && transition.phase != .practicing)
+                    .accessibilityIdentifier("gesture.target")
+                }
+                GroupBox {
+                    HStack(spacing: 16) {
+                        HStack(spacing: 4) {
+                            let head = Image(systemName: "face.smiling.inverse")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.tint)
+                            if !reduceMotion && scenePhase == .active && matchingGestureCount < 3
+                                && (transition.phase == .ready || transition.phase == .practicing) {
+                                head.phaseAnimator([0, -1, 0, 1]) { content, phase in
+                                    content.offset(x: target == .shake ? CGFloat(phase) * 6 : 0,
+                                                   y: target == .nod ? CGFloat(phase) * 6 : 0)
+                                } animation: { _ in .easeInOut(duration: 0.35) }
+                            } else {
+                                head
+                            }
+                            Image(systemName: target == .nod ? "arrow.up.and.down" : "arrow.left.and.right")
+                                .font(.callout.weight(.medium))
+                                .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
+                        }
+                        .foregroundStyle(.secondary)
+                        .frame(width: 64)
+                        .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let message = transition.message {
+                                Text(message).fixedSize(horizontal: false, vertical: true)
+                                    .accessibilityIdentifier("gesture.message")
+                            } else if transition.phase == .practicing {
+                                HStack(spacing: 6) {
+                                    Image(systemName: matchingGestureCount == 3 || detectedGesture == target ? "checkmark.circle.fill" : detectedGesture == nil ? "circle.dotted" : "arrow.trianglehead.clockwise")
+                                        .foregroundStyle(matchingGestureCount == 3 || detectedGesture == target ? Color.green : Color.secondary)
+                                        .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
+                                        .symbolEffectsRemoved(reduceMotion || detectedGesture != target)
+                                        .symbolEffect(.bounce, value: matchingGestureCount)
+                                        .accessibilityHidden(true)
+                                    if matchingGestureCount == 3 {
+                                        Text("All set")
+                                    } else if let detectedGesture {
+                                        Text("\(detectedGesture.title) detected")
+                                    } else {
+                                        Text("Waiting for a gesture…")
+                                    }
+                                }
+                                .font(.headline)
+                                .accessibilityElement(children: .combine)
+                                .accessibilityIdentifier(matchingGestureCount == 3 ? "gesture.success" : detectedGesture == nil ? "gesture.waiting" : "gesture.detected")
+                            } else if transition.phase == .finished {
+                                Text("Practice has ended.").font(.headline)
+                            } else {
+                                Text("Wear both earbuds and face forward.")
+                                    .font(.headline)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            if transition.message == nil && transition.phase != .finished {
+                                Text(target == .nod ? String(localized: "Face forward, then nod your head up and down.") : String(localized: "Face forward, then shake your head from side to side."))
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            if transition.waitingForReport {
+                                HeadphoneTestProgress(title: transition.phase == .checking ? String(localized: "Preparing practice…") : transition.phase == .entering ? String(localized: "Starting practice…") : String(localized: "Ending practice…"))
+                                    .accessibilityIdentifier("gesture.progress")
+                            } else if transition.phase == .practicing {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("\(matchingGestureCount) of 3 gestures detected")
+                                        .font(.caption).monospacedDigit()
+                                        .foregroundStyle(.secondary)
+                                        .accessibilityIdentifier("gesture.count")
+                                    HStack(spacing: 5) {
+                                        ForEach(0..<3) { index in
+                                            ProgressView(value: index < matchingGestureCount ? 1 : 0, total: 1)
+                                                .progressViewStyle(.linear)
+                                                .tint(index < matchingGestureCount ? .green : .clear)
+                                                .frame(width: 18)
+                                        }
+                                    }
+                                    .accessibilityHidden(true)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+                    .padding(6)
                 }
                 .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: transition.phase)
+                Text("If a gesture is not detected, face forward and remain still for a moment before trying again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .opacity(transition.message == nil && transition.phase != .finished ? 1 : 0)
+                    .accessibilityHidden(transition.message != nil || transition.phase == .finished)
+                Spacer(minLength: 0)
                 HStack {
                     Spacer()
                     Button(transition.canDismiss || transition.phase == .practicing ? String(localized: "Done") : String(localized: "Cancel")) {
@@ -602,8 +657,8 @@ private struct HeadGesturePracticeSheet: View {
                     }
                 }
             }
-            .padding(24)
-            .frame(width: 460, height: 360)
+            .padding(20)
+            .frame(width: 440, height: 296)
             .presentationSizing(.fitted)
             .accessibilityElement(children: .contain)
             .interactiveDismissDisabled(!transition.canDismiss)
@@ -614,11 +669,14 @@ private struct HeadGesturePracticeSheet: View {
                     dismiss()
                 }
             }
-            .onChange(of: target) { _, _ in feedbackAfterRevision = headphones.headGesturePractice.gestureRevision }
+            .onChange(of: target) { _, _ in
+                feedbackAfterRevision = headphones.headGesturePractice.gestureRevision
+                countAtSelection = headphones.headGesturePractice.count(for: target)
+            }
             .onChange(of: headphones.headGesturePractice.gestureRevision) { _, _ in
                 if NSWorkspace.shared.isVoiceOverEnabled, let gesture = headphones.headGesturePractice.receivedGesture {
                     NSAccessibility.post(element: NSApp!, notification: .announcementRequested,
-                                         userInfo: [.announcement: String(localized: "\(gesture.title) detected"), .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+                                         userInfo: [.announcement: matchingGestureCount == 3 ? String(localized: "All set") : String(localized: "\(gesture.title) detected"), .priority: NSAccessibilityPriorityLevel.medium.rawValue])
                 }
             }
             .onDisappear { headphones.cancelHeadGesturePractice(id: transitionID) }
@@ -1776,120 +1834,185 @@ struct MultipointControls: View {
 
     var body: some View {
         let state = headphones.multipoint
-        if state.inventory == nil {
-            if headphones.sourceTransition?.failureMessage == nil, headphones.deviceActionTransition?.failureMessage == nil {
-                Text("No device information received.")
+        VStack(alignment: .leading, spacing: 10) {
+            if state.inventory == nil {
+                if headphones.sourceTransition?.failureMessage == nil, headphones.deviceActionTransition?.failureMessage == nil {
+                    Text("No device information received.")
+                }
+            } else if state.devices.isEmpty {
+                Text("No saved devices.")
+            } else {
+                deviceGroup("Connected", devices: state.devices.filter(\.isConnected))
+                if state.devices.contains(where: \.isConnected), state.devices.contains(where: { !$0.isConnected }) {
+                    Divider()
+                }
+                deviceGroup("Saved", devices: state.devices.filter { !$0.isConnected })
             }
-        } else if state.devices.isEmpty {
-            Text("No saved devices.")
-        } else {
-            deviceGroup("Connected", devices: state.devices.filter(\.isConnected))
-            if state.devices.contains(where: \.isConnected), state.devices.contains(where: { !$0.isConnected }) {
+            if state.supportsSourceControl, let keeping = state.keeping {
                 Divider()
-            }
-            deviceGroup("Saved", devices: state.devices.filter { !$0.isConnected })
-        }
-        if state.supportsSourceControl, let keeping = state.keeping {
-            Toggle("Keep current audio source", isOn: Binding(get: { keeping }, set: headphones.setSourceKeeping))
+                Toggle(isOn: Binding(get: { keeping }, set: headphones.setSourceKeeping)) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Keep current audio source")
+                        Text("Don’t switch when another device starts playing.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .toggleStyle(.switch)
                 .disabled(headphones.sourceControlUnavailableReason != nil || (!keeping && state.selectedSource == nil))
                 .accessibilityIdentifier("multipoint.keeping")
                 .help("Prevents automatic switching to another connected device. Choosing another device turns this off.")
-        }
-        if headphones.sourceTransition?.isFinished == false {
-            ProgressView("Changing audio source…")
-                .controlSize(.small)
-        } else if let message = headphones.sourceTransition?.failureMessage {
-            Text(message).font(.caption)
-                .accessibilityIdentifier("multipoint.error")
-        }
-        if let transition = headphones.deviceActionTransition {
-            if !transition.isFinished {
-                ProgressView(transition.action == .connect ? String(localized: "Connecting device…") : String(localized: "Disconnecting device…"))
-                    .controlSize(.small)
-            } else if let message = transition.failureMessage {
+            }
+            if let message = headphones.sourceTransition?.failureMessage {
+                Text(message).font(.caption)
+                    .accessibilityIdentifier("multipoint.error")
+            }
+            if let message = headphones.deviceActionTransition?.failureMessage {
                 Text(message).font(.caption)
                     .accessibilityIdentifier("multipoint.deviceError")
             }
+            if state.inventoryIsStale {
+                Label("The device list could not be read. Refresh to try again.", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+            }
+            if !compact {
+                Divider()
+                Button("Refresh Devices") { headphones.refreshDevices() }
+                    .headphoneButtonStyle()
+                    .tint(nil)
+                    .controlSize(.small)
+                    .disabled(!headphones.canRefreshDevices)
+                    .accessibilityIdentifier("multipoint.refresh")
+            }
         }
-        if state.inventoryIsStale {
-            Label("The device list could not be read. Refresh to try again.", systemImage: "exclamationmark.triangle")
-                .font(.caption)
-        }
-        Button("Refresh Devices") { headphones.refreshDevices() }
-            .headphoneButtonStyle()
-            .tint(nil)
-            .controlSize(.small)
-            .disabled(!headphones.canRefreshDevices)
-            .accessibilityIdentifier("multipoint.refresh")
-
     }
 
     @ViewBuilder
     private func deviceGroup(_ title: LocalizedStringKey, devices: [SonyMultipointDevice]) -> some View {
         if !devices.isEmpty {
-            VStack(alignment: .leading, spacing: compact ? 8 : 12) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
                 ForEach(devices) { device in
-                    HStack(spacing: compact ? 8 : 12) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(Self.title(for: device, among: headphones.multipoint.devices))
-                                .fixedSize(horizontal: false, vertical: true)
-                            Text(!headphones.multipoint.inventoryIsStale && headphones.multipoint.selectedSource?.id == device.id
-                                 ? String(localized: "Selected for audio") : device.isConnected ? String(localized: "Connected") : String(localized: "Saved"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("multipoint.status.\(device.id)")
-                        }
-                        Spacer(minLength: 4)
-                        HStack(spacing: 6) {
-                            deviceActions(device)
-                        }
-                        .headphoneButtonStyle()
-                        .tint(nil)
-                        .controlSize(.small)
-                        .fixedSize()
-                    }
+                    MultipointDeviceRow(device: device)
                 }
             }
-        }
-    }
-
-    @ViewBuilder
-    private func deviceActions(_ device: SonyMultipointDevice) -> some View {
-        let state = headphones.multipoint
-        if device.isConnected, state.supportsSourceControl {
-            if !state.inventoryIsStale, state.selectedSource?.id == device.id {
-                Image(systemName: "checkmark")
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Selected for audio")
-            } else {
-                Button("Use for Audio") { headphones.selectAudioSource(device) }
-                    .foregroundStyle(Color.primary)
-                    .disabled(headphones.sourceControlUnavailableReason != nil)
-                    .help(headphones.sourceControlUnavailableReason ?? Self.title(for: device, among: state.devices))
-                    .accessibilityLabel("Use \(Self.title(for: device, among: state.devices)) for Audio")
-                    .accessibilityIdentifier("multipoint.select.\(device.id)")
-            }
-        }
-        if state.supportsInventory {
-            let action: SonyPeripheralAction = device.isConnected ? .disconnect : .connect
-            let reason = headphones.deviceActionUnavailableReason(action, device: device)
-            Button(device.isConnected ? String(localized: "Disconnect") : String(localized: "Connect")) {
-                headphones.changeDeviceConnection(action, device: device)
-            }
-            .foregroundStyle(Color.primary)
-            .disabled(reason != nil)
-            .help(reason ?? (device.isConnected ? String(localized: "Disconnect this device from the headphones") : String(localized: "Connect this device to the headphones")))
-            .accessibilityLabel("\(device.isConnected ? String(localized: "Disconnect") : String(localized: "Connect")) \(Self.title(for: device, among: state.devices))")
-            .accessibilityIdentifier("multipoint.\(device.isConnected ? "disconnect" : "connect").\(device.id)")
         }
     }
 
     static func title(for device: SonyMultipointDevice, among devices: [SonyMultipointDevice]) -> String {
         devices.filter { $0.name.localizedCaseInsensitiveCompare(device.name) == .orderedSame }.count > 1
             ? "\(device.name) · \(device.address)" : device.name
+    }
+}
+
+private struct MultipointDeviceRow: View {
+    let device: SonyMultipointDevice
+    @EnvironmentObject private var headphones: SonyHeadphonesController
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+    @State private var hovered = false
+    @FocusState private var sourceFocused: Bool
+    @FocusState private var actionFocused: Bool
+
+    private var title: String { MultipointControls.title(for: device, among: headphones.multipoint.devices) }
+    private var selected: Bool {
+        !headphones.multipoint.inventoryIsStale && headphones.multipoint.selectedSource?.id == device.id
+    }
+    private var status: String {
+        selected ? String(localized: "Selected for audio") : device.isConnected ? String(localized: "Connected") : String(localized: "Saved")
+    }
+    private var showsAction: Bool { hovered || sourceFocused || actionFocused || voiceOverEnabled }
+    private var progressLabel: String? {
+        if let transition = headphones.deviceActionTransition, !transition.isFinished, transition.targetAddress == device.id {
+            return transition.action == .connect ? String(localized: "Connecting device…") : String(localized: "Disconnecting device…")
+        }
+        if let transition = headphones.sourceTransition, !transition.isFinished,
+           (transition.targetAddress ?? headphones.multipoint.selectedSource?.id) == device.id {
+            return String(localized: "Changing audio source…")
+        }
+        return nil
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if device.isConnected, headphones.multipoint.supportsSourceControl {
+                Button { headphones.selectAudioSource(device) } label: { deviceLabel }
+                    .buttonStyle(.plain)
+                    .focused($sourceFocused)
+                    .disabled(headphones.sourceControlUnavailableReason != nil)
+                    .help(headphones.sourceControlUnavailableReason ?? title)
+                    .accessibilityLabel("Use \(title) for Audio")
+                    .accessibilityValue(progressLabel ?? status)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                    .accessibilityIdentifier("multipoint.select.\(device.id)")
+            } else {
+                deviceLabel
+                    .focusable(headphones.multipoint.supportsInventory)
+                    .focused($sourceFocused)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityValue(progressLabel ?? status)
+            }
+            if headphones.multipoint.supportsInventory {
+                let action: SonyPeripheralAction = device.isConnected ? .disconnect : .connect
+                let reason = headphones.deviceActionUnavailableReason(action, device: device)
+                Button(device.isConnected ? String(localized: "Disconnect") : String(localized: "Connect")) {
+                    headphones.changeDeviceConnection(action, device: device)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 6))
+                .tint(nil)
+                .controlSize(.small)
+                .focused($actionFocused)
+                .disabled(reason != nil)
+                .help(reason ?? (device.isConnected ? String(localized: "Disconnect this device from the headphones") : String(localized: "Connect this device to the headphones")))
+                .accessibilityLabel("\(device.isConnected ? String(localized: "Disconnect") : String(localized: "Connect")) \(title)")
+                .accessibilityIdentifier("multipoint.\(device.isConnected ? "disconnect" : "connect").\(device.id)")
+                .opacity(showsAction ? 1 : 0)
+                .fixedSize()
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(showsAction ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, -8)
+        .onHover { hovered = $0 }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("multipoint.row.\(device.id)")
+    }
+
+    private var deviceLabel: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle().fill(selected ? Color.accentColor : Color.primary.opacity(0.1))
+                if progressLabel != nil {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(selected ? .white : .secondary)
+                        .accessibilityHidden(true)
+                } else {
+                    Image(systemName: device.symbolName)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(selected ? Color.white : .primary)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(width: 28, height: 28)
+            Text(title)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(device.isConnected ? .primary : .secondary)
+            if selected && differentiateWithoutColor {
+                Image(systemName: "checkmark").accessibilityHidden(true)
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .help(title)
     }
 }
 
@@ -1948,14 +2071,45 @@ struct MultipointSourcePicker: View {
 }
 
 struct MultipointSettingControl: View {
+    var compact = false
     @EnvironmentObject private var headphones: SonyHeadphonesController
     @State private var presentedAlert: SonyConnectionAlert?
     @State private var showsAlert = false
 
     var body: some View {
-        if headphones.systemFeatures.multipoint != nil || headphones.multipointTransition != nil {
+        if compact || headphones.systemFeatures.multipoint != nil || headphones.multipointTransition != nil {
             VStack(alignment: .leading, spacing: 6) {
-                if let enabled = headphones.systemFeatures.multipoint?.enabled {
+                if compact {
+                    HStack(spacing: 12) {
+                        Text("Multipoint").font(.headline).fontWeight(.semibold)
+                        Spacer()
+                        Group {
+                            if headphones.multipointTransition?.isFinished == false, headphones.multipointTransition?.awaitingUser == false {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .accessibilityLabel(headphones.multipointTransition?.phase == .recovering ? String(localized: "Reconnecting controls…") : String(localized: "Checking device connections…"))
+                            } else {
+                                Button { headphones.refreshDevices() } label: { Image(systemName: "arrow.clockwise") }
+                                    .buttonStyle(.borderless)
+                                    .tint(nil)
+                                    .foregroundStyle(.secondary)
+                                    .disabled(!headphones.canRefreshDevices)
+                                    .accessibilityLabel("Refresh Devices")
+                                    .accessibilityIdentifier("multipoint.refresh")
+                                    .help("Refresh Devices")
+                            }
+                        }
+                        .frame(width: 16, height: 16)
+                        if let enabled = headphones.systemFeatures.multipoint?.enabled {
+                            Toggle("Multipoint", isOn: Binding(get: { enabled }, set: headphones.setMultipointEnabled))
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .disabled(headphones.multipointUnavailableReason != nil)
+                                .help(headphones.multipointUnavailableReason ?? "")
+                                .accessibilityIdentifier("multipoint.enabled")
+                        }
+                    }
+                } else if let enabled = headphones.systemFeatures.multipoint?.enabled {
                     Toggle("Multipoint", isOn: Binding(get: { enabled }, set: headphones.setMultipointEnabled))
                         .disabled(headphones.multipointUnavailableReason != nil)
                         .help(headphones.multipointUnavailableReason ?? "")
@@ -1976,7 +2130,7 @@ struct MultipointSettingControl: View {
                         Button("Review Change…") { showsAlert = true }
                             .controlSize(.small)
                             .accessibilityIdentifier("multipoint.reviewChange")
-                    } else if !transition.isFinished {
+                    } else if !compact, !transition.isFinished {
                         ProgressView(transition.phase == .recovering ? String(localized: "Reconnecting controls…") : String(localized: "Checking device connections…"))
                             .controlSize(.small)
                     }

@@ -8,6 +8,93 @@ struct SonyMultipointDevice: Equatable, Identifiable, Sendable {
 
     var id: String { address }
     var isConnected: Bool { connectionID != 0 }
+
+    var symbolName: String {
+        let major = (classOfDevice >> 8) & 0x1F
+        let minor = (classOfDevice >> 2) & 0x3F
+        let unknown = classOfDevice & 0x03 != 0 || major == 0 || major == 0x1F
+        let words = name.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+        let normalized = " " + words.joined(separator: " ") + " "
+        func has(_ names: String...) -> Bool {
+            names.contains { normalized.contains(" " + $0 + " ") }
+        }
+
+        if unknown || major == 1 {
+            if has("macbook", "macbook pro", "macbook air", "macbookpro", "macbookair", "powerbook", "ibook") { return "macbook" }
+            if has("mac mini", "macmini") { return "macmini" }
+            if has("mac studio", "macstudio") { return "macstudio" }
+            if has("mac pro", "macpro") {
+                let years = words.filter { $0.count == 4 && $0.allSatisfy(\.isNumber) }
+                if years.count == 1 {
+                    switch years[0] {
+                    case "2006", "2007", "2008", "2009", "2010", "2011", "2012": return "macpro.gen1"
+                    case "2013": return "macpro.gen2"
+                    case "2019", "2023": return has("rack") ? "macpro.gen3.server" : "macpro.gen3"
+                    default: break
+                    }
+                }
+                return "desktopcomputer"
+            }
+            if has("imac", "imac pro", "imacpro", "power mac", "powermac") { return "desktopcomputer" }
+            if has("xserve") { return "server.rack" }
+        }
+        if (unknown || major == 2), has("iphone") {
+            let model = words.drop { $0 != "iphone" }.dropFirst()
+            let variant = model.dropFirst().first
+            switch model.first {
+            case "2g", "3g", "3gs", "4", "4s", "5", "5c", "5s", "6", "6s", "7", "8": return "iphone.gen1"
+            case "se":
+                if variant == nil || ["1", "2", "3", "1st", "2nd", "3rd", "2016", "2020", "2022"].contains(variant ?? "") {
+                    return "iphone.gen1"
+                }
+            case "se2", "se3": return "iphone.gen1"
+            case "x", "xr", "xs", "11", "12", "13", "16e", "17e": return "iphone.gen2"
+            case "14": return variant == "pro" ? "iphone.gen3" : "iphone.gen2"
+            case "15", "air": return "iphone.gen3"
+            case "16", "17": return variant == "e" ? "iphone.gen2" : "iphone.gen3"
+            case "18" where variant == "pro": return "iphone.gen3"
+            default: break
+            }
+            return "iphone"
+        }
+        if (unknown || major == 1 || major == 2), has("ipad") { return "ipad" }
+        if (unknown || major == 1 || major == 2 || major == 4), has("ipod touch", "ipodtouch", "ipod nano", "ipodnano") { return "ipodtouch" }
+        if (unknown || major == 1 || major == 2 || major == 7), has("apple watch", "applewatch") { return "applewatch" }
+        if (unknown || major == 1 || major == 4), has("apple tv", "appletv") { return "appletv" }
+        if (unknown || major == 1 || major == 4 || major == 7), has("vision pro", "visionpro") { return "visionpro" }
+
+        if unknown {
+            if has("phone", "smartphone") { return "smartphone" }
+            if has("tablet") { return "rectangle.portrait" }
+            if has("laptop", "notebook") { return "laptopcomputer" }
+            if has("desktop", "computer", "pc", "mac") { return "desktopcomputer" }
+            if has("tv", "television") { return "tv" }
+            return "wave.3.right"
+        }
+        switch major {
+        case 1:
+            switch minor {
+            case 2: return "server.rack"
+            case 3: return "laptopcomputer"
+            case 4, 5: return "rectangle.portrait"
+            case 6: return "applewatch"
+            default: return "desktopcomputer"
+            }
+        case 2: return "smartphone"
+        case 4:
+            switch minor {
+            case 1, 2, 6: return "headphones"
+            case 4: return "mic"
+            case 9, 14, 15: return "tv"
+            case 12, 13: return "video"
+            case 18: return "gamecontroller"
+            default: return "hifispeaker"
+            }
+        case 7 where minor == 1: return "applewatch"
+        case 7 where minor == 5: return "visionpro"
+        default: return "wave.3.right"
+        }
+    }
 }
 
 struct SonyMultipointInventory: Equatable, Sendable {

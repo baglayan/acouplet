@@ -1,6 +1,40 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "All set": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All set"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hazır"
+          }
+        }
+      }
+    },
+    "%lld of 3 gestures detected": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld of 3 gestures detected"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Algılanan hareket: %lld / 3"
+          }
+        }
+      }
+    },
     "Finish the current connection change before starting LDAC.": {
       "extractionState": "manual",
       "localizations": {
@@ -4372,6 +4406,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Disconnecting device…"
+          }
+        }
+      }
+    },
+    "Don’t switch when another device starts playing.": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Başka bir cihaz ses çalmaya başladığında geçiş yapma."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Don’t switch when another device starts playing."
           }
         }
       }

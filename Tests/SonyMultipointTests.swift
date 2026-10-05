@@ -1,7 +1,86 @@
 import XCTest
+import AppKit
 @testable import Acouplet
 
 final class SonyMultipointTests: XCTestCase {
+    func testSourceSymbolsRecognizeAppleFamiliesWithoutDependingOnOwnerNames() {
+        let cases: [(String, UInt32, String)] = [
+            ("Work MacBook Pro", 0x2A4104, "macbook"), ("MacBook Air", 0x010C, "macbook"),
+            ("MacBook", 0, "macbook"), ("PowerBook", 0x010C, "macbook"), ("iBook", 0, "macbook"),
+            ("Office iMac", 0x0104, "desktopcomputer"), ("iMac Pro", 0, "desktopcomputer"),
+            ("Mac mini", 0x0104, "macmini"), ("Mac Studio", 0x0104, "macstudio"),
+            ("Mac Pro", 0x0104, "desktopcomputer"), ("Power Mac", 0x0104, "desktopcomputer"),
+            ("Xserve", 0x0108, "server.rack"), ("Morgan’s iPhone", 0x5A020C, "iphone"),
+            ("IPAD Pro", 0x020C, "ipad"), ("iPad mini", 0x0114, "ipad"),
+            ("iPod touch", 0x041C, "ipodtouch"), ("iPod nano", 0x041C, "ipodtouch"),
+            ("Apple Watch Ultra", 0x020C, "applewatch"), ("Apple Watch SE", 0x0704, "applewatch"),
+            ("Living room Apple TV", 0x0424, "appletv"), ("Apple Vision Pro", 0x0100, "visionpro"),
+            ("MacMini", 0xFFFFFF, "macmini")
+        ]
+        for (name, deviceClass, symbol) in cases {
+            let device = SonyMultipointDevice(address: firstAddress, connectionID: 1, classOfDevice: deviceClass, name: name)
+            XCTAssertEqual(device.symbolName, symbol, name)
+            XCTAssertNotNil(NSImage(systemSymbolName: device.symbolName, accessibilityDescription: nil), symbol)
+        }
+    }
+
+    func testSourceSymbolsUseExplicitMacProAndIPhoneGenerations() {
+        let cases: [(String, UInt32, String)] = [
+            ("Mac Pro (2006)", 0x0104, "macpro.gen1"), ("Mac Pro (Early 2008)", 0, "macpro.gen1"),
+            ("Mac Pro (Mid 2012)", 0x0104, "macpro.gen1"), ("Mac Pro (Late 2013)", 0, "macpro.gen2"),
+            ("Mac Pro (2019)", 0x0104, "macpro.gen3"), ("Mac Pro 2023", 0, "macpro.gen3"),
+            ("Mac Pro (Rack, 2023)", 0x0108, "macpro.gen3.server"), ("Mac Pro 2027", 0, "desktopcomputer"),
+            ("Mac Pro 2013 2023", 0, "desktopcomputer"), ("iPhone 3GS", 0x020C, "iphone.gen1"),
+            ("iPhone 6s Plus", 0, "iphone.gen1"), ("iPhone 8 Plus", 0, "iphone.gen1"),
+            ("iPhone SE", 0, "iphone.gen1"), ("iPhone SE 2", 0, "iphone.gen1"),
+            ("iPhone SE (3rd generation)", 0, "iphone.gen1"), ("iPhone SE3", 0, "iphone.gen1"),
+            ("iPhone SE (2022)", 0, "iphone.gen1"), ("iPhone SE 4", 0, "iphone"),
+            ("iPhone X", 0, "iphone.gen2"), ("iPhone XR", 0, "iphone.gen2"),
+            ("iPhone XS Max", 0, "iphone.gen2"), ("iPhone 11 Pro", 0, "iphone.gen2"),
+            ("iPhone 12 mini", 0, "iphone.gen2"), ("iPhone 13 Pro Max", 0, "iphone.gen2"),
+            ("iPhone 14 Plus", 0, "iphone.gen2"), ("iPhone 14 Pro Max", 0, "iphone.gen3"),
+            ("iPhone 15", 0, "iphone.gen3"), ("iPhone 16e", 0, "iphone.gen2"),
+            ("iPhone 16 Pro", 0, "iphone.gen3"), ("iPhone 17e", 0, "iphone.gen2"),
+            ("iPhone 17 e", 0, "iphone.gen2"), ("iPhone 17 Pro", 0, "iphone.gen3"),
+            ("iPhone Air", 0, "iphone.gen3"), ("iPhone 18 Pro Max", 0, "iphone.gen3"),
+            ("iPhone 18", 0, "iphone"), ("iPhone 99", 0, "iphone"),
+            ("iPhone 16e speaker", 0x0414, "hifispeaker"), ("Mac Pro 2013 phone", 0x020C, "smartphone")
+        ]
+        for (name, deviceClass, symbol) in cases {
+            let device = SonyMultipointDevice(address: firstAddress, connectionID: 1, classOfDevice: deviceClass, name: name)
+            XCTAssertEqual(device.symbolName, symbol, name)
+            XCTAssertNotNil(NSImage(systemSymbolName: device.symbolName, accessibilityDescription: nil), symbol)
+        }
+    }
+
+    func testSourceSymbolsRetainReportedCategoryForRenamedAndConflictingDevices() {
+        let cases: [(String, UInt32, String)] = [
+            ("Work", 0x2A410C, "laptopcomputer"), ("Study", 0x0104, "desktopcomputer"),
+            ("Server", 0x0108, "server.rack"), ("Reading", 0x0114, "rectangle.portrait"),
+            ("Personal", 0x5A020C, "smartphone"), ("Wrist", 0x0704, "applewatch"),
+            ("TV", 0x043C, "tv"), ("Player", 0x041C, "hifispeaker"),
+            ("Mac mini", 0x020C, "smartphone"), ("iPhone", 0x0104, "desktopcomputer"),
+            ("iPhone speaker", 0x0414, "hifispeaker"), ("Apple TV", 0x020C, "smartphone"),
+            ("MacBook gamepad", 0x0508, "wave.3.right")
+        ]
+        for (name, deviceClass, symbol) in cases {
+            let device = SonyMultipointDevice(address: firstAddress, connectionID: 0, classOfDevice: deviceClass, name: name)
+            XCTAssertEqual(device.symbolName, symbol, name)
+            XCTAssertNotNil(NSImage(systemSymbolName: device.symbolName, accessibilityDescription: nil), symbol)
+        }
+    }
+
+    func testSourceSymbolsDoNotMatchProductNamesInsideOtherWords() {
+        for name in ["Pineapple Watch", "Notiphone", "Macbookish", "Microphone", "iPod classic", "iPod shuffle", "HomePod", "Personal"] {
+            let device = SonyMultipointDevice(address: firstAddress, connectionID: 0, classOfDevice: 0xFFFFFF, name: name)
+            XCTAssertEqual(device.symbolName, "wave.3.right", name)
+        }
+        for (name, symbol) in [("Phone", "smartphone"), ("Tablet", "rectangle.portrait"), ("Laptop", "laptopcomputer"), ("TV", "tv")] {
+            let device = SonyMultipointDevice(address: firstAddress, connectionID: 0, classOfDevice: 0, name: name)
+            XCTAssertEqual(device.symbolName, symbol, name)
+        }
+    }
+
     @MainActor
     func testSourceTitlesDisambiguateNamesAndCollidingAddressSuffixes() {
         let first = SonyMultipointDevice(address: "02:00:00:00:00:01", connectionID: 1, classOfDevice: 0, name: "MacBook Pro")

@@ -209,30 +209,16 @@ struct MenuBarView: View {
                 .accessibilityLabel("Manage Devices")
                 .accessibilityIdentifier("multipoint.open")
                 .help("Manage Devices")
+                .background {
+                    MultipointPopover(isPresented: $showsMultipoint, headphones: headphones, maximumHeight: min(availableHeight, 480))
+                        .accessibilityHidden(true)
+                }
             }
             MultipointSourcePicker()
             if let message = headphones.sourceTransition?.failureMessage ?? headphones.deviceActionTransition?.failureMessage {
                 Text(message).font(.caption)
             }
             Divider()
-        }
-        .popover(isPresented: $showsMultipoint, arrowEdge: .trailing) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Multipoint").font(.headline)
-                    MultipointSettingControl()
-                    if headphones.multipoint.supportsInventory || headphones.sourceTransition?.phase == .failed
-                        || headphones.deviceActionTransition?.phase == .failed {
-                        MultipointControls(compact: true)
-                    }
-                }
-                .padding(16)
-            }
-            .scrollBounceBehavior(.basedOnSize)
-            .frame(width: 360)
-            .frame(maxHeight: min(availableHeight, 480))
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityIdentifier("multipoint.popover")
         }
     }
 
@@ -1284,6 +1270,158 @@ struct DeviceIcon: View {
             color.setFill()
             rect.fill(using: .sourceAtop)
             return true
+        }
+    }
+}
+
+private struct MultipointPopoverContent: View {
+    @ObservedObject var headphones: SonyHeadphonesController
+    let maximumHeight: CGFloat
+    let onSizeChange: (CGSize) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                MultipointSettingControl(compact: true)
+                Divider()
+                if headphones.multipoint.supportsInventory || headphones.sourceTransition?.phase == .failed
+                    || headphones.deviceActionTransition?.phase == .failed {
+                    MultipointControls(compact: true)
+                }
+                Divider()
+                Button("Bluetooth Settings…") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
+                }
+                .buttonStyle(.borderless)
+                .tint(nil)
+                .foregroundStyle(.primary)
+                .accessibilityIdentifier("multipoint.bluetoothSettings")
+            }
+            .padding(14)
+            .font(.body)
+            .fontWeight(.regular)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(width: 320)
+        .frame(maxHeight: maximumHeight)
+        .fixedSize(horizontal: false, vertical: true)
+        .environmentObject(headphones)
+        .controlSize(.regular)
+        .foregroundStyle(Color.primary)
+        .tint(.accentColor)
+        .accessibilityIdentifier("multipoint.popover")
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { onSizeChange($0) }
+    }
+}
+
+private struct MultipointPopover: NSViewRepresentable {
+    @Binding var isPresented: Bool
+    let headphones: SonyHeadphonesController
+    let maximumHeight: CGFloat
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        view.onWindowChange = { [weak coordinator = context.coordinator] in coordinator?.schedulePresentation() }
+        return view
+    }
+
+    func updateNSView(_ nsView: AnchorView, context: Context) {
+        context.coordinator.update(self, anchor: nsView)
+    }
+
+    static func dismantleNSView(_ nsView: AnchorView, coordinator: Coordinator) {
+        nsView.onWindowChange = nil
+        coordinator.stop()
+    }
+
+    final class AnchorView: NSView {
+        var onWindowChange: (() -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindowChange?()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSPopoverDelegate {
+        private var owner: MultipointPopover
+        private weak var anchor: AnchorView?
+        private let popover = NSPopover()
+        private var controller: NSHostingController<MultipointPopoverContent>?
+        private var measuredContentSize = NSSize.zero
+
+        init(_ owner: MultipointPopover) {
+            self.owner = owner
+            super.init()
+            popover.behavior = .transient
+            popover.delegate = self
+        }
+
+        func update(_ owner: MultipointPopover, anchor: AnchorView) {
+            self.owner = owner
+            self.anchor = anchor
+            if owner.isPresented {
+                let content = MultipointPopoverContent(headphones: owner.headphones, maximumHeight: owner.maximumHeight) { [weak self] size in
+                    self?.measuredContentSize = size
+                    self?.schedulePresentation()
+                }
+                if let controller {
+                    controller.rootView = content
+                } else {
+                    let controller = NSHostingController(rootView: content)
+                    controller.sizingOptions = []
+                    self.controller = controller
+                    popover.contentViewController = controller
+                    measuredContentSize = controller.sizeThatFits(in: NSSize(width: 320, height: owner.maximumHeight))
+                }
+            }
+            schedulePresentation()
+        }
+
+        func schedulePresentation() {
+            DispatchQueue.main.async { [weak self] in self?.updatePresentation() }
+        }
+
+        private func updatePresentation() {
+            guard owner.isPresented else {
+                popover.close()
+                popover.contentViewController = nil
+                controller = nil
+                return
+            }
+            guard let anchor, let window = anchor.window, window.isVisible,
+                  measuredContentSize.width > 0, measuredContentSize.height > 0 else { return }
+            popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            popover.appearance = window.effectiveAppearance
+            if measuredContentSize != popover.contentSize { popover.contentSize = measuredContentSize }
+            if !popover.isShown {
+                popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxX)
+                popover.contentViewController?.view.window?.makeKey()
+            }
+        }
+
+        func popoverDidClose(_ notification: Notification) {
+            owner.isPresented = false
+            popover.contentViewController = nil
+            controller = nil
+            measuredContentSize = .zero
+        }
+
+        func stop() {
+            anchor = nil
+            popover.delegate = nil
+            popover.close()
+            popover.contentViewController = nil
+            controller = nil
+            let binding = owner.$isPresented
+            if binding.wrappedValue {
+                DispatchQueue.main.async { binding.wrappedValue = false }
+            }
         }
     }
 }

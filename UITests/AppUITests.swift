@@ -2115,27 +2115,90 @@ final class AppUITests: XCTestCase {
         XCTAssertTrue(manager.waitForExistence(timeout: 3))
         XCTAssertTrue(manager.staticTexts["Connected"].firstMatch.exists)
         XCTAssertTrue(manager.staticTexts["Saved"].firstMatch.exists)
-        XCTAssertTrue(manager.buttons["multipoint.select.02:00:00:00:00:02"].isHittable)
+        let phone = manager.buttons["multipoint.select.02:00:00:00:00:02"]
+        XCTAssertTrue(phone.isHittable)
+        phone.hover()
         XCTAssertTrue(manager.buttons["multipoint.disconnect.02:00:00:00:00:02"].isHittable)
-        XCTAssertTrue(manager.buttons["multipoint.connect.02:00:00:00:00:03"].exists)
-        captureGalleryScreenshot(manager.screenshot(), named: "Connected and saved devices — inline actions")
+        phone.click()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Selected for audio"), object: phone)], timeout: 4), .completed)
+        let saved = manager.descendants(matching: .any).matching(identifier: "multipoint.row.02:00:00:00:00:03").firstMatch
+        saved.hover()
+        XCTAssertFalse(manager.buttons["multipoint.connect.02:00:00:00:00:03"].isEnabled)
+        XCTAssertTrue(manager.buttons["multipoint.bluetoothSettings"].exists)
+        XCTAssertEqual(manager.buttons.matching(identifier: "multipoint.refresh").count, 1)
+        captureGalleryScreenshot(manager.screenshot(), named: "Connected and saved devices — hover actions")
+        manager.buttons["multipoint.select.02:00:00:00:00:05"].hover()
+        manager.buttons["multipoint.disconnect.02:00:00:00:00:05"].click()
+        XCTAssertTrue(manager.buttons["multipoint.select.02:00:00:00:00:05"].waitForNonExistence(timeout: 4))
+        let connect = manager.buttons["multipoint.connect.02:00:00:00:00:03"]
+        saved.hover()
+        let connectReady = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: connect)], timeout: 4)
+        captureGalleryScreenshot(manager.screenshot(), named: "Multipoint — after disconnect")
+        XCTAssertEqual(connectReady, .completed, manager.debugDescription)
+        if NSApplication.shared.isFullKeyboardAccessEnabled {
+            manager.buttons["multipoint.refresh"].hover()
+            for _ in 0..<16 where !connect.isHittable {
+                app.typeKey(.tab, modifierFlags: [])
+            }
+            XCTAssertTrue(connect.isHittable, "Keyboard focus must reveal the saved-device action")
+            app.typeKey(.tab, modifierFlags: [])
+            app.typeKey(.space, modifierFlags: [])
+        } else {
+            connect.click()
+        }
+        XCTAssertTrue(manager.buttons["multipoint.select.02:00:00:00:00:03"].waitForExistence(timeout: 4))
+        XCTAssertEqual(phone.value as? String, "Selected for audio")
     }
 
     @MainActor
     func testMultipointShortcutHidesWithOneConnectedSource() {
+        for appearance in ["light", "dark"] {
+            let app = XCUIApplication()
+            defer { app.terminate() }
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--\(appearance)-appearance", "-AppleLanguages", "(en)"]
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            let manage = panel.buttons["multipoint.open"]
+            XCTAssertTrue(manage.waitForExistence(timeout: 5))
+            manage.click()
+            let disconnect = app.buttons["multipoint.disconnect.02:00:00:00:00:02"]
+            let phone = app.buttons["multipoint.select.02:00:00:00:00:02"]
+            XCTAssertTrue(phone.waitForExistence(timeout: 3))
+            phone.hover()
+            XCTAssertTrue(disconnect.waitForExistence(timeout: 3))
+            let manager = app.descendants(matching: .any).matching(identifier: "multipoint.popover").firstMatch
+            XCTAssertLessThanOrEqual(manager.frame.width, 322)
+            XCTAssertLessThanOrEqual(manager.frame.height, 400)
+            captureGalleryScreenshot(manager.screenshot(), named: "Compact multipoint — \(appearance)")
+            disconnect.click()
+            XCTAssertTrue(manage.waitForNonExistence(timeout: 5))
+            XCTAssertTrue(panel.buttons["menu.settings"].isHittable)
+        }
+    }
+
+    @MainActor
+    func testMultipointProgressKeepsPopoverAndRowSize() {
         let app = XCUIApplication()
         defer { app.terminate() }
-        app.launchArguments = ["-ui-testing", "--ui-test-host", "-AppleLanguages", "(en)"]
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--hold-source-replies", "-AppleLanguages", "(en)"]
         app.launch()
         let panel = app.windows["Headphone Controls"]
-        let manage = panel.buttons["multipoint.open"]
-        XCTAssertTrue(manage.waitForExistence(timeout: 5))
-        manage.click()
-        let disconnect = app.buttons["multipoint.disconnect.02:00:00:00:00:02"]
-        XCTAssertTrue(disconnect.waitForExistence(timeout: 3))
-        disconnect.click()
-        XCTAssertTrue(manage.waitForNonExistence(timeout: 5))
-        XCTAssertTrue(panel.buttons["menu.settings"].isHittable)
+        XCTAssertTrue(panel.buttons["multipoint.open"].waitForExistence(timeout: 5))
+        panel.buttons["multipoint.open"].click()
+        let manager = app.descendants(matching: .any).matching(identifier: "multipoint.popover").firstMatch
+        let phone = manager.buttons["multipoint.select.02:00:00:00:00:02"]
+        XCTAssertTrue(phone.waitForExistence(timeout: 3))
+        let frame = manager.frame
+        let rowFrame = phone.frame
+        phone.click()
+        let changingSource = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Changing audio source…"), object: phone)], timeout: 3)
+        captureGalleryScreenshot(manager.screenshot(), named: "Multipoint — pending source")
+        XCTAssertEqual(changingSource, .completed, manager.debugDescription)
+        XCTAssertEqual(manager.frame.width, frame.width, accuracy: 1)
+        XCTAssertEqual(manager.frame.height, frame.height, accuracy: 1)
+        XCTAssertEqual(phone.frame.height, rowFrame.height, accuracy: 1)
+        XCTAssertEqual(phone.frame.width, rowFrame.width, accuracy: 1)
+        captureGalleryScreenshot(manager.screenshot(), named: "Multipoint — progress inside device icon")
     }
 
     @MainActor
@@ -2153,9 +2216,11 @@ final class AppUITests: XCTestCase {
             for _ in 0..<5 where !phoneButton.isHittable {
                 window.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -180)
             }
+            phoneButton.hover()
+            XCTAssertTrue(window.buttons["multipoint.disconnect.02:00:00:00:00:02"].isHittable)
+            XCTAssertEqual(window.buttons.matching(identifier: "multipoint.refresh").count, 1)
             phoneButton.click()
-            let phoneStatus = window.staticTexts["multipoint.status.02:00:00:00:00:02"]
-            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Selected for audio"), object: phoneStatus)], timeout: 4), .completed)
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Selected for audio"), object: phoneButton)], timeout: 4), .completed)
             let keeping = window.descendants(matching: .any).matching(identifier: "multipoint.keeping").firstMatch
             for _ in 0..<5 where !keeping.isHittable {
                 window.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -120)
@@ -2168,9 +2233,11 @@ final class AppUITests: XCTestCase {
             screenshot.lifetime = .keepAlways
             add(screenshot)
             let macButton = window.buttons["multipoint.select.02:00:00:00:00:01"]
+            for _ in 0..<5 where !macButton.isHittable {
+                window.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: 120)
+            }
             macButton.click()
-            let macStatus = window.staticTexts["multipoint.status.02:00:00:00:00:01"]
-            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Selected for audio"), object: macStatus)], timeout: 4), .completed)
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Selected for audio"), object: macButton)], timeout: 4), .completed)
             XCTAssertEqual(keeping.value as? Int, 0)
             XCTAssertFalse(window.staticTexts["multipoint.error"].exists)
             app.terminate()
@@ -2693,7 +2760,7 @@ final class AppUITests: XCTestCase {
             format: "label CONTAINS %@ OR value CONTAINS %@", instructions, instructions
         )).firstMatch.exists)
         XCTAssertFalse(app.descendants(matching: .any)["gesture.detected"].firstMatch.exists)
-        let readyScreenshot = XCTAttachment(screenshot: settingsWindow.screenshot())
+        let readyScreenshot = XCTAttachment(screenshot: sheet.screenshot())
         readyScreenshot.name = "Native head-gesture practice, stable ready sheet"
         readyScreenshot.lifetime = .keepAlways
         add(readyScreenshot)
@@ -2706,14 +2773,18 @@ final class AppUITests: XCTestCase {
         XCTAssertEqual(open.label, "Practice Head Gestures…")
         open.click()
         XCTAssertTrue(start.waitForExistence(timeout: 3))
+        let shake = sheet.radioButtons["Shake"]
+        XCTAssertTrue(shake.exists)
+        shake.click()
         start.click()
         let count = app.staticTexts["gesture.count"]
         XCTAssertTrue(count.waitForExistence(timeout: 3))
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "label == %@ OR value == %@", "2 gestures detected", "2 gestures detected"), object: count
+            predicate: NSPredicate(format: "label == %@ OR value == %@", "1 of 3 gestures detected", "1 of 3 gestures detected"), object: count
         )], timeout: 3), .completed)
         XCTAssertTrue(app.descendants(matching: .any)["gesture.detected"].firstMatch.exists)
-        let screenshot = XCTAttachment(screenshot: settingsWindow.screenshot())
+        XCTAssertFalse(app.descendants(matching: .any)["gesture.success"].firstMatch.exists)
+        let screenshot = XCTAttachment(screenshot: sheet.screenshot())
         screenshot.name = "Native head-gesture practice, simulated detections"
         screenshot.lifetime = .keepAlways
         add(screenshot)
@@ -2745,6 +2816,52 @@ final class AppUITests: XCTestCase {
         XCTAssertTrue(count.waitForExistence(timeout: 3))
         app.typeKey("q", modifierFlags: .command)
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+    }
+
+    @MainActor
+    func testHeadGesturePracticeCompletesAfterThreeMatchingReportsAndResetsSelection() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--head-gesture-practice-success", "-AppleLanguages", "(en)"]
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.windows["Headphone Controls"].waitForExistence(timeout: 5))
+        app.windows["Headphone Controls"].buttons["menu.settings"].click()
+        let settingsWindow = app.windows["com_apple_SwiftUI_Settings_window"]
+        selectSettingsPane("headphones", in: settingsWindow)
+        let open = settingsWindow.buttons["gesture.open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 3))
+        for _ in 0..<5 where !open.isHittable {
+            settingsWindow.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -200)
+        }
+        open.click()
+        let sheet = app.sheets.firstMatch
+        let start = sheet.buttons["gesture.start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 3))
+        let sheetFrame = sheet.frame
+        sheet.radioButtons["Shake"].click()
+        start.click()
+        let success = sheet.descendants(matching: .any)["gesture.success"].firstMatch
+        XCTAssertTrue(success.waitForExistence(timeout: 4))
+        let count = sheet.staticTexts["gesture.count"]
+        XCTAssertEqual(count.value as? String, "3 of 3 gestures detected")
+        XCTAssertEqual(sheet.frame, sheetFrame)
+        let done = sheet.buttons["gesture.cancel"]
+        XCTAssertEqual(done.label, "Done")
+        XCTAssertTrue(done.isEnabled)
+        let screenshot = XCTAttachment(screenshot: sheet.screenshot())
+        screenshot.name = "Head gestures — three matching reports, All set"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        sheet.radioButtons["Nod"].click()
+        XCTAssertTrue(success.waitForNonExistence(timeout: 2))
+        XCTAssertEqual(count.value as? String, "0 of 3 gestures detected")
+        XCTAssertTrue(sheet.descendants(matching: .any)["gesture.waiting"].firstMatch.exists)
+        sheet.radioButtons["Shake"].click()
+        XCTAssertEqual(count.value as? String, "0 of 3 gestures detected")
+        XCTAssertFalse(success.exists)
+        done.click()
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 3))
+        XCTAssertEqual(open.label, "Practice Head Gestures…")
     }
 
     @MainActor

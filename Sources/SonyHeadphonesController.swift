@@ -839,15 +839,16 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func simulatedMultipointInventory(selected: UInt8) -> [UInt8] {
-        var devices: [(String, UInt8, String)] = [("02:00:00:00:00:01", 1, "MacBook Pro"), ("02:00:00:00:00:02", 2, "Phone")]
+        var devices: [(String, UInt8, UInt32, String)] = [("02:00:00:00:00:01", 1, 0x2A410C, "MacBook Pro"), ("02:00:00:00:00:02", 2, 0x5A020C, "Phone")]
         if CommandLine.arguments.contains("-ui-testing") {
-            devices.append(("02:00:00:00:00:03", 0, "Tablet"))
+            devices.append(("02:00:00:00:00:03", 0, 0x2A4114, "Tablet"))
             if CommandLine.arguments.contains("--four-source-devices") {
-                devices += [("02:00:00:00:00:04", 3, "TV"), ("02:00:00:00:00:05", 4, "Desktop")]
+                devices += [("02:00:00:00:00:04", 3, 0x04043C, "TV"), ("02:00:00:00:00:05", 4, 0x2A4104, "Desktop")]
             }
         }
-        let entries: [UInt8] = devices.flatMap { address, id, name in
-            Array(address.utf8) + [simulatedDeviceConnections[address] ?? id, 0x2A, 0x41, 0x04, UInt8(name.utf8.count)] + Array(name.utf8)
+        let entries: [UInt8] = devices.flatMap { address, id, deviceClass, name in
+            let details: [UInt8] = [simulatedDeviceConnections[address] ?? id, UInt8((deviceClass >> 16) & 0xFF), UInt8((deviceClass >> 8) & 0xFF), UInt8(deviceClass & 0xFF), UInt8(name.utf8.count)]
+            return Array(address.utf8) + details + Array(name.utf8)
         }
         return [0x37, 0x02, UInt8(devices.count)] + entries + [selected]
     }
@@ -1920,10 +1921,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     private func simulateHeadGesturePracticeEvents() {
         guard isSimulated, simulatesSettingReplies, let transition = headGesturePracticeTransition else { return }
+        var gestures = [SonyHeadGesturePractice.Gesture.nod, .shake]
         #if DEBUG
         guard !CommandLine.arguments.contains("--gallery-hold-test-replies") else { return }
+        if CommandLine.arguments.contains("--head-gesture-practice-success") { gestures += [.shake, .shake] }
         #endif
-        for (index, gesture) in [SonyHeadGesturePractice.Gesture.nod, .shake].enumerated() {
+        for (index, gesture) in gestures.enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(index + 1) * 0.3) { [weak self] in
                 Task { @MainActor in
                     guard let self, self.controlSession == transition.session, self.headGesturePracticeTransition?.id == transition.id,
@@ -2597,9 +2600,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         #if DEBUG
         if isSimulated, simulatesSettingReplies {
+            if CommandLine.arguments.contains("--hold-source-replies") { return }
             let reply: [UInt8]
             switch frame.payload.prefix(2) {
-            case [0x30, 0x02]: reply = [0x31, 0x02, 8, 2, 0]
+            case [0x30, 0x02]: reply = [0x31, 0x02, 8, multipoint.maxConnectedDevices ?? 2, 0]
             case [0x32, 0x02]: reply = [0x33, 0x02, 0, 0]
             case [0x36, 0x01]: reply = [0x37, 0x01, multipoint.keeping == true ? 0 : 1]
             case [0x36, 0x02]: reply = simulatedMultipointInventory(selected: simulatedSourceID)
@@ -2613,7 +2617,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                       let action = SonyPeripheralAction(rawValue: frame.payload[2]), action != .unpair else { return }
                 let address = String(decoding: frame.payload.dropFirst(3), as: UTF8.self)
                 if action == .connect {
-                    simulatedDeviceConnections[address] = (1...UInt8(2)).first { id in !multipoint.devices.contains(where: { $0.connectionID == id }) }
+                    simulatedDeviceConnections[address] = (1...(multipoint.maxConnectedDevices ?? 2)).first { id in !multipoint.devices.contains(where: { $0.connectionID == id }) }
                 } else {
                     if multipoint.selectedSource?.address == address { simulatedSourceID = 0 }
                     simulatedDeviceConnections[address] = 0
