@@ -15,6 +15,7 @@ final class LDACController: ObservableObject {
     @Published private(set) var driverState: LDACDriverInstaller.State
     @Published private(set) var driverInstallationError: String?
     @Published private(set) var isOpeningDriverInstaller = false
+    private var didAttemptAutomaticDriverUpdate = false
     private let bundle: Bundle
     private var session: LDACNativeSession?
     private var sessionID = UUID()
@@ -86,6 +87,18 @@ final class LDACController: ObservableObject {
         guard deviceUnavailableReason(forAddress: address) == nil, !isSessionRunning, !isOpeningDriverInstaller else { return }
         refreshDriverState()
         guard driverState == .missing || driverState == .outdated else { return }
+        openDriverInstaller()
+    }
+
+    func updateInstalledDriverIfNeeded() {
+        guard !didAttemptAutomaticDriverUpdate, !isSessionRunning, !isOpeningDriverInstaller else { return }
+        refreshDriverState()
+        guard driverState == .outdated else { return }
+        openDriverInstaller()
+    }
+
+    private func openDriverInstaller() {
+        didAttemptAutomaticDriverUpdate = true
         driverInstallationError = nil
         isOpeningDriverInstaller = true
         Task {

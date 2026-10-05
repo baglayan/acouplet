@@ -125,6 +125,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         environment.notifications.start()
+        environment.settings.$experimentalLDACEnabled
+            .removeDuplicates()
+            .sink { [weak self] enabled in
+                if enabled { self?.environment.ldac.updateInstalledDriverIfNeeded() }
+            }
+            .store(in: &cancellables)
         #endif
         let workspaceNotifications = NSWorkspace.shared.notificationCenter
         workspaceNotifications.publisher(for: NSWorkspace.willSleepNotification)

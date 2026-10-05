@@ -98,12 +98,16 @@ final class Devices: ObservableObject {
 
 @MainActor
 enum LDACDriverInstaller {
-    enum State { case missing, outdated, current }
+    enum State: Equatable { case missing, outdated, restartRequired, current, unavailable(String) }
     static var state = State.current
     static var inspections = 0
     static var installations = 0
+    static var error: Error?
     static func inspect(bundle: Bundle) -> State { inspections += 1; return state }
-    static func openInstaller(bundle: Bundle) async throws { installations += 1 }
+    static func openInstaller(bundle: Bundle) async throws {
+        installations += 1
+        if let error { throw error }
+    }
 }
 
 @MainActor
@@ -132,6 +136,7 @@ final class Controller: ObservableObject {
     var driverState = LDACDriverInstaller.State.current
     var driverInstallationError: String?
     var isOpeningDriverInstaller = false
+    var didAttemptAutomaticDriverUpdate = false
     let bundle = Bundle.main
     var devices: Devices? = Devices()
     var requestedConfiguration = LDACConfiguration()
@@ -251,6 +256,65 @@ enum LDACControllerCleanupCheck {
     @MainActor
     static func main() async {
         let address = "02:00:00:00:00:01"
+        for state in [LDACDriverInstaller.State.missing, .current, .restartRequired, .unavailable("Untrusted driver")] {
+            let update = Controller()
+            update.devices = nil
+            LDACDriverInstaller.state = state
+            LDACDriverInstaller.inspections = 0
+            LDACDriverInstaller.installations = 0
+            update.updateInstalledDriverIfNeeded()
+            precondition(LDACDriverInstaller.inspections == 1 && LDACDriverInstaller.installations == 0)
+            precondition(!update.isOpeningDriverInstaller && !update.didAttemptAutomaticDriverUpdate,
+                         "Automatic update admitted \(state)")
+        }
+        LDACDriverInstaller.state = .outdated
+        for running in [false, true] {
+            let update = Controller()
+            update.isSessionRunning = running
+            update.isOpeningDriverInstaller = !running
+            LDACDriverInstaller.inspections = 0
+            LDACDriverInstaller.installations = 0
+            update.updateInstalledDriverIfNeeded()
+            precondition(LDACDriverInstaller.inspections == 0 && LDACDriverInstaller.installations == 0)
+            precondition(!update.didAttemptAutomaticDriverUpdate, "Busy controller consumed the automatic update")
+        }
+        let automatic = Controller()
+        automatic.devices = nil
+        LDACDriverInstaller.inspections = 0
+        LDACDriverInstaller.installations = 0
+        automatic.updateInstalledDriverIfNeeded()
+        precondition(automatic.isOpeningDriverInstaller && automatic.didAttemptAutomaticDriverUpdate)
+        automatic.updateInstalledDriverIfNeeded()
+        await waitUntil { !automatic.isOpeningDriverInstaller }
+        automatic.updateInstalledDriverIfNeeded()
+        precondition(LDACDriverInstaller.inspections == 1 && LDACDriverInstaller.installations == 1,
+                     "Automatic driver update required headphones or repeated within a launch")
+        precondition(automatic.starts.isEmpty && automatic.targetAddress == nil && automatic.state == .off)
+
+        let manual = Controller()
+        LDACDriverInstaller.installations = 0
+        manual.installDriver(forAddress: address)
+        manual.updateInstalledDriverIfNeeded()
+        await waitUntil { !manual.isOpeningDriverInstaller }
+        manual.updateInstalledDriverIfNeeded()
+        precondition(LDACDriverInstaller.installations == 1 && manual.didAttemptAutomaticDriverUpdate,
+                     "Automatic update repeated an earlier manual installation")
+
+        let failedUpdate = Controller()
+        LDACDriverInstaller.installations = 0
+        LDACDriverInstaller.error = NSError(domain: "DriverFixture", code: 1,
+                                            userInfo: [NSLocalizedDescriptionKey: "Installer could not open"])
+        failedUpdate.updateInstalledDriverIfNeeded()
+        await waitUntil { !failedUpdate.isOpeningDriverInstaller }
+        precondition(failedUpdate.driverInstallationError == "Installer could not open")
+        failedUpdate.updateInstalledDriverIfNeeded()
+        precondition(LDACDriverInstaller.installations == 1, "Failed automatic update retried itself")
+        LDACDriverInstaller.error = nil
+        failedUpdate.installDriver(forAddress: address)
+        precondition(failedUpdate.isOpeningDriverInstaller && failedUpdate.driverInstallationError == nil)
+        await waitUntil { !failedUpdate.isOpeningDriverInstaller }
+        precondition(LDACDriverInstaller.installations == 2, "Automatic failure prevented a manual retry")
+
         let volumeUnavailable = Device()
         volumeUnavailable.playback.hasReceivedCapabilities = true
         let refused: [(String, Device?)] = [
@@ -603,9 +667,10 @@ enum LDACControllerCleanupCheck {
 
         print("PASS actual LDAC admission, connection preference and cleanup methods: confirmations, readiness, output-before-preference restoration, cancelled startup, user supersession, bounded retry without setter replay, sleep/wake, quit deadline and existing lifecycle checks; fake peers only")
         print("PASS actual disconnect policy: idle waiting, one resume, source/output/selection/driver gates, deferred Stable Connection, manual Off, sleep/wake, cleanup failure and nested-error deduplication")
+        print("PASS actual driver update policy: existing outdated driver only, independent of headphones, once per launch, busy/manual deduplication, surfaced errors and manual retry")
     }
 }
-'''.replace("__METHODS__", "\n".join(method(name) for name in ["deviceUnavailableReason", "canEnable", "refreshDriverState", "installDriver", "setEnabled", "stop", "suspend", "resumeIfReady", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))
+'''.replace("__METHODS__", "\n".join(method(name) for name in ["deviceUnavailableReason", "canEnable", "refreshDriverState", "updateInstalledDriverIfNeeded", "installDriver", "openDriverInstaller", "setEnabled", "stop", "suspend", "resumeIfReady", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))
 
 with tempfile.TemporaryDirectory(prefix="acouplet-ldac-controller-cleanup-") as directory:
     directory = pathlib.Path(directory)

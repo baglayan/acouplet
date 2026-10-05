@@ -24,12 +24,13 @@ enum LDACDriverInstaller {
             try validateCode(at: bundled, identifier: identifier, team: team, development: development)
             let required = try revision(at: bundled)
             guard required > 0 else { throw failure("The app’s LDAC driver is incomplete. Reinstall the app.") }
-            guard FileManager.default.fileExists(atPath: installedURL.path) else { return .missing }
-            do {
-                try validateCode(at: installedURL, identifier: identifier, team: team, development: development)
-            } catch {
+            guard FileManager.default.fileExists(atPath: installedURL.path) else {
+                let legacyURL = URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL/XM5LDACOutput.driver", isDirectory: true)
+                guard FileManager.default.fileExists(atPath: legacyURL.path) else { return .missing }
+                try validateCode(at: legacyURL, identifier: "local.xm5control.ldac-output-driver", team: team, development: development)
                 return .outdated
             }
+            try validateCode(at: installedURL, identifier: identifier, team: team, development: development)
             let installed = try revision(at: installedURL)
             guard installed >= required else { return .outdated }
             return state(required: required, installed: installed, loaded: try LDACNativeOutput.driverRevision())
