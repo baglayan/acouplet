@@ -259,7 +259,7 @@ extension LDACState {
         switch self {
         case .requested, .connecting, .active, .stopping: true
         case .failed: isSessionRunning
-        case .off: false
+        case .off, .waitingForDevice: false
         }
     }
 }

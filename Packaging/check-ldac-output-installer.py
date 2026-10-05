@@ -57,7 +57,7 @@ def make_bundle(path, legacy=False, state='owned'):
     (path / 'Contents/Info.plist').write_bytes(plistlib.dumps({
         'CFBundleIdentifier': 'unrelated' if state == 'foreign' else legacy_identifier if legacy else identifier,
         'CFBundleExecutable': 'unrelated' if state == 'executable-foreign' else executable,
-        'AcoupletLDACDriverRevision': 1 if state == 'old-revision' else 2,
+        'AcoupletLDACDriverRevision': 2 if state == 'old-revision' else 3,
     }))
     (path / 'signature.json').write_text(json.dumps({
         'team': 'ZZZZZ99999' if state == 'wrong-team' else team, 'valid': state != 'bad-signature'}))
@@ -168,7 +168,7 @@ for legacy in (False, True):
             else:
                 assert not any(command[0] in ('rm', 'pkgutil') for command in recorded)
             assert (root / 'HAL/Unrelated.driver/keep').read_text() == 'preserve'
-print('Postinstall: validated revision 2 before legacy removal; refused invalid or mismatched drivers without removal')
+print('Postinstall: validated revision 3 before legacy removal; refused invalid or mismatched drivers without removal')
 
 for legacy in (False, True):
     for state in ('absent', 'owned', *invalid_states):

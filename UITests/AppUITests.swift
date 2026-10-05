@@ -2819,6 +2819,66 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testTurkishHeadGestureSelectorFitsAndStartsPractice() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "-AppleLanguages", "(tr)", "-AppleLocale", "tr_TR"]
+        app.launch()
+        defer { app.terminate() }
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        panel.buttons["menu.settings"].click()
+        let settingsWindow = app.windows["com_apple_SwiftUI_Settings_window"]
+        let headphones = settingsWindow.toolbars.buttons["Kulaklıklar"]
+        XCTAssertTrue(headphones.waitForExistence(timeout: 3))
+        headphones.click()
+        let open = settingsWindow.buttons["gesture.open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 3))
+        for _ in 0..<5 where !open.isHittable {
+            settingsWindow.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -200)
+        }
+        open.click()
+        let sheet = app.sheets.firstMatch
+        let start = sheet.buttons["gesture.start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 3))
+        let heading = sheet.staticTexts["gesture.title"]
+        XCTAssertTrue(sheet.frame.contains(heading.frame))
+        for label in ["Yukarı aşağı", "Sağa sola"] {
+            let segment = sheet.radioButtons[label]
+            XCTAssertTrue(segment.isHittable)
+            XCTAssertTrue(sheet.frame.contains(segment.frame))
+            let textWidth = (label as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]).width
+            XCTAssertGreaterThanOrEqual(segment.frame.width, textWidth)
+            XCTAssertLessThan(heading.frame.maxX, segment.frame.minX)
+            segment.click()
+        }
+        XCTAssertTrue(sheet.staticTexts["İleriye bakın, ardından başınızı sağa sola hareket ettirin."].exists)
+        let readyScreenshot = XCTAttachment(screenshot: sheet.screenshot())
+        readyScreenshot.name = "Turkish head gestures — ready, full selector labels"
+        readyScreenshot.lifetime = .keepAlways
+        add(readyScreenshot)
+        let sheetFrame = sheet.frame
+        start.click()
+        let count = sheet.staticTexts["gesture.count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 3))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@ OR value == %@", "Algılanan hareket: 1 / 3", "Algılanan hareket: 1 / 3"), object: count
+        )], timeout: 3), .completed)
+        XCTAssertEqual(sheet.frame, sheetFrame)
+        for label in ["Yukarı aşağı", "Sağa sola"] {
+            let segment = sheet.radioButtons[label]
+            XCTAssertTrue(segment.isHittable)
+            XCTAssertTrue(sheet.frame.contains(segment.frame))
+        }
+        let practicingScreenshot = XCTAttachment(screenshot: sheet.screenshot())
+        practicingScreenshot.name = "Turkish head gestures — practicing, one of three"
+        practicingScreenshot.lifetime = .keepAlways
+        add(practicingScreenshot)
+        sheet.buttons["gesture.cancel"].click()
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(open.isEnabled)
+    }
+
+    @MainActor
     func testHeadGesturePracticeCompletesAfterThreeMatchingReportsAndResetsSelection() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-testing", "--ui-test-host", "--head-gesture-practice-success", "-AppleLanguages", "(en)"]

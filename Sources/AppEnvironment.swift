@@ -31,7 +31,7 @@ final class AppEnvironment {
         self.devices = devices
         self.audioRoute = audioRoute
         #if !ACOUPLET_PUBLIC_APIS_ONLY
-        ldac = LDACController(devices: devices)
+        ldac = LDACController(devices: devices, audioRoute: audioRoute)
         notifications = SonyNotificationService(settings: settings, devices: devices,
                                                 presentLowBattery: { [weak devices, noiseModeHUD] warning, _ in
             guard let headphones = devices?.controller(for: warning.deviceID) else { return false }
@@ -70,7 +70,11 @@ final class AppEnvironment {
             .store(in: &cancellables)
         devices.$selectedAddress.removeDuplicates()
             .sink { [weak ldac] address in
-                if let target = ldac?.targetAddress, let address, address != target { ldac?.stop(reason: "selected headphones changed") }
+                Task { @MainActor [weak ldac] in
+                    if let target = ldac?.targetAddress, let address, address != target, ldac?.state != .waitingForDevice {
+                        ldac?.stop(reason: "selected headphones changed")
+                    }
+                }
             }
             .store(in: &cancellables)
         #else

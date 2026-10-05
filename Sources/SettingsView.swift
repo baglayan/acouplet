@@ -139,7 +139,7 @@ struct SettingsView: View {
                             Text(rate.displayName).tag(rate)
                         }
                     }
-                    .disabled(ldac.isSessionRunning)
+                    .disabled(ldac.isSessionRunning || ldac.state == .waitingForDevice)
                     .accessibilityIdentifier("ldac.sampleRate")
                     Picker("Playback Quality", selection: $settings.ldacConfiguration.quality) {
                         ForEach(LDACQuality.allCases, id: \.self) { quality in
@@ -147,7 +147,7 @@ struct SettingsView: View {
                             Text(configuration.qualityDisplayName).tag(quality)
                         }
                     }
-                    .disabled(ldac.isSessionRunning)
+                    .disabled(ldac.isSessionRunning || ldac.state == .waitingForDevice)
                     .accessibilityIdentifier("ldac.quality")
                     if !ldac.isSessionRunning { LDACDriverGuidance() }
                 }
@@ -540,7 +540,8 @@ private struct HeadGesturePracticeSheet: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(width: 136)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: 136)
                     .disabled(transition.phase != .ready && transition.phase != .practicing)
                     .accessibilityIdentifier("gesture.target")
                 }
@@ -551,7 +552,7 @@ private struct HeadGesturePracticeSheet: View {
                                 .font(.system(size: 28))
                                 .foregroundStyle(.tint)
                             if !reduceMotion && scenePhase == .active && matchingGestureCount < 3
-                                && (transition.phase == .ready || transition.phase == .practicing) {
+                                && transition.phase == .practicing {
                                 head.phaseAnimator([0, -1, 0, 1]) { content, phase in
                                     content.offset(x: target == .shake ? CGFloat(phase) * 6 : 0,
                                                    y: target == .nod ? CGFloat(phase) * 6 : 0)

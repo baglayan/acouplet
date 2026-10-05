@@ -10,7 +10,7 @@
 #include "NullAudio.c"
 
 enum { kAcoupletLease = 'xmls', kAcoupletModel = 'xmnm', kAcoupletPriority = 'xmpr', kAcoupletRevision = 'xmvr' };
-static const SInt32 kAcoupletDriverRevision = 2;
+static const SInt32 kAcoupletDriverRevision = 3;
 static UInt64 gLeaseDeadline;
 static pid_t gLeaseOwner;
 static atomic_bool gAvailable;
@@ -54,6 +54,7 @@ static CFStringRef gPriorityError;
 static pid_t gPriorityOwner;
 static xpc_connection_t gPriorityConnection;
 static char *gPriorityUID;
+static char *gPriorityRetiredUID;
 static int gPriorityNotify = -1;
 static int64_t gPriorityWaiting = -1;
 static UInt64 gPriorityDeadline;
@@ -63,6 +64,7 @@ static Boolean gPriorityEnabling;
 static Boolean gPriorityStopping;
 static Boolean gPriorityDisconnected;
 static Boolean gPriorityPublicationLost;
+static Boolean gPriorityPublicationWithdrawn;
 static Boolean gPriorityListening;
 static Boolean gPriorityUIDAfterLoss;
 static dispatch_source_t gOwnerWatcher;
@@ -131,6 +133,9 @@ static void AcoupletPriorityClose(void) {
     gPriorityNotify = -1;
     free(gPriorityUID);
     gPriorityUID = NULL;
+    free(gPriorityRetiredUID);
+    gPriorityRetiredUID = NULL;
+    gPriorityPublicationWithdrawn = false;
     gPriorityWaiting = -1;
     gPriorityDeadline = 0;
 }
@@ -229,19 +234,29 @@ static void AcoupletPriorityEvent(xpc_object_t event) {
         if (gPrioritySent) gPriorityPublicationLost = true;
         free(gPriorityUID);
         gPriorityUID = NULL;
+        free(gPriorityRetiredUID);
+        gPriorityRetiredUID = NULL;
+        gPriorityPublicationWithdrawn = false;
         AcoupletPriorityUncertain(CFSTR("Audio-host connection was interrupted; cleanup is uncertain."));
         return;
     }
     if (xpc_get_type(event) != XPC_TYPE_DICTIONARY) return;
     int64_t identifier = xpc_dictionary_get_int64(event, "kBTAudioMsgId");
     const char *uid = xpc_dictionary_get_string(event, "kBTAudioMsgDeviceUid");
-    if (identifier == 4 && uid && gPriorityUID && !strcmp(uid, gPriorityUID)) {
+    Boolean current = uid && gPriorityUID && !strcmp(uid, gPriorityUID);
+    Boolean retired = uid && gPriorityRetiredUID && !strcmp(uid, gPriorityRetiredUID);
+    if (identifier == 4 && (current || retired)) {
+        Boolean confirmed = retired || !gPriorityPublicationLost || gPriorityUIDAfterLoss;
         free(gPriorityUID);
         gPriorityUID = NULL;
+        free(gPriorityRetiredUID);
+        gPriorityRetiredUID = NULL;
         gPriorityUIDAfterLoss = false;
         if (gPrioritySent) {
             gPriorityPublicationLost = true;
-            AcoupletPriorityUncertain(CFSTR("Target publication was withdrawn; cleanup is uncertain."));
+            gPriorityPublicationWithdrawn = confirmed;
+            if (gPriorityDisconnected && confirmed) AcoupletPriorityIdle();
+            else AcoupletPriorityUncertain(CFSTR("Target publication was withdrawn; cleanup is uncertain."));
         }
         return;
     }
@@ -275,6 +290,9 @@ static void AcoupletPriorityEvent(xpc_object_t event) {
         AcoupletPriorityUncertain(CFSTR("Unable to retain the target audio publication."));
         return;
     }
+    free(gPriorityRetiredUID);
+    gPriorityRetiredUID = NULL;
+    gPriorityPublicationWithdrawn = false;
     gPriorityUIDAfterLoss = gPrioritySent && gPriorityPublicationLost;
     if (gPrioritySent) {
         if (gPriorityDisconnected) AcoupletPriorityStop();
@@ -964,11 +982,17 @@ static OSStatus AcoupletSetPriority(pid_t client, CFPropertyListRef value) {
         } else if (oldLinkDisconnected && (!gPriorityDisconnected || (gPriorityWaiting < 0 && !gPriorityUID))) {
             gPriorityDisconnected = true;
             gPriorityStopping = true;
-            gPriorityPublicationLost = true;
-            if (!gPriorityUIDAfterLoss) {
-                free(gPriorityUID);
+            if (gPriorityPublicationWithdrawn && gPriorityListening && !gPriorityUID) {
+                AcoupletPriorityIdle();
+                return;
+            }
+            if (!gPriorityUIDAfterLoss && gPriorityUID) {
+                free(gPriorityRetiredUID);
+                gPriorityRetiredUID = !gPriorityPublicationLost ? gPriorityUID : NULL;
+                if (gPriorityPublicationLost) free(gPriorityUID);
                 gPriorityUID = NULL;
             }
+            gPriorityPublicationLost = true;
             gPriorityWaiting = -1;
             gPriorityDeadline = mach_absolute_time() + (UInt64)(gTicksPerSecond * 40);
             AcoupletPriorityPhase(CFSTR("cleanup-required"), NULL);

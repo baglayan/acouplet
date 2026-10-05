@@ -107,6 +107,24 @@ if CommandLine.arguments.count == 1 {
     print('real Ed25519 verification; feed/archive/notes tampering, wrong keys and downgrade rejection: passed')
     print('unreferenced history archives, notes, deltas and feeds cannot enter the signing directory: passed')
 
+    archived_feed = updates / 'appcast-1.2.3-notes-1.xml'
+    archived_feed.write_bytes(original_feed)
+    retired_notes = notes
+    notes = updates / 'Fixture-1.2.3-notes-2.md'
+    notes.write_text('- Updated the fixture interface.\n')
+    signed_feed()
+    assert release.verify_updates(root, updates, public_key, 42, '1.2.3', repository='fixture/repo') == 42
+    for target, original in [(archived_feed, original_feed), (retired_notes, original_notes)]:
+        target.write_bytes(original.replace(original[:1], b'!', 1))
+        rejects(lambda: release.verify_updates(root, updates, public_key, repository='fixture/repo'))
+        target.write_bytes(original)
+    archived_feed.unlink()
+    rejects(lambda: release.verify_updates(root, updates, public_key, repository='fixture/repo'))
+    notes.unlink()
+    notes = retired_notes
+    (updates / 'appcast.xml').write_bytes(original_feed)
+    print('amended notes retain authenticated original notes; archived feed and notes tampering rejected: passed')
+
     history = root / 'history.tar.gz'
     for member_name, kind in [('../escape.dmg', tarfile.REGTYPE), ('/escape.dmg', tarfile.REGTYPE),
                               ('link.dmg', tarfile.SYMTYPE), ('bad.key', tarfile.REGTYPE)]:

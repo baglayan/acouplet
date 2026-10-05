@@ -154,6 +154,63 @@ extension LDACNativeSession {
         try require(events.names == expected, "Media failure emitted incorrect or repeated events: \(events.names)")
     }
 
+    @MainActor
+    static func recoveryExitCheck(_ mode: String, executable: URL, raw: URL) async throws {
+        let events = SessionEvents()
+        let session = try lossSession(active: mode != "unclassified" && mode != "requested-stop-before-active", events: events)
+        session.rawURL = raw
+        if mode == "unclassified" || mode.hasPrefix("requested-stop") { session.stop(restoreAudio: false) }
+        else { try session.handle("probe", line: "STREAM_CLOSED peerSignal=08") }
+        session.originalConnectionEnded = mode == "acl-first"
+        if mode == "restore-disconnected" || mode == "forced-disconnect" || mode == "native-replaced" {
+            try session.handle("restore-disconnect", line: "BEFORE time=1791160325.072411 address=02-00-00-00-00-01 paired=1 connected=\(mode == "forced-disconnect" ? 1 : 0)")
+            try session.handle("restore-disconnect", line: "RESTORE_DISCONNECTED disconnected=1")
+        }
+        session.nativeAudioRestored = mode == "native-replaced"
+        if mode == "encoder-error" || mode == "requested-stop-encoder-error" {
+            try session.handle("media", line: "ENCODER_FAILED reason=packet-boundary")
+        }
+        if mode.hasPrefix("requested-stop-cleanup") {
+            session.priorityCleanupFailed("Target publication was lost; confirm the old Bluetooth connection is disconnected.")
+            if mode == "requested-stop-cleanup-recovered" { session.priorityPhase = .removed }
+        }
+        for (name, cid) in [("probe", "0040"), ("media", "0041")] {
+            if !["missing-closure", "requested-stop-missing-closure"].contains(mode) || name != "media" {
+                try session.handle("daemon", line: "l2capDisconnected for CID: 0x\(cid)")
+            }
+            session.children[name] = try LDACNativeChild(executable: executable,
+                arguments: ["--fixture", "exit", "FIXTURE_EXIT", "", mode == "unexpected-exit" && name == "probe" ? "6" : "5"],
+                inheritedPCM: nil)
+        }
+        defer { cleanUp(Array(session.children.values)) }
+        try waitUntil {
+            for (name, child) in session.children {
+                for line in try child.readLines() { try session.handle(name, line: line) }
+                child.reap()
+            }
+            return session.children.values.allSatisfy(\.finished)
+        }
+        try require(session.canRestore, "Recovery did not wait for transport children to finish")
+        try session.beginRestore()
+        for _ in 0..<100 { await Task.yield() }
+        guard case let .finished(completion)? = events.values.last else {
+            throw ClosureCheckError(description: "Recovery did not publish its completion")
+        }
+        let safe = ["channels-first", "acl-first", "restore-disconnected", "forced-disconnect"].contains(mode)
+        let clean = safe || ["requested-stop", "requested-stop-cleanup-recovered", "native-replaced"].contains(mode)
+        try require(completion.canRetry == safe, "Recovery accepted an unsafe exit or rejected verified closure: \(mode)")
+        try require(completion.requiresAttention == !safe, "Recovery reported the wrong attention requirement: \(mode)")
+        try require(completion.targetDisconnected == ["acl-first", "restore-disconnected", "forced-disconnect"].contains(mode),
+            "Channel closure was confused with confirmed target disconnection: \(mode)")
+        try require(completion.waitForReconnect == ["acl-first", "restore-disconnected"].contains(mode),
+            "A deliberate recovery disconnection was confused with an unavailable peer: \(mode)")
+        try require(events.names.filter { $0 == "failed" }.isEmpty == clean,
+            "Expected connection loss was promoted to a transport error: \(mode)")
+        if clean && mode.hasPrefix("requested-stop") {
+            try require(completion.message == nil, "Confirmed requested shutdown retained a transient cleanup warning")
+        }
+    }
+
     static func closureCheck(_ site: String, mode: String, fault: String, executable: URL, raw: URL) throws {
         let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
             helpers: Helpers(bundle: .main), gain: 1, receive: { _ in })
@@ -350,6 +407,19 @@ enum LDACSessionClosureCheck {
             } catch {
                 failures += 1
                 print("FAIL media ownership mode=\(mode): \(error)")
+            }
+        }
+        for mode in ["channels-first", "acl-first", "restore-disconnected", "forced-disconnect", "native-replaced", "unexpected-exit",
+                     "missing-closure", "encoder-error", "unclassified", "requested-stop", "requested-stop-before-active",
+                     "requested-stop-encoder-error", "requested-stop-missing-closure", "requested-stop-cleanup-recovered",
+                     "requested-stop-cleanup-pending"] {
+            ownershipChecks += 1
+            do {
+                try await LDACNativeSession.recoveryExitCheck(mode, executable: executable, raw: raw)
+                print("PASS recovery exit mode=\(mode)")
+            } catch {
+                failures += 1
+                print("FAIL recovery exit mode=\(mode): \(error)")
             }
         }
         print("Actual LDAC session ownership checks: \(ownershipChecks - failures + closureFailures)/\(ownershipChecks) passed; protocol input only")

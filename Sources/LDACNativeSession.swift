@@ -63,6 +63,7 @@ enum LDACState: Equatable, Sendable {
     case off
     case requested
     case connecting
+    case waitingForDevice
     case active(LDACFormat)
     case stopping
     case failed(String)
@@ -136,6 +137,8 @@ final class LDACNativeSession: @unchecked Sendable {
         let message: String?
         let canRetry: Bool
         let requiresAttention: Bool
+        let targetDisconnected: Bool
+        let waitForReconnect: Bool
     }
 
     private static let daemonEventExpression = try! NSRegularExpression(pattern: "connectedCB cid:0x|l2capDisconnected for CID: 0x|l2capDataInd for CID: 0x|ACL connected:|Received connection result for \"A2DP Source\" profile on device ", options: .caseInsensitive)
@@ -217,6 +220,7 @@ final class LDACNativeSession: @unchecked Sendable {
     private var mediaTransportClosedSent = false
     private var restoring = false
     private var restoreDisconnected = false
+    private var targetUnavailableBeforeRestore = false
     private var nativeAudioRestored = false
     private var restoreDeadline = Date.distantFuture
     private var restoreTerminationSent = false
@@ -321,7 +325,8 @@ final class LDACNativeSession: @unchecked Sendable {
                 deadline = Date().addingTimeInterval(90)
             }
         } catch {
-            emit(.finished(Completion(message: error.localizedDescription, canRetry: false, requiresAttention: true)))
+            emit(.finished(Completion(message: error.localizedDescription, canRetry: false, requiresAttention: true,
+                                      targetDisconnected: false, waitForReconnect: false)))
             return
         }
         while true {
@@ -494,6 +499,9 @@ final class LDACNativeSession: @unchecked Sendable {
                 fail("The pending Bluetooth connection could not be confirmed stopped.")
             }
         } else if source == "restore-disconnect" {
+            if LDACChannelGate.captures("^BEFORE time=[0-9.]+ address=\(LDACChannelGate.addressPattern(address.replacingOccurrences(of: ":", with: "-"))) paired=[01] connected=(0)$", line) != nil {
+                targetUnavailableBeforeRestore = true
+            }
             if line == "RESTORE_DISCONNECTED disconnected=1" { restoreDisconnected = true }
             if line == "RESTORE_PRESERVED native=1 connected=1" { nativeAudioRestored = true }
         } else if source == "restore" {
@@ -912,7 +920,7 @@ final class LDACNativeSession: @unchecked Sendable {
     private func priorityCleanupFailed(_ message: String) {
         priorityPhase = .uncertain
         record("PRIORITY_CLEANUP_UNCONFIRMED \(message)")
-        if recoverableFailure { priorityRecoveryFailure = message }
+        if recoverableFailure || lock.withLock({ requestedStop }) { priorityRecoveryFailure = message }
         else { fail(message) }
     }
 
@@ -958,7 +966,8 @@ final class LDACNativeSession: @unchecked Sendable {
                     record("SHUTDOWN_ERROR \(error.localizedDescription)")
                     fail(error.localizedDescription)
                 }
-                if (children["probe"]?.status != 0 && !(recoverableFailure && originalConnectionEnded && children["probe"]?.exitCode == 5)) || (children["media"] != nil && children["media"]?.status != 0 && !(recoverableFailure && children["media"]?.exitCode == 5)) {
+                let interruptedPlayback = recoverableFailure || active && lock.withLock({ requestedStop })
+                if (children["probe"]?.status != 0 && !(interruptedPlayback && children["probe"]?.exitCode == 5)) || (children["media"] != nil && children["media"]?.status != 0 && !(interruptedPlayback && children["media"]?.exitCode == 5)) {
                     fail("The LDAC transport exited with an error.")
                 }
             }
@@ -1075,7 +1084,9 @@ final class LDACNativeSession: @unchecked Sendable {
         }
         record("RECOVERY_READY safe=\(safe)")
         emit(.finished(Completion(message: message, canRetry: safe,
-                                  requiresAttention: hardFailure || !recoverableFailure || !safe && !nativeAudioRestored || nativeReplacement)))
+                                  requiresAttention: hardFailure || !recoverableFailure || !safe && !nativeAudioRestored || nativeReplacement,
+                                  targetDisconnected: (originalConnectionEnded || restoreDisconnected) && !nativeAudioRestored,
+                                  waitForReconnect: (originalConnectionEnded || targetUnavailableBeforeRestore) && !nativeAudioRestored)))
     }
 
     static func completeDiagnostics(in directory: URL) throws {

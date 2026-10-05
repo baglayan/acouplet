@@ -17,11 +17,20 @@ fixture = r'''
 import Foundation
 import Combine
 
-enum LDACState: Equatable { case off, requested, connecting, stopping, failed(String) }
+enum LDACState: Equatable { case off, requested, waitingForDevice, connecting, stopping, failed(String) }
 enum LDACAudioCaptureAccess { case checking, unchecked }
 struct LDACConfiguration: Equatable { var value = 0 }
 enum SonyBLEIdentity {
     static func normalizedAddress(_ value: String) -> String? { value }
+}
+struct IOBluetoothHostController {
+    static func `default`() -> Self? { Self() }
+    func addressAsString() -> String { "02:00:00:00:00:02" }
+}
+struct Route { var uid: String? }
+@MainActor
+final class MacAudioRouteObserver {
+    var route: Route? = Route(uid: "fixture-headphones")
 }
 
 enum Model { case unknown, wfXM3, whCH720N, wfXM5, whXM5 }
@@ -41,6 +50,8 @@ struct Playback {
 final class Device: ObservableObject {
     var deviceModel: Model
     @Published var isReady: Bool
+    @Published var isDeviceConnected = true
+    var localSource = true
     var playback: Playback
     var supportsConnectionMode = true
     let address = "02:00:00:00:00:01"
@@ -73,6 +84,7 @@ final class Device: ObservableObject {
         return true
     }
     func refresh() { refreshes += 1 }
+    func hasCurrentMusicSourceContext(for address: String?) -> Bool { localSource }
 }
 typealias SonyHeadphonesController = Device
 
@@ -80,6 +92,7 @@ typealias SonyHeadphonesController = Device
 final class Devices: ObservableObject {
     @Published var controllers = ["02:00:00:00:00:01": Device(), "02:00:00:00:00:02": Device(), "02:00:00:00:00:03": Device()]
     @Published var isSystemSleeping = false
+    var selectedAddress: String? = "02:00:00:00:00:01"
     func controller(for address: String) -> Device? { controllers[address] }
 }
 
@@ -97,9 +110,11 @@ enum LDACDriverInstaller {
 final class Output {
     var restores = 0
     var continuation: CheckedContinuation<String?, Never>?
+    var disconnectedRestorations: [Bool] = []
     func silence() {}
-    func restoreAndRelease() async -> String? {
+    func restoreAndRelease(targetDisconnected: Bool = false) async -> String? {
         restores += 1
+        disconnectedRestorations.append(targetDisconnected)
         return await withCheckedContinuation { continuation = $0 }
     }
 }
@@ -120,6 +135,11 @@ final class Controller: ObservableObject {
     let bundle = Bundle.main
     var devices: Devices? = Devices()
     var requestedConfiguration = LDACConfiguration()
+    var audioRoute: MacAudioRouteObserver? = MacAudioRouteObserver()
+    var resumeOutputUID: String? = "fixture-headphones"
+    var suspensionRequested = false
+    var deferredConnectionModes: [String: UUID] = [:]
+    var preferenceRestoreTasks: [String: Task<Void, Never>] = [:]
     var sessionID = UUID()
     var state = LDACState.connecting
     var targetAddress: String? = "02:00:00:00:00:01"
@@ -169,7 +189,10 @@ final class Controller: ObservableObject {
     }
     func record(_ event: String, reason: String) {}
     func setOutputGain(_ gain: Double) { requestedOutputGain = gain }
-    func sessionFinished() { finish(nil) }
+    func sessionFinished(_ message: String? = nil, targetDisconnected: Bool = false) {
+        finish(message, targetDisconnected: targetDisconnected)
+    }
+    func availabilityChanged() { resumeIfReady() }
     func launch(_ address: String, priority: Int?, restoringOnly: Bool) { restores.append(address) }
     func start(_ address: String) {
         starts.append(address)
@@ -203,6 +226,26 @@ enum LDACControllerCleanupCheck {
             await Task.yield()
         }
         preconditionFailure("Controller operation did not complete at line \(line)")
+    }
+
+    @MainActor
+    static func disconnected(preference: UUID? = nil, restoreError: String? = nil) async -> Controller {
+        let output = Output()
+        let controller = Controller(output: output)
+        let headphones = controller.devices!.controller(for: controller.targetAddress!)!
+        controller.headphones = headphones
+        headphones.isDeviceConnected = false
+        headphones.connectionMode = .soundQuality
+        headphones.lastConnectionModeChangeID = preference
+        controller.connectionModeRestoreID = preference
+        controller.connectionModeConfirmed = preference != nil
+        controller.suspensionRequested = true
+        controller.sessionFinished(targetDisconnected: true)
+        await waitUntil { output.continuation != nil }
+        precondition(output.disconnectedRestorations == [true])
+        output.continuation?.resume(returning: restoreError)
+        await waitUntil { controller.cleanupTask == nil }
+        return controller
     }
 
     @MainActor
@@ -440,10 +483,129 @@ enum LDACControllerCleanupCheck {
         await waiting.value
         precondition(timedOutFinished)
 
+        LDACDriverInstaller.state = .current
+        let parked = await disconnected()
+        precondition(parked.state == .waitingForDevice && parked.requestedAddress == address)
+        precondition(!parked.isSessionRunning && parked.nativeOutput == nil && parked.recoveryTask == nil)
+        for _ in 0..<100 { parked.availabilityChanged() }
+        precondition(parked.starts.isEmpty && parked.state == .waitingForDevice,
+                     "Disconnected availability notifications restarted LDAC")
+        parked.devices!.controller(for: address)!.isDeviceConnected = true
+        parked.availabilityChanged()
+        parked.availabilityChanged()
+        precondition(parked.starts == [address], "Ready reconnect did not resume exactly once")
+
+        let blockers: [(String, (Controller) -> Void)] = [
+            ("sleep", { $0.devices!.isSystemSleeping = true }),
+            ("controls", { $0.devices!.controller(for: address)!.isReady = false }),
+            ("connection", { $0.devices!.controller(for: address)!.isDeviceConnected = false }),
+            ("other or unknown source", { $0.devices!.controller(for: address)!.localSource = false }),
+            ("other selected headphones", { $0.devices!.selectedAddress = next }),
+            ("user-selected output", { $0.audioRoute!.route = Route(uid: "fixture-speakers") }),
+            ("unknown original output", { $0.resumeOutputUID = nil }),
+            ("missing output", { $0.audioRoute!.route = nil }),
+            ("missing controller", { $0.devices!.controllers[address] = nil }),
+            ("missing helpers", { $0.helpers.isAvailable = false }),
+        ]
+        for (name, block) in blockers {
+            let waiting = await disconnected()
+            waiting.devices!.controller(for: address)!.isDeviceConnected = true
+            block(waiting)
+            for _ in 0..<5 { waiting.availabilityChanged() }
+            precondition(waiting.starts.isEmpty && waiting.state == .waitingForDevice,
+                         "Automatic LDAC resume bypassed \(name)")
+            waiting.stop()
+        }
+        let outdated = await disconnected()
+        outdated.devices!.controller(for: address)!.isDeviceConnected = true
+        LDACDriverInstaller.state = .outdated
+        outdated.availabilityChanged()
+        precondition(outdated.starts.isEmpty && !outdated.isOpeningDriverInstaller)
+        LDACDriverInstaller.state = .current
+        outdated.availabilityChanged()
+        precondition(outdated.starts == [address])
+
+        let originalPreference = UUID()
+        let disabled = await disconnected(preference: originalPreference)
+        precondition(disabled.deferredConnectionModes[address] == originalPreference,
+                     "Disconnect lost the original Stable Connection obligation")
+        disabled.setEnabled(false, forAddress: address)
+        for _ in 0..<5 { disabled.availabilityChanged() }
+        precondition(disabled.state == .off && disabled.requestedAddress == nil && disabled.starts.isEmpty)
+        let returning = disabled.devices!.controller(for: address)!
+        precondition(returning.requests.isEmpty && disabled.preferenceRestoreTasks.isEmpty)
+        returning.isDeviceConnected = true
+        disabled.availabilityChanged()
+        await waitUntil { returning.requests == [.stableConnection] }
+        precondition(!disabled.canEnable(forAddress: address))
+        disabled.setEnabled(true, forAddress: address)
+        precondition(disabled.requestedAddress == nil && disabled.starts.isEmpty,
+                     "Manual enable raced the outstanding Stable Connection restoration")
+        returning.confirm(.stableConnection)
+        await waitUntil { disabled.preferenceRestoreTasks.isEmpty }
+        precondition(disabled.deferredConnectionModes.isEmpty && disabled.starts.isEmpty,
+                     "Manual Off was undone by a reconnect")
+
+        let interrupted = await disconnected(preference: UUID())
+        interrupted.setEnabled(false, forAddress: address)
+        let disappearing = interrupted.devices!.controller(for: address)!
+        disappearing.isDeviceConnected = true
+        interrupted.availabilityChanged()
+        await waitUntil { disappearing.requests == [.stableConnection] }
+        let restoration = disappearing.lastConnectionModeChangeID!
+        disappearing.isReady = false
+        disappearing.isDeviceConnected = false
+        disappearing.retries = 1
+        disappearing.connectionTransition?.phase = .failed
+        await waitUntil { interrupted.preferenceRestoreTasks.isEmpty }
+        precondition(interrupted.deferredConnectionModes[address] == restoration,
+                     "A second disconnect dropped the in-flight Stable Connection restoration")
+        for _ in 0..<100 { interrupted.availabilityChanged() }
+        precondition(disappearing.requests == [.stableConnection] && interrupted.preferenceRestoreTasks.isEmpty)
+        disappearing.retries = 0
+        disappearing.confirm(.soundQuality)
+        disappearing.isReady = true
+        disappearing.isDeviceConnected = true
+        interrupted.availabilityChanged()
+        await waitUntil { disappearing.requests == [.stableConnection, .stableConnection] }
+        disappearing.confirm(.stableConnection)
+        await waitUntil { interrupted.preferenceRestoreTasks.isEmpty }
+        precondition(interrupted.deferredConnectionModes.isEmpty && interrupted.starts.isEmpty)
+
+        let sleepOutput = Output()
+        let sleeper = Controller(output: sleepOutput)
+        sleeper.devices!.isSystemSleeping = true
+        sleeper.suspend()
+        await waitUntil { sleepOutput.continuation != nil }
+        precondition(sleeper.requestedAddress == address && !sleeper.restoreAudioOnStop)
+        sleepOutput.continuation?.resume(returning: nil)
+        await waitUntil { sleeper.cleanupTask == nil }
+        precondition(sleeper.state == .waitingForDevice && sleeper.starts.isEmpty)
+        sleeper.devices!.isSystemSleeping = false
+        sleeper.availabilityChanged()
+        precondition(sleeper.starts == [address], "Wake lost the LDAC request")
+
+        let unsafe = await disconnected(restoreError: "Output lease could not be released.")
+        precondition(unsafe.state == .failed("Output lease could not be released.") && unsafe.requestedAddress == nil)
+        unsafe.devices!.controller(for: address)!.isDeviceConnected = true
+        for _ in 0..<10 { unsafe.availabilityChanged() }
+        precondition(unsafe.starts.isEmpty, "Unconfirmed cleanup automatically restarted LDAC")
+
+        let errorOutput = Output()
+        let duplicate = Controller(output: errorOutput)
+        duplicate.volumeError = "Transport failed."
+        duplicate.sessionFinished("Transport failed. Cleanup failed.")
+        await waitUntil { errorOutput.continuation != nil }
+        errorOutput.continuation?.resume(returning: "Cleanup failed.")
+        await waitUntil { duplicate.cleanupTask == nil }
+        precondition(duplicate.state == .failed("Transport failed. Cleanup failed."),
+                     "Nested cleanup errors repeated their primary failure")
+
         print("PASS actual LDAC admission, connection preference and cleanup methods: confirmations, readiness, output-before-preference restoration, cancelled startup, user supersession, bounded retry without setter replay, sleep/wake, quit deadline and existing lifecycle checks; fake peers only")
+        print("PASS actual disconnect policy: idle waiting, one resume, source/output/selection/driver gates, deferred Stable Connection, manual Off, sleep/wake, cleanup failure and nested-error deduplication")
     }
 }
-'''.replace("__METHODS__", "\n".join(method(name) for name in ["deviceUnavailableReason", "canEnable", "refreshDriverState", "installDriver", "setEnabled", "stop", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "finish", "completeStop"]))
+'''.replace("__METHODS__", "\n".join(method(name) for name in ["deviceUnavailableReason", "canEnable", "refreshDriverState", "installDriver", "setEnabled", "stop", "suspend", "resumeIfReady", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))
 
 with tempfile.TemporaryDirectory(prefix="acouplet-ldac-controller-cleanup-") as directory:
     directory = pathlib.Path(directory)

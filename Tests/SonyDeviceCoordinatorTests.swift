@@ -66,6 +66,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
                 XCTAssertTrue(state.keepsMenuBarVisible(isSessionRunning: running))
             }
             XCTAssertFalse(LDACState.off.keepsMenuBarVisible(isSessionRunning: running))
+            XCTAssertFalse(LDACState.waitingForDevice.keepsMenuBarVisible(isSessionRunning: running))
             XCTAssertEqual(LDACState.failed("Test").keepsMenuBarVisible(isSessionRunning: running), running)
         }
         let coordinator = makeCoordinator(connected: false)

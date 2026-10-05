@@ -259,7 +259,7 @@ final class LDACNativeOutput {
         }
     }
 
-    func restoreAndRelease() async -> String? {
+    func restoreAndRelease(targetDisconnected: Bool = false) async -> String? {
         restoring = true
         record("restoring", reason: "selected=\(isSelected) userMuted=\(controls.muted)")
         silence()
@@ -282,11 +282,12 @@ final class LDACNativeOutput {
                             record("route-restored", reason: "selector=\(selector) savedUID=\(savedUID) userMuted=\(controls.muted)")
                             break
                         }
-                        if Date() >= deadline {
+                        if targetDisconnected || Date() >= deadline {
                             if let fallback = try Self.availableFallback() {
                                 try Self.setMute(fallback, muted: true)
                                 try Self.write(Self.system, selector: selector, value: fallback)
                                 record("route-fallback", reason: "selector=\(selector) device=\(fallback) forcedMute=true")
+                                if targetDisconnected { break }
                             }
                             errors.append("The previous Mac audio output did not return. Check Sound settings to select it.")
                             break

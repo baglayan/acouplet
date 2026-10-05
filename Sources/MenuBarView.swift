@@ -227,7 +227,7 @@ struct MenuBarView: View {
 
     private var ldacIsEnabled: Bool {
         switch ldacState {
-        case .requested, .connecting, .active: true
+        case .waitingForDevice, .requested, .connecting, .active: true
         case .off, .stopping, .failed: false
         }
     }
@@ -235,6 +235,7 @@ struct MenuBarView: View {
     private var ldacStatusText: String {
         switch ldacState {
         case .off: String(localized: "Off")
+        case .waitingForDevice: String(localized: "Waiting for headphones…")
         case .requested: ldac.audioCaptureAccess == .checking ? String(localized: "Checking permission…") : String(localized: "Requested…")
         case .connecting: ldac.isRecovering ? String(localized: "Reconnecting…") : String(localized: "Connecting…")
         case .active(let format):
@@ -270,7 +271,7 @@ struct MenuBarView: View {
                 .tint(nil)
                 .controlSize(.small)
                 .fixedSize()
-                .disabled(ldac.isSessionRunning)
+                .disabled(ldac.isSessionRunning || ldac.state == .waitingForDevice)
                 .accessibilityLabel("LDAC Settings")
                 .help("LDAC Settings")
                 .accessibilityIdentifier("audio.ldacSettings")
@@ -296,7 +297,7 @@ struct MenuBarView: View {
                 .accessibilityValue(ldacStatusText)
                 .accessibilityIdentifier("audio.ldac")
             }
-            if !ldac.isSessionRunning { LDACDriverGuidance() }
+            if !ldac.isSessionRunning, ldacState != .waitingForDevice { LDACDriverGuidance() }
             if case .failed(let error) = ldacState {
                 if ldac.audioCaptureAccess == .permissionRequired {
                     LDACPermissionGuidance()

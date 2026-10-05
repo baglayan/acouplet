@@ -113,6 +113,13 @@ def verify_updates(root, updates, public_key, build=None, version=None, *, repos
         raise ValueError('The appcast contains no updates or repeated build numbers.')
     if build is not None and (build not in versions or max(versions) != build):
         raise ValueError('The new build must be the highest version in the signed feed.')
+    for archived_feed in updates.glob('appcast-*.xml'):
+        archived_document = verified_appcast(root, archived_feed, public_key)
+        verified.add(archived_feed)
+        for notes in archived_document.findall('./channel/item/' + NS + 'releaseNotesLink'):
+            path = update_path(updates, notes.text)
+            verify_file(root, public_key, path, notes.attrib[NS + 'edSignature'], notes.attrib[NS + 'length'])
+            verified.add(path)
     if set(updates.iterdir()) != verified:
         raise ValueError('Update files must exactly match the files referenced by the signed feed.')
     return max(versions)

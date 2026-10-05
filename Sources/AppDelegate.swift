@@ -130,10 +130,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspaceNotifications.publisher(for: NSWorkspace.willSleepNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                #if !ACOUPLET_PUBLIC_APIS_ONLY
-                self?.environment.ldac.stop(restoreAudio: false, reason: "Mac is going to sleep")
-                #endif
                 self?.environment.devices.systemWillSleep()
+                #if !ACOUPLET_PUBLIC_APIS_ONLY
+                self?.environment.ldac.suspend()
+                #endif
             }
             .store(in: &cancellables)
         workspaceNotifications.publisher(for: NSWorkspace.didWakeNotification)

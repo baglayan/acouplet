@@ -7509,7 +7509,7 @@
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Baş sallama"
+            "value": "Yukarı aşağı"
           }
         },
         "en": {
@@ -10382,7 +10382,7 @@
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Başı sağa sola hareket ettirme"
+            "value": "Sağa sola"
           }
         },
         "en": {
