@@ -3,6 +3,21 @@ import XCTest
 @testable import Acouplet
 
 final class SonyNativeBatterySnapshotTests: XCTestCase {
+    func testDiagnosticsOmitNativeNameAndIdentifierWhilePreservingBatteryReadings() {
+        let date = Date(timeIntervalSince1970: 1_000)
+        let identifier = UUID()
+        var snapshot = SonyNativeBatterySnapshot(identifier: identifier, name: "Private renamed earbuds")
+        var batteries = SonyBatteries()
+        XCTAssertTrue(batteries.update([0x23, 0x09, 73, 0, 84, 1, 20, 20]))
+        snapshot.update(batteries, type: 0x09, observedAt: date)
+        let report = snapshot.diagnosticDescription(at: date)
+        XCTAssertFalse(report.contains(snapshot.name))
+        XCTAssertFalse(report.contains(identifier.uuidString))
+        XCTAssertTrue(report.contains("Left: 73%, not charging"))
+        XCTAssertTrue(report.contains("Right: 84%, charging"))
+        XCTAssertTrue(report.contains("fresh"))
+    }
+
     @MainActor
     func testChargingCasePresenceRequiresFreshPairAndEndsOnExpiryOrControlLoss() {
         let controller = batteryController(functions: [0x29, 0x2A])

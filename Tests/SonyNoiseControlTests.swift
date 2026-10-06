@@ -408,7 +408,7 @@ final class SonyNoiseControlControllerTests: XCTestCase {
             for _ in 0..<4 { await Task.yield() }
             XCTAssertFalse(controller.isReady)
             XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect controls to try again."))
+            XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect the headphones to try again."))
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
                 payload: [0x67, inquiry, 1, 1, 0, 0, 12] + (inquiry == 0x19 ? [0, 0] : [])), session: session)
             XCTAssertFalse(controller.isReady)

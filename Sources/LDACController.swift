@@ -81,6 +81,17 @@ final class LDACController: ObservableObject {
     }
 
     var isNativeOutputAvailable: Bool { LDACNativeOutput.isAvailable }
+    var needsStopBeforeTermination: Bool { isSessionRunning || !preferenceRestoreTasks.isEmpty }
+
+    #if DEBUG
+    func simulateConnectionPreferenceRestoration(_ headphones: SonyHeadphonesController, request: UUID) async -> String? {
+        await restoreConnectionPreference(headphones, address: headphones.address, request: request)
+    }
+
+    func simulatedDeferredConnectionMode(forAddress address: String) -> UUID? {
+        deferredConnectionModes[address]
+    }
+    #endif
 
     var canStartOrInstallDriver: Bool {
         switch driverState {
@@ -91,7 +102,8 @@ final class LDACController: ObservableObject {
 
     func refreshDriverState() {
         guard !isSessionRunning else { return }
-        driverState = inspectDriver(bundle)
+        let state = inspectDriver(bundle)
+        if driverState != state { driverState = state }
     }
 
     func installDriver(forAddress address: String) {
@@ -121,7 +133,7 @@ final class LDACController: ObservableObject {
 
     func deviceUnavailableReason(forAddress address: String) -> String? {
         guard let headphones = devices?.controller(for: address), headphones.deviceModel != .unknown else {
-            return String(localized: "Connect Sony controls before starting LDAC.")
+            return String(localized: "Connect the headphone controls in Acouplet before starting LDAC.")
         }
         switch headphones.deviceModel {
         case .wfXM3, .whCH720N:
@@ -129,7 +141,7 @@ final class LDACController: ObservableObject {
         default: break
         }
         guard headphones.isReady else {
-            return String(localized: "Connect Sony controls before starting LDAC.")
+            return String(localized: "Connect the headphone controls in Acouplet before starting LDAC.")
         }
         guard headphones.earbudFinder?.isBusy != true, headphones.earbudFinder?.mayBeRinging != true else {
             return String(localized: "Stop the locating sound before starting LDAC.")
@@ -164,7 +176,7 @@ final class LDACController: ObservableObject {
             }
             guard helpers.isAvailable else {
                 targetAddress = address
-                state = .failed(String(localized: "The LDAC audio helpers are unavailable."))
+                state = .failed(String(localized: "LDAC playback is unavailable in this installation of Acouplet."))
                 return
             }
             requestedAddress = address
@@ -199,7 +211,8 @@ final class LDACController: ObservableObject {
     private func resumeIfReady() {
         guard devices?.isSystemSleeping != true else { return }
         for (address, request) in deferredConnectionModes where address != requestedAddress && preferenceRestoreTasks[address] == nil {
-            guard let headphones = devices?.controller(for: address), headphones.isDeviceConnected, headphones.isReady else { continue }
+            guard let headphones = devices?.controller(for: address), headphones.isDeviceConnected, headphones.isReady,
+                  headphones.earbudFinder?.isBusy != true, headphones.earbudFinder?.mayBeRinging != true else { continue }
             deferredConnectionModes[address] = nil
             preferenceRestoreTasks[address] = Task { [weak self] in
                 guard let self else { return }
@@ -207,6 +220,7 @@ final class LDACController: ObservableObject {
                 self.objectWillChange.send()
                 self.preferenceRestoreTasks[address] = nil
                 if let error { self.record("preference-restore-failed", reason: error) }
+                self.completeStop()
             }
         }
         guard state == .waitingForDevice, !isSessionRunning, cleanupTask == nil,
@@ -261,7 +275,7 @@ final class LDACController: ObservableObject {
             guard let self, self.sessionID == identifier else { return }
             do {
                 guard let devices = self.devices, let headphones = devices.controller(for: address), headphones.deviceModel != .unknown else {
-                    throw ControlError("Connect Sony controls before starting LDAC.")
+                    throw ControlError(String(localized: "Connect the headphone controls in Acouplet before starting LDAC."))
                 }
                 if let reason = self.deviceUnavailableReason(forAddress: address) { throw ControlError(reason) }
                 self.headphones = headphones
@@ -275,7 +289,7 @@ final class LDACController: ObservableObject {
                     throw CancellationError()
                 }
                 guard devices.controller(for: address) === headphones else {
-                    throw ControlError(String(localized: "The Sony headphone controller changed."))
+                    throw ControlError(String(localized: "The headphone connection changed. Try LDAC again."))
                 }
                 try await output.claim(model: headphones.deviceModel.name, targetAddress: address, sampleRate: self.requestedConfiguration.sampleRate)
                 let priority = try output.priorityControl()
@@ -285,7 +299,7 @@ final class LDACController: ObservableObject {
                 let deadline = Date().addingTimeInterval(15)
                 while !self.hasMusicVolumeForHandoff || !headphones.hasFreshMusicVolumeReadback || headphones.musicVolumeReadbackID == previousReadback {
                     try Task.checkCancellation()
-                    guard Date() < deadline else { throw ControlError("The Mac's headphone music volume could not be read. Connect Sony controls and select this Mac as the headphone audio source, then retry LDAC.") }
+                    guard Date() < deadline else { throw ControlError(String(localized: "The headphone volume could not be read. Connect the headphone controls in Acouplet and select this Mac as their audio source, then try LDAC again.")) }
                     try await Task.sleep(for: .milliseconds(100))
                 }
                 try Task.checkCancellation()
@@ -367,9 +381,13 @@ final class LDACController: ObservableObject {
             try Task.checkCancellation()
             guard devices?.controller(for: address) === headphones,
                   SonyBLEIdentity.normalizedAddress(headphones.address) == address else {
-                throw ControlError(String(localized: "The Sony headphone controller changed."))
+                throw ControlError(String(localized: "The headphone connection changed. Try LDAC again."))
             }
             guard headphones.lastConnectionModeChangeID == request else { return false }
+            if restoring, headphones.earbudFinder?.isBusy == true || headphones.earbudFinder?.mayBeRinging == true {
+                deferredConnectionModes[address] = request
+                return false
+            }
             let sleeping = devices?.isSystemSleeping == true
             if stopCompletions.isEmpty && (sleeping || headphones.connectionTransition?.awaitingUser == true) {
                 deadline?.cancel()
@@ -582,7 +600,7 @@ final class LDACController: ObservableObject {
                     guard self.sessionID == identifier, self.state != .stopping else { return }
                     let status = self.musicControlStatus
                     if status != previousStatus { self.record("volume-wait", reason: status); previousStatus = status }
-                    guard Date() < deadline else { throw ControlError("LDAC transport started, but fresh Sony music volume controls were not confirmed. Reconnect Sony controls and retry LDAC.") }
+                    guard Date() < deadline else { throw ControlError(String(localized: "The headphone volume could not be confirmed after LDAC started. Reconnect the headphone controls and try LDAC again.")) }
                     if let headphones = self.headphones, headphones.playback.generation == .v1,
                        refreshedLegacySession != headphones.notificationSession {
                         let volumeReadback = headphones.musicVolumeReadbackID
@@ -605,7 +623,7 @@ final class LDACController: ObservableObject {
                         if self.isRecovering || self.pendingVolume == nil, let output = self.nativeOutput { self.pendingVolume = output.controls.volume(in: range) }
                     }
                     if self.controlSession != nil {
-                        guard self.bindingIsCurrent else { throw ControlError("The headphone music source or Sony control session changed. LDAC stopped.") }
+                        guard self.bindingIsCurrent else { throw ControlError(String(localized: "The headphone audio source or connection changed. LDAC stopped.")) }
                         self.sendPendingVolume()
                         if self.pendingVolume == nil, self.volumeTask == nil,
                            self.headphones?.canControlMusicVolume == true,
@@ -642,7 +660,7 @@ final class LDACController: ObservableObject {
             connectionModeRestoreID = nil
         }
         if let address = targetAddress, let headphones, devices?.controller(for: address) !== headphones {
-            fail("The Sony headphone controller changed. LDAC stopped.")
+            fail(String(localized: "The headphone connection changed. LDAC stopped."))
             return
         }
         if hasOtherMusicSource {
@@ -651,8 +669,8 @@ final class LDACController: ObservableObject {
         }
         guard controlSession != nil else { return }
         guard bindingIsCurrent else {
-            beginRecovery(reason: "Sony music controls temporarily disconnected.")
-            session?.recoverConnection(reason: "Sony music controls temporarily disconnected.")
+            beginRecovery(reason: String(localized: "The headphone controls temporarily disconnected."))
+            session?.recoverConnection(reason: String(localized: "The headphone controls temporarily disconnected."))
             return
         }
         if pendingVolume == nil, volumeTask == nil, let headphones,
@@ -885,6 +903,7 @@ final class LDACController: ObservableObject {
     }
 
     private func completeStop() {
+        guard !needsStopBeforeTermination else { return }
         let completions = stopCompletions
         stopCompletions = []
         for completion in completions { completion() }

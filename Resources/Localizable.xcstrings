@@ -86,19 +86,19 @@
         }
       }
     },
-    "The Sony headphone controller changed.": {
+    "The headphone connection changed. Try LDAC again.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The Sony headphone controller changed."
+            "value": "The headphone connection changed. Try LDAC again."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony kulaklık denetleyicisi değişti."
+            "value": "Kulaklık bağlantısı değişti. LDAC’i tekrar deneyin."
           }
         }
       }
@@ -597,19 +597,19 @@
         }
       }
     },
-    "%@ settings were not received. Reconnect controls to try again.": {
+    "%@ settings were not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ ayarları alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "%@ ayarları alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ settings were not received. Reconnect controls to try again."
+            "value": "%@ settings were not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -2198,53 +2198,53 @@
         }
       }
     },
-    "Bluetooth LE controls disconnected.": {
+    "The headphone controls disconnected.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth LE denetimlerinin bağlantısı kesildi."
+            "value": "Kulaklık denetimlerinin bağlantısı kesildi."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth LE controls disconnected."
+            "value": "The headphone controls disconnected."
           }
         }
       }
     },
-    "Bluetooth LE identity is unavailable. Reconnect the headphones.": {
+    "The headphones could not be identified. Reconnect them and try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth LE kimliği kullanılamıyor. Kulaklıkları yeniden bağlayın."
+            "value": "Kulaklıklar tanımlanamadı. Yeniden bağlayıp tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth LE identity is unavailable. Reconnect the headphones."
+            "value": "The headphones could not be identified. Reconnect them and try again."
           }
         }
       }
     },
-    "Bluetooth LE is not supported on this Mac.": {
+    "This Mac does not support this headphone connection.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bu Mac, Bluetooth LE’yi desteklemiyor."
+            "value": "Bu Mac, bu kulaklık bağlantısını desteklemiyor."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth LE is not supported on this Mac."
+            "value": "This Mac does not support this headphone connection."
           }
         }
       }
@@ -2317,19 +2317,19 @@
         }
       }
     },
-    "Bluetooth is connected, but the headphones haven’t opened their controls.": {
+    "Bluetooth is connected. Try Reconnect Controls. If that doesn’t help, reconnect the headphones in Bluetooth Settings.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth bağlı ancak kulaklıklar denetim bağlantısını açmadı."
+            "value": "Bluetooth bağlı. Denetimleri Yeniden Bağla düğmesini deneyin. Sorun devam ederse Bluetooth Ayarları’ndan kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth is connected, but the headphones haven’t opened their controls."
+            "value": "Bluetooth is connected. Try Reconnect Controls. If that doesn’t help, reconnect the headphones in Bluetooth Settings."
           }
         }
       }
@@ -3695,19 +3695,53 @@
         }
       }
     },
-    "Controls Unavailable": {
+    "Reconnecting Controls…": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Denetimler Kullanılamıyor"
+            "value": "Denetimler Yeniden Bağlanıyor…"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Controls Unavailable"
+            "value": "Reconnecting Controls…"
+          }
+        }
+      }
+    },
+    "Bluetooth is connected. Controls are reconnecting automatically.": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bluetooth bağlı. Denetimler otomatik olarak yeniden bağlanıyor."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bluetooth is connected. Controls are reconnecting automatically."
+          }
+        }
+      }
+    },
+    "Reconnect Headphone Controls": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık Denetimlerini Yeniden Bağla"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnect Headphone Controls"
           }
         }
       }
@@ -3831,19 +3865,19 @@
         }
       }
     },
-    "Could not connect to Sony BLE controls.": {
+    "Could not connect to the headphone controls. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE denetimlerine bağlanılamadı."
+            "value": "Kulaklık denetimlerine bağlanılamadı. Tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not connect to Sony BLE controls."
+            "value": "Could not connect to the headphone controls. Try again."
           }
         }
       }
@@ -3899,19 +3933,19 @@
         }
       }
     },
-    "Could not send to headphones over Bluetooth LE.": {
+    "Could not send the command to the headphones. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth LE üzerinden kulaklıklara gönderilemedi."
+            "value": "Komut kulaklıklara gönderilemedi. Tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not send to headphones over Bluetooth LE."
+            "value": "Could not send the command to the headphones. Try again."
           }
         }
       }
@@ -4087,19 +4121,19 @@
         }
       }
     },
-    "DSEE settings were not received. Reconnect controls to try again.": {
+    "DSEE settings were not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "DSEE ayarları alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "DSEE ayarları alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "DSEE settings were not received. Reconnect controls to try again."
+            "value": "DSEE settings were not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -4546,19 +4580,19 @@
         }
       }
     },
-    "Draft saved on this Mac. Reconnect controls before applying changes.": {
+    "Draft saved on this Mac. Reconnect the headphones before applying changes.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Taslak bu Mac’e kaydedildi. Değişiklikleri uygulamadan önce denetimleri yeniden bağlayın."
+            "value": "Taslak bu Mac’e kaydedildi. Değişiklikleri uygulamadan önce kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Draft saved on this Mac. Reconnect controls before applying changes."
+            "value": "Draft saved on this Mac. Reconnect the headphones before applying changes."
           }
         }
       }
@@ -5175,19 +5209,19 @@
         }
       }
     },
-    "Fit information was not received. Reconnect controls to try again.": {
+    "Fit information was not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Uyum bilgisi alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "Uyum bilgisi alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Fit information was not received. Reconnect controls to try again."
+            "value": "Fit information was not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -5873,36 +5907,36 @@
         }
       }
     },
-    "Headphone capabilities changed before the audio source change was confirmed.": {
+    "The headphone settings changed before the audio source change was confirmed.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ses kaynağı değişikliği doğrulanmadan önce kulaklık özellikleri değişti."
+            "value": "Ses kaynağı değişikliği doğrulanmadan önce kulaklık ayarları değişti."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Headphone capabilities changed before the audio source change was confirmed."
+            "value": "The headphone settings changed before the audio source change was confirmed."
           }
         }
       }
     },
-    "Headphone capabilities changed before the device connection change was confirmed.": {
+    "The headphone settings changed before the device connection change was confirmed.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Aygıt bağlantısı değişikliği doğrulanmadan önce kulaklık özellikleri değişti."
+            "value": "Aygıt bağlantısı değişikliği doğrulanmadan önce kulaklık ayarları değişti."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Headphone capabilities changed before the device connection change was confirmed."
+            "value": "The headphone settings changed before the device connection change was confirmed."
           }
         }
       }
@@ -7180,19 +7214,19 @@
         }
       }
     },
-    "Multiple Sony devices found. Choose a device before connecting to BLE controls.": {
+    "Multiple headphones were found. Select the headphones you want to connect.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Birden fazla Sony aygıtı bulundu. BLE denetimlerine bağlanmadan önce bir aygıt seçin."
+            "value": "Birden fazla kulaklık bulundu. Bağlanmak istediğiniz kulaklığı seçin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Multiple Sony devices found. Choose a device before connecting to BLE controls."
+            "value": "Multiple headphones were found. Select the headphones you want to connect."
           }
         }
       }
@@ -7758,19 +7792,19 @@
         }
       }
     },
-    "Noise control status was not received. Reconnect controls to try again.": {
+    "Noise control status was not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Gürültü denetimi durumu alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "Gürültü denetimi durumu alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Noise control status was not received. Reconnect controls to try again."
+            "value": "Noise control status was not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -8234,19 +8268,19 @@
         }
       }
     },
-    "Optimizer information was not received. Reconnect controls to try again.": {
+    "Optimizer information was not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optimizasyon bilgisi alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "Optimizasyon bilgisi alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optimizer information was not received. Reconnect controls to try again."
+            "value": "Optimizer information was not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -8608,36 +8642,36 @@
         }
       }
     },
-    "Playback controls changed while waiting. Reconnect controls and try again.": {
+    "Playback controls changed while waiting. Reconnect the headphones and try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Beklerken çalma denetimleri değişti. Denetimleri yeniden bağlayıp tekrar deneyin."
+            "value": "Beklerken çalma denetimleri değişti. Kulaklıkları yeniden bağlayıp tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Playback controls changed while waiting. Reconnect controls and try again."
+            "value": "Playback controls changed while waiting. Reconnect the headphones and try again."
           }
         }
       }
     },
-    "Playback information was not received. Reconnect controls to try again.": {
+    "Playback information was not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Çalma bilgisi alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "Çalma bilgisi alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Playback information was not received. Reconnect controls to try again."
+            "value": "Playback information was not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -8744,19 +8778,19 @@
         }
       }
     },
-    "Power settings were not received. Reconnect controls to try again.": {
+    "Power settings were not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Güç ayarları alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "Güç ayarları alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Power settings were not received. Reconnect controls to try again."
+            "value": "Power settings were not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -8846,19 +8880,19 @@
         }
       }
     },
-    "Practice information was not received. Reconnect controls to try again.": {
+    "Practice information was not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Alıştırma bilgisi alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "Alıştırma bilgisi alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Practice information was not received. Reconnect controls to try again."
+            "value": "Practice information was not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -10648,19 +10682,19 @@
         }
       }
     },
-    "Sony BLE control connection timed out.": {
+    "The headphone connection timed out. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE denetim bağlantısı zaman aşımına uğradı."
+            "value": "Kulaklık bağlantısı zaman aşımına uğradı. Tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE control connection timed out."
+            "value": "The headphone connection timed out. Try again."
           }
         }
       }
@@ -10682,70 +10716,70 @@
         }
       }
     },
-    "Sony BLE control writes timed out.": {
+    "Sending the headphone command timed out. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE denetim yazmaları zaman aşımına uğradı."
+            "value": "Kulaklık komutunun gönderilmesi zaman aşımına uğradı. Tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE control writes timed out."
+            "value": "Sending the headphone command timed out. Try again."
           }
         }
       }
     },
-    "Sony BLE controls returned an invalid write length.": {
+    "The headphones returned an invalid response. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE denetimleri geçersiz bir yazma uzunluğu gönderdi."
+            "value": "Kulaklıklar geçersiz bir yanıt gönderdi. Tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE controls returned an invalid write length."
+            "value": "The headphones returned an invalid response. Try again."
           }
         }
       }
     },
-    "Sony BLE controls returned no data.": {
+    "The headphones returned an empty response. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE denetimleri veri göndermedi."
+            "value": "Kulaklıklar boş bir yanıt gönderdi. Tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE controls returned no data."
+            "value": "The headphones returned an empty response. Try again."
           }
         }
       }
     },
-    "Sony BLE notifications are unavailable.": {
+    "Could not receive updates from the headphones. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE bildirimleri kullanılamıyor."
+            "value": "Kulaklıklardan güncellemeler alınamadı. Tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE notifications are unavailable."
+            "value": "Could not receive updates from the headphones. Try again."
           }
         }
       }
@@ -10784,19 +10818,19 @@
         }
       }
     },
-    "Sony control channel is busy (%d)": {
+    "Could not open the headphone connection. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony denetim kanalı meşgul (%d)"
+            "value": "Kulaklık bağlantısı açılamadı. Tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony control channel is busy (%d)"
+            "value": "Could not open the headphone connection. Try again."
           }
         }
       }
@@ -10814,23 +10848,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Could not connect to the headphones’ controls."
-          }
-        }
-      }
-    },
-    "Sony controls disconnected.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sony denetimlerinin bağlantısı kesildi."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sony controls disconnected."
           }
         }
       }
@@ -11039,19 +11056,19 @@
         }
       }
     },
-    "Speak-to-Chat settings changed while waiting. Reconnect controls and try again.": {
+    "Speak-to-Chat settings changed while waiting. Reconnect the headphones and try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Beklerken Speak-to-Chat ayarları değişti. Denetimleri yeniden bağlayıp tekrar deneyin."
+            "value": "Beklerken Speak-to-Chat ayarları değişti. Kulaklıkları yeniden bağlayıp tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Speak-to-Chat settings changed while waiting. Reconnect controls and try again."
+            "value": "Speak-to-Chat settings changed while waiting. Reconnect the headphones and try again."
           }
         }
       }
@@ -11311,19 +11328,19 @@
         }
       }
     },
-    "Sync the headphones over Classic Bluetooth before connecting with Bluetooth LE.": {
+    "Connect the headphones in Bluetooth settings, then try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth LE ile bağlanmadan önce kulaklıkları Classic Bluetooth üzerinden eşzamanlayın."
+            "value": "Kulaklıkları Bluetooth ayarlarından bağlayıp tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sync the headphones over Classic Bluetooth before connecting with Bluetooth LE."
+            "value": "Connect the headphones in Bluetooth settings, then try again."
           }
         }
       }
@@ -11651,19 +11668,19 @@
         }
       }
     },
-    "The Bluetooth LE device did not match the selected headphones.": {
+    "The connected device did not match the selected headphones.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth LE aygıtı seçili kulaklıklarla eşleşmedi."
+            "value": "Bağlanan aygıt seçilen kulaklıkla eşleşmedi."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The Bluetooth LE device did not match the selected headphones."
+            "value": "The connected device did not match the selected headphones."
           }
         }
       }
@@ -11701,18 +11718,18 @@
         }
       }
     },
-    "The LDAC audio helpers are unavailable.": {
+    "LDAC playback is unavailable in this installation of Acouplet.": {
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "LDAC ses yardımcıları kullanılamıyor."
+            "value": "Acouplet’in bu kurulumunda LDAC üzerinden ses çalınamıyor."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The LDAC audio helpers are unavailable."
+            "value": "LDAC playback is unavailable in this installation of Acouplet."
           }
         }
       }
@@ -12006,19 +12023,19 @@
         }
       }
     },
-    "The device list was not received. Reconnect controls to try again.": {
+    "The device list was not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Aygıt listesi alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "Aygıt listesi alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The device list was not received. Reconnect controls to try again."
+            "value": "The device list was not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -12737,19 +12754,19 @@
         }
       }
     },
-    "The listening level was not received. Reconnect controls to try again.": {
+    "The listening level was not received. Reconnect the headphones to try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Dinleme düzeyi alınmadı. Yeniden denemek için denetimleri yeniden bağlayın."
+            "value": "Dinleme düzeyi alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The listening level was not received. Reconnect controls to try again."
+            "value": "The listening level was not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -12822,19 +12839,19 @@
         }
       }
     },
-    "The optimizer stopped, but a status read is still unanswered. Reconnect controls before starting another optimization.": {
+    "The optimizer stopped, but a status read is still unanswered. Reconnect the headphones before starting another optimization.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optimizasyon durdu ancak bir durum okuma isteği hâlâ yanıtsız. Başka bir optimizasyon başlatmadan önce denetimleri yeniden bağlayın."
+            "value": "Optimizasyon durdu ancak bir durum okuma isteği hâlâ yanıtsız. Başka bir optimizasyon başlatmadan önce kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The optimizer stopped, but a status read is still unanswered. Reconnect controls before starting another optimization."
+            "value": "The optimizer stopped, but a status read is still unanswered. Reconnect the headphones before starting another optimization."
           }
         }
       }
@@ -13281,19 +13298,19 @@
         }
       }
     },
-    "This Bluetooth LE connection cannot verify the selected headphones.": {
+    "This connection could not verify the selected headphones.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bu Bluetooth LE bağlantısı seçili kulaklıkları doğrulayamıyor."
+            "value": "Bu bağlantı üzerinden seçilen kulaklık doğrulanamadı."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This Bluetooth LE connection cannot verify the selected headphones."
+            "value": "This connection could not verify the selected headphones."
           }
         }
       }
@@ -13349,19 +13366,19 @@
         }
       }
     },
-    "The headphones’ controls are unavailable over Bluetooth LE.": {
+    "The headphone controls are unavailable through this connection.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kulaklığın denetimlerine Bluetooth LE üzerinden erişilemiyor."
+            "value": "Kulaklık denetimleri bu bağlantı üzerinden kullanılamıyor."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The headphones’ controls are unavailable over Bluetooth LE."
+            "value": "The headphone controls are unavailable through this connection."
           }
         }
       }
@@ -14658,19 +14675,19 @@
         }
       }
     },
-    "Voice guidance capabilities changed before the change was confirmed.": {
+    "The voice guidance settings changed before the change was confirmed.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Değişiklik doğrulanmadan önce sesli yönlendirme özellikleri değişti."
+            "value": "Değişiklik doğrulanmadan önce sesli yönlendirme ayarları değişti."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Voice guidance capabilities changed before the change was confirmed."
+            "value": "The voice guidance settings changed before the change was confirmed."
           }
         }
       }
@@ -14879,19 +14896,19 @@
         }
       }
     },
-    "Waiting for the headphone setting. Reconnect controls if it does not arrive.": {
+    "Waiting for the headphone setting. Reconnect the headphones if it does not arrive.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kulaklık ayarı bekleniyor. Gelmezse denetimleri yeniden bağlayın."
+            "value": "Kulaklık ayarı bekleniyor. Gelmezse kulaklıkları yeniden bağlayın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Waiting for the headphone setting. Reconnect controls if it does not arrive."
+            "value": "Waiting for the headphone setting. Reconnect the headphones if it does not arrive."
           }
         }
       }
@@ -15749,19 +15766,19 @@
         }
       }
     },
-    "Connect Sony controls before starting LDAC.": {
+    "Connect the headphone controls in Acouplet before starting LDAC.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Connect Sony controls before starting LDAC."
+            "value": "Connect the headphone controls in Acouplet before starting LDAC."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "LDAC’i başlatmadan önce Sony denetim bağlantısını kurun."
+            "value": "LDAC’i başlatmadan önce Acouplet’te kulaklık denetimlerine bağlanın."
           }
         }
       }
@@ -16123,19 +16140,19 @@
         }
       }
     },
-    "The earbud finding connection timed out.": {
+    "Connecting to the earbuds to play a locating sound timed out. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The earbud finding connection timed out."
+            "value": "Connecting to the earbuds to play a locating sound timed out. Try again."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kulaklık bulma bağlantısı zaman aşımına uğradı."
+            "value": "Bulma sesi çalmak için kulaklıklara bağlanma işlemi zaman aşımına uğradı. Tekrar deneyin."
           }
         }
       }
@@ -16157,104 +16174,87 @@
         }
       }
     },
-    "These earbuds do not offer the finding service.": {
+    "Playing a locating sound is not available for these earbuds.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "These earbuds do not offer the finding service."
+            "value": "Playing a locating sound is not available for these earbuds."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bu kulaklıklar bulma hizmetini desteklemiyor."
+            "value": "Bu kulaklıklarda bulma sesi çalınamıyor."
           }
         }
       }
     },
-    "Could not discover the earbud finding service.": {
+    "Could not check whether these earbuds can play a locating sound. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not discover the earbud finding service."
+            "value": "Could not check whether these earbuds can play a locating sound. Try again."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kulaklık bulma hizmeti bulunamadı."
+            "value": "Bu kulaklıkların bulma sesi çalıp çalamadığı kontrol edilemedi. Tekrar deneyin."
           }
         }
       }
     },
-    "The earbud finding service has no valid connection channel.": {
+    "Could not connect to the earbuds to play a locating sound. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The earbud finding service has no valid connection channel."
+            "value": "Could not connect to the earbuds to play a locating sound. Try again."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kulaklık bulma hizmetinde geçerli bir bağlantı kanalı yok."
+            "value": "Bulma sesi çalmak için kulaklıklara bağlanılamadı. Tekrar deneyin."
           }
         }
       }
     },
-    "Could not open the earbud finding connection.": {
+    "Could not send the locating-sound request. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not open the earbud finding connection."
+            "value": "Could not send the locating-sound request. Try again."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kulaklık bulma bağlantısı kurulamadı."
+            "value": "Bulma sesi isteği gönderilemedi. Tekrar deneyin."
           }
         }
       }
     },
-    "Could not send the earbud finding command.": {
+    "The connection for playing a locating sound was lost. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not send the earbud finding command."
+            "value": "The connection for playing a locating sound was lost. Try again."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kulaklık bulma komutu gönderilemedi."
-          }
-        }
-      }
-    },
-    "The earbud finding connection closed.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The earbud finding connection closed."
-          }
-        },
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklık bulma bağlantısı kapandı."
+            "value": "Bulma sesi çalma bağlantısı kesildi. Tekrar deneyin."
           }
         }
       }
@@ -16412,19 +16412,19 @@
         }
       }
     },
-    "The earbud wear check hasn’t finished. Reconnect controls to try again.": {
+    "The earbud wear check hasn’t finished. Reconnect the earbuds to try again.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The earbud wear check hasn’t finished. Reconnect controls to try again."
+            "value": "The earbud wear check hasn’t finished. Reconnect the earbuds to try again."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kulaklıkların takılı olup olmadığı henüz belirlenemedi. Yeniden denemek için denetim bağlantısını yeniden kurun."
+            "value": "Kulaklıkların takılı olup olmadığı henüz belirlenemedi. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         }
       }
@@ -16718,19 +16718,19 @@
         }
       }
     },
-    "Waiting for headphone capabilities…": {
+    "Checking the earbuds…": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Waiting for headphone capabilities…"
+            "value": "Checking the earbuds…"
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kulaklık özellikleri bekleniyor…"
+            "value": "Kulaklıklar kontrol ediliyor…"
           }
         }
       }
@@ -16748,6 +16748,516 @@
           "stringUnit": {
             "state": "translated",
             "value": "Kulaklıklar, bulma sesi çalma isteğini reddetti."
+          }
+        }
+      }
+    },
+    "The headphone volume could not be read. Connect the headphone controls in Acouplet and select this Mac as their audio source, then try LDAC again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphone volume could not be read. Connect the headphone controls in Acouplet and select this Mac as their audio source, then try LDAC again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık ses düzeyi okunamadı. Acouplet’te kulaklık denetimlerine bağlanın ve ses kaynağı olarak bu Mac’i seçip LDAC’i tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The headphone volume could not be confirmed after LDAC started. Reconnect the headphone controls and try LDAC again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphone volume could not be confirmed after LDAC started. Reconnect the headphone controls and try LDAC again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC başladıktan sonra kulaklık ses düzeyi doğrulanamadı. Kulaklık denetimlerini yeniden bağlayıp LDAC’i tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The headphone audio source or connection changed. LDAC stopped.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphone audio source or connection changed. LDAC stopped."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık ses kaynağı veya bağlantısı değişti. LDAC durduruldu."
+          }
+        }
+      }
+    },
+    "The headphone connection changed. LDAC stopped.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphone connection changed. LDAC stopped."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık bağlantısı değişti. LDAC durduruldu."
+          }
+        }
+      }
+    },
+    "The headphone controls temporarily disconnected.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphone controls temporarily disconnected."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık denetimlerinin bağlantısı geçici olarak kesildi."
+          }
+        }
+      }
+    },
+    "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bluetooth sesi geri yüklenemedi. Kulaklıkları Bluetooth ayarlarından yeniden bağlayın."
+          }
+        }
+      }
+    },
+    "LDAC did not stop completely.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC did not stop completely."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC tamamen durdurulamadı."
+          }
+        }
+      }
+    },
+    "LDAC playback stopped unexpectedly. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC playback stopped unexpectedly. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC üzerinden ses çalma beklenmedik şekilde durdu. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The connection to the headphones was lost.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The connection to the headphones was lost."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık bağlantısı kesildi."
+          }
+        }
+      }
+    },
+    "LDAC could not start. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC could not start. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC başlatılamadı. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "Another Bluetooth audio connection replaced LDAC. Try LDAC again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Another Bluetooth audio connection replaced LDAC. Try LDAC again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC yerine başka bir Bluetooth ses bağlantısı devreye girdi. LDAC’i tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The LDAC driver version could not be checked.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The LDAC driver version could not be checked."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC sürücüsünün sürümü kontrol edilemedi."
+          }
+        }
+      }
+    },
+    "Another app is using LDAC audio. Stop its playback and try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Another app is using LDAC audio. Stop its playback and try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Başka bir uygulama LDAC sesini kullanıyor. O uygulamada ses çalmayı durdurup tekrar deneyin."
+          }
+        }
+      }
+    },
+    "LDAC audio became unavailable. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC audio became unavailable. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC sesi kullanılamaz hale geldi. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "macOS did not make LDAC audio available. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS did not make LDAC audio available. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, LDAC sesini kullanılabilir hale getirmedi. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "macOS could not check whether LDAC audio is available. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not check whether LDAC audio is available. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, LDAC sesinin kullanılabilir olup olmadığını kontrol edemedi. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "macOS could not monitor LDAC audio changes. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not monitor LDAC audio changes. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, LDAC sesindeki değişiklikleri izleyemedi. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "macOS could not restore the mute setting on the previous audio output. Check Sound settings before playing audio.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not restore the mute setting on the previous audio output. Check Sound settings before playing audio."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, önceki ses çıkışının sessize alma ayarını geri yükleyemedi. Ses çalmadan önce Ses ayarlarını kontrol edin."
+          }
+        }
+      }
+    },
+    "macOS could not check the previous audio output. Select an output in Sound settings.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not check the previous audio output. Select an output in Sound settings."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, önceki ses çıkışını kontrol edemedi. Ses ayarlarından bir çıkış seçin."
+          }
+        }
+      }
+    },
+    "macOS could not find the audio output. Check Sound settings and try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not find the audio output. Check Sound settings and try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, ses çıkışını bulamadı. Ses ayarlarını kontrol edip tekrar deneyin."
+          }
+        }
+      }
+    },
+    "macOS could not list its audio outputs. Check Sound settings and try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not list its audio outputs. Check Sound settings and try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, ses çıkışlarını listeleyemedi. Ses ayarlarını kontrol edip tekrar deneyin."
+          }
+        }
+      }
+    },
+    "macOS could not read its audio outputs. Check Sound settings and try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not read its audio outputs. Check Sound settings and try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, ses çıkışlarını okuyamadı. Ses ayarlarını kontrol edip tekrar deneyin."
+          }
+        }
+      }
+    },
+    "macOS could not identify the audio output. Check Sound settings and try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not identify the audio output. Check Sound settings and try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, ses çıkışını tanımlayamadı. Ses ayarlarını kontrol edip tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The LDAC driver could not confirm the Bluetooth audio setup. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The LDAC driver could not confirm the Bluetooth audio setup. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC sürücüsü Bluetooth ses bağlantısını doğrulayamadı. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The LDAC driver reported an audio connection for a different device. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The LDAC driver reported an audio connection for a different device. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC sürücüsü farklı bir aygıt için ses bağlantısı bildirdi. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The LDAC driver could not identify the headphones. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The LDAC driver could not identify the headphones. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC sürücüsü kulaklıkları tanımlayamadı. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The LDAC driver returned an unexpected response. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The LDAC driver returned an unexpected response. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC sürücüsü beklenmeyen bir yanıt gönderdi. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "macOS could not read the LDAC audio settings. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not read the LDAC audio settings. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, LDAC ses ayarlarını okuyamadı. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "macOS could not update the LDAC audio settings. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not update the LDAC audio settings. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, LDAC ses ayarlarını güncelleyemedi. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The Mac audio output changed before LDAC started. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The Mac audio output changed before LDAC started. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC başlamadan önce Mac’in ses çıkışı değişti. Tekrar deneyin."
           }
         }
       }

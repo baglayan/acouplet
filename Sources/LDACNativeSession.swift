@@ -226,6 +226,7 @@ final class LDACNativeSession: @unchecked Sendable {
     private var restoreTerminationSent = false
     private var failure: String?
     private var attentionFailure: String?
+    private var publicFailureMessage: String?
     private var capturePermissionFailure: String?
     private var finalized = false
     private var deadline = Date.distantFuture
@@ -325,7 +326,8 @@ final class LDACNativeSession: @unchecked Sendable {
                 deadline = Date().addingTimeInterval(90)
             }
         } catch {
-            emit(.finished(Completion(message: error.localizedDescription, canRetry: false, requiresAttention: true,
+            record("START_FAILED \(error.localizedDescription)")
+            emit(.finished(Completion(message: failureDescription, canRetry: false, requiresAttention: true,
                                       targetDisconnected: false, waitForReconnect: false)))
             return
         }
@@ -355,13 +357,13 @@ final class LDACNativeSession: @unchecked Sendable {
                 if canRestore {
                     do { try beginRestore() }
                     catch {
-                        fail("Ordinary Bluetooth audio restoration could not start: \(error.localizedDescription)")
+                        fail("Ordinary Bluetooth audio restoration could not start: \(error.localizedDescription)", userMessage: String(localized: "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings."))
                         finish()
                     }
                 }
                 if finalized { return }
                 if restoring && (children["restore"] == nil || children["restore"]?.finished == true) {
-                    if let restore = children["restore"], restore.status != 0 || !nativeAudioRestored { fail("Ordinary Bluetooth audio could not be restored.") }
+                    if let restore = children["restore"], restore.status != 0 || !nativeAudioRestored { fail("Ordinary Bluetooth audio could not be restored.", userMessage: String(localized: "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings.")) }
                     if !priorityRemovalFinished { continue }
                     finish()
                     return
@@ -426,7 +428,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 capturePermissionDenied()
             } else if line.hasPrefix("AUDIO_PERMISSION_FAILED") {
                 if !shouldStop || LDACChannelGate.captures("^AUDIO_PERMISSION_FAILED cleanup=1 callbacks=([0-9]+) error=0 interrupted=1$", line) == nil {
-                    fail(String(localized: "System audio recording could not be checked. Try LDAC again."))
+                    failForUser(String(localized: "System audio recording could not be checked. Try LDAC again."))
                 }
             }
         } else if source == "daemon" {
@@ -513,7 +515,7 @@ final class LDACNativeSession: @unchecked Sendable {
                LDACChannelGate.captures("^NO_PLAYBACK realCID=0000 owned=(?:0x0|\\(nil\\)) openExpired=0 openError=(-?[0-9]+)$", line) != nil {
                 fail("Bluetooth could not open the LDAC audio connection. Try LDAC again.")
             } else if line == "LDAC_UNAVAILABLE rate=\(configuration.sampleRate.rawValue) channels=2" && !shouldStop {
-                fail(String(localized: "The headphones did not offer a compatible LDAC stream. Check their audio settings, then retry."))
+                failForUser(String(localized: "The headphones did not offer a compatible LDAC stream. Check their audio settings, then retry."))
             } else if line == "PREPARE_MEDIA" && !shouldStop {
                 guard children["media"] == nil else { throw LDACSessionError("LDAC requested repeated media preparation.") }
                 var descriptors: [Int32] = [0, 0]
@@ -536,7 +538,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 }
             } else if !shouldStop, line == "PEER_COMMAND_UNSUPPORTED" || line.hasPrefix("CONTROL_FAILED ") {
                 if active { connectionLost("The LDAC Bluetooth connection ended.") }
-                else { fail(String(localized: "The LDAC audio connection could not finish setup. Try LDAC again.")) }
+                else { failForUser(String(localized: "The LDAC audio connection could not finish setup. Try LDAC again.")) }
             } else if line.hasPrefix("STREAM_CLOSED") || line.hasPrefix("MEDIA_CLOSE_REQUIRED") {
                 mediaCloseRequired = true
                 if !shouldStop { connectionLost("The LDAC Bluetooth connection ended.") }
@@ -609,7 +611,7 @@ final class LDACNativeSession: @unchecked Sendable {
             } else if line.hasPrefix("PCM_FAILED ") {
                 if line.hasPrefix("PCM_FAILED reason=persistent-degradation ") {
                     if !shouldStop { connectionLost(String(localized: "The Bluetooth connection couldn’t keep up. LDAC will reconnect.")) }
-                    else if !recoverableFailure { fail(String(localized: "LDAC stopped because the Bluetooth connection couldn’t keep up.")) }
+                    else if !recoverableFailure { failForUser(String(localized: "LDAC stopped because the Bluetooth connection couldn’t keep up.")) }
                 } else {
                     fail(line)
                 }
@@ -663,7 +665,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 child.closeInput()
                 child.signal(restoreTerminationSent ? SIGKILL : SIGTERM)
                 record("RESTORE_TERMINATION helper=\(name) signal=\(restoreTerminationSent ? "SIGKILL" : "SIGTERM") restorationVerified=0")
-                fail("Ordinary Bluetooth audio restoration timed out during \(name == "restore" ? "reconnection" : "disconnection").")
+                fail("Ordinary Bluetooth audio restoration timed out during \(name == "restore" ? "reconnection" : "disconnection").", userMessage: String(localized: "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings."))
                 restoreDeadline = restoreTerminationSent ? .distantFuture : Date().addingTimeInterval(2)
                 restoreTerminationSent = true
             }
@@ -671,7 +673,7 @@ final class LDACNativeSession: @unchecked Sendable {
         }
         if !preflightCompleted, let preflight = children["preflight"] {
             if !shouldStop && Date() >= deadline {
-                fail(String(localized: "System audio recording access was not confirmed. Try LDAC again."))
+                failForUser(String(localized: "System audio recording access was not confirmed. Try LDAC again."))
             }
             if shouldStop {
                 if preflight.status == nil && !preflightStopSent {
@@ -682,13 +684,13 @@ final class LDACNativeSession: @unchecked Sendable {
                 if preflight.status == nil && Date() >= preflightStopDeadline {
                     preflight.signal(SIGKILL)
                     preflightStopDeadline = .distantFuture
-                    fail(String(localized: "The system audio access check could not stop cleanly."))
+                    failForUser(String(localized: "The system audio access check could not stop cleanly."))
                 }
                 return
             }
             guard preflight.finished else { return }
             guard preflight.status == 0 && preflightReady else {
-                fail(String(localized: "System audio recording could not be checked. Try LDAC again."))
+                failForUser(String(localized: "System audio recording could not be checked. Try LDAC again."))
                 return
             }
             preflightCompleted = true
@@ -986,7 +988,7 @@ final class LDACNativeSession: @unchecked Sendable {
             }
             guard let disconnect = children["restore-disconnect"], disconnect.finished else { return }
             guard disconnect.status == 0 && (restoreDisconnected || nativeAudioRestored) else {
-                fail("Ordinary Bluetooth audio could not be prepared for restoration.")
+                fail("Ordinary Bluetooth audio could not be prepared for restoration.", userMessage: String(localized: "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings."))
                 restoring = true
                 finish()
                 return
@@ -1013,17 +1015,34 @@ final class LDACNativeSession: @unchecked Sendable {
         recoverableFailure = true
         lock.withLock { recoveryRequested = true }
         record("CONNECTION_LOST \(message)")
-        emit(.connectionLost(message))
+        emit(.connectionLost(String(localized: "The connection to the headphones was lost.")))
     }
 
-    private func fail(_ message: String) {
+    private var failureDescription: String {
+        if (restoring || restoringOnly) && !nativeAudioRestored {
+            return String(localized: "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings.")
+        }
+        if restoring || restoringOnly || lock.withLock({ requestedStop }) || captureStopSent || mediaStopSent {
+            return String(localized: "LDAC did not stop completely.")
+        }
+        return active ? String(localized: "LDAC playback stopped unexpectedly. Try again.")
+            : String(localized: "LDAC could not start. Try again.")
+    }
+
+    private func fail(_ message: String, userMessage: String? = nil) {
         hardFailure = true
         if attentionFailure == nil {
             attentionFailure = message
+            let description = userMessage ?? failureDescription
+            publicFailureMessage = description
             record("FAILED \(message)")
-            emit(.failed(message))
+            emit(.failed(description))
         }
         if failure == nil { failure = message }
+    }
+
+    private func failForUser(_ message: String) {
+        fail(message, userMessage: message)
     }
 
     private func capturePermissionDenied() {
@@ -1031,7 +1050,7 @@ final class LDACNativeSession: @unchecked Sendable {
         capturePermissionFailure = message
         record("CAPTURE_PERMISSION_FAILED \(message)")
         emit(.audioCaptureAccess(.permissionRequired))
-        fail(message)
+        failForUser(message)
     }
 
     private func finish() {
@@ -1083,7 +1102,18 @@ final class LDACNativeSession: @unchecked Sendable {
             message = (message ?? "LDAC stopped.") + " LDAC recovery cleanup could not be confirmed."
         }
         record("RECOVERY_READY safe=\(safe)")
-        emit(.finished(Completion(message: message, canRetry: safe,
+        if let message { record("COMPLETION_ERROR \(message)") }
+        let publicMessage: String?
+        if message == nil {
+            publicMessage = nil
+        } else if shutdownUnverified || connectorSettlementUnverified || (priorityPhase != .unused && priorityPhase != .removed) {
+            publicMessage = String(localized: "LDAC did not stop completely.")
+        } else if nativeReplacement {
+            publicMessage = String(localized: "Another Bluetooth audio connection replaced LDAC. Try LDAC again.")
+        } else {
+            publicMessage = capturePermissionFailure ?? publicFailureMessage ?? String(localized: "The connection to the headphones was lost.")
+        }
+        emit(.finished(Completion(message: publicMessage, canRetry: safe,
                                   requiresAttention: hardFailure || !recoverableFailure || !safe && !nativeAudioRestored || nativeReplacement,
                                   targetDisconnected: (originalConnectionEnded || restoreDisconnected) && !nativeAudioRestored,
                                   waitForReconnect: (originalConnectionEnded || targetUnavailableBeforeRestore) && !nativeAudioRestored)))

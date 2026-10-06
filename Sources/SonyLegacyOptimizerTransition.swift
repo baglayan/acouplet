@@ -189,14 +189,14 @@ struct SonyLegacyOptimizerTransition: Equatable {
 
     mutating func timeout() {
         switch phase {
-        case .checking: interrupt(String(localized: "Optimizer information was not received. Reconnect controls to try again."))
+        case .checking: interrupt(String(localized: "Optimizer information was not received. Reconnect the headphones to try again."))
         case .starting, .running:
             message = String(localized: "Optimization did not finish. Stopping…")
             move(to: .cancelling)
         case .readingResult: interrupt(String(localized: "Optimization finished, but the headphones did not report its results."))
         case .cancelling: interrupt(String(localized: "The headphones did not confirm that optimization stopped. Check Sound Connect before reconnecting controls."))
         case .completed, .cancelled:
-            if hasOutstandingReads { interrupt(String(localized: "The optimizer stopped, but a status read is still unanswered. Reconnect controls before starting another optimization.")) }
+            if hasOutstandingReads { interrupt(String(localized: "The optimizer stopped, but a status read is still unanswered. Reconnect the headphones before starting another optimization.")) }
         default: break
         }
     }

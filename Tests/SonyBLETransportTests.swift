@@ -3,6 +3,24 @@ import XCTest
 
 final class SonyBLETransportTests: XCTestCase {
     @MainActor
+    func testFrameworkFailureDiagnosticsRetainDomainAndCodeWithoutPrivateUserInfo() {
+        let privateMessage = "Could not connect to private renamed earbuds"
+        let error = NSError(domain: "CBErrorDomain", code: 6, userInfo: [NSLocalizedDescriptionKey: privateMessage])
+        let transport = SonyBLETransport(waitForConnection: false)
+        var message: String?
+        transport.onDisconnect = { message = $0 }
+        transport.simulateFailure(error)
+        XCTAssertEqual(message, String(localized: "Could not connect to the headphone controls. Try again."))
+        XCTAssertFalse(message!.contains(privateMessage))
+        XCTAssertEqual(transport.diagnosticError, "CBErrorDomain (code 6)")
+        XCTAssertFalse(transport.diagnosticError!.contains(privateMessage))
+        let timeout = "The headphone connection timed out. Try again."
+        transport.simulateFailure(timeout)
+        XCTAssertEqual(message, timeout)
+        XCTAssertEqual(transport.diagnosticError, timeout)
+    }
+
+    @MainActor
     func testDisablingAutomaticReconnectCancelsSetupBeforePeripheralSelection() {
         let automatic = SonyBLETransport(waitForConnection: true)
         XCTAssertFalse(automatic.isWaitingForConnection)

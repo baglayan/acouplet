@@ -56,7 +56,7 @@ struct SonyNativeBatterySnapshot: Equatable, Sendable {
             guard let reading else { return "\(name): unknown" }
             return "\(name): \(reading.level)%, \(reading.isCharging ? "charging" : "not charging"), observed \(reading.observedAt.ISO8601Format()), \(fresh[name] != nil ? "fresh" : "expired")"
         }.joined(separator: "; ")
-        return "\(name), \(identifier.uuidString); \(parts)"
+        return parts
     }
 }
 #endif

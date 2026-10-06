@@ -2243,6 +2243,41 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testMultipointDeviceActionProgressKeepsButtonAndRowSize() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--hold-source-replies", "-AppleLanguages", "(en)"]
+        app.launch()
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.buttons["multipoint.open"].waitForExistence(timeout: 5))
+        panel.buttons["multipoint.open"].click()
+        let manager = app.descendants(matching: .any).matching(identifier: "multipoint.popover").firstMatch
+        let phone = manager.buttons["multipoint.select.02:00:00:00:00:02"]
+        XCTAssertTrue(phone.waitForExistence(timeout: 3))
+        phone.hover()
+        let disconnect = manager.buttons["multipoint.disconnect.02:00:00:00:00:02"]
+        XCTAssertTrue(disconnect.isHittable)
+        let frame = manager.frame
+        let rowFrame = phone.frame
+        let buttonFrame = disconnect.frame
+        disconnect.click()
+        let progress = manager.activityIndicators["multipoint.progress.02:00:00:00:00:02"]
+        XCTAssertTrue(progress.waitForExistence(timeout: 3))
+        XCTAssertEqual(progress.label, "Disconnecting device…")
+        manager.staticTexts["Connected"].firstMatch.hover()
+        XCTAssertFalse(disconnect.exists)
+        XCTAssertTrue(progress.isHittable)
+        XCTAssertEqual(phone.value as? String, "Disconnecting device…")
+        XCTAssertEqual(manager.frame.width, frame.width, accuracy: 1)
+        XCTAssertEqual(manager.frame.height, frame.height, accuracy: 1)
+        XCTAssertEqual(phone.frame.width, rowFrame.width, accuracy: 1)
+        XCTAssertEqual(phone.frame.height, rowFrame.height, accuracy: 1)
+        XCTAssertEqual(progress.frame.midX, buttonFrame.midX, accuracy: 1)
+        XCTAssertEqual(progress.frame.midY, buttonFrame.midY, accuracy: 1)
+        captureGalleryScreenshot(manager.screenshot(), named: "Multipoint — pending disconnect without button")
+    }
+
+    @MainActor
     func testMultipointSourceSelectionAndKeepingUseConfirmedState() throws {
         for appearance in ["light", "dark"] {
             let app = XCUIApplication()
@@ -2683,6 +2718,104 @@ final class AppUITests: XCTestCase {
             XCTAssertFalse(settings.buttons["finder.stop"].exists)
             app.terminate()
         }
+    }
+
+    @MainActor
+    func testFindEarbudsCanPlayAgainAfterDismissalAndSettingsRemainUsable() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for failure in [nil, "--finder-missing-ack", "--finder-rejected-start", "--finder-early-stop"] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "wfXM5", "--finder-no-wear-sensor",
+                                   "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+            if let failure { app.launchArguments.append(failure) }
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            panel.buttons["menu.settings"].click()
+            let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 3))
+            settings.toolbars.buttons["Headphones"].click()
+            let open = settings.buttons["finder.open"]
+            XCTAssertTrue(open.waitForExistence(timeout: 3))
+            for target in ["left", "right"] {
+                for _ in 0..<5 where !open.isHittable {
+                    settings.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -200)
+                }
+                open.click()
+                let play = settings.buttons["finder.\(target)"]
+                XCTAssertTrue(play.waitForExistence(timeout: 3))
+                XCTAssertTrue(play.isEnabled)
+                play.click()
+                let confirm = settings.buttons["Play Sound"]
+                XCTAssertTrue(confirm.waitForExistence(timeout: 3))
+                confirm.click()
+                if failure == nil {
+                    let ringing = "Playing a sound in the \(target) earbud."
+                    XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                        predicate: NSPredicate(format: "label == %@ OR value == %@", ringing, ringing), object: app.staticTexts["finder.status"]
+                    )], timeout: 5), .completed)
+                    let stop = settings.buttons["finder.stop"]
+                    XCTAssertTrue(stop.isEnabled)
+                    stop.click()
+                }
+                let expected = failure == "--finder-rejected-start" ? "The earbuds declined the locating-sound request." : "Sound stopped."
+                XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "label == %@ OR value == %@", expected, expected), object: app.staticTexts["finder.status"]
+                )], timeout: 5), .completed)
+                let done = settings.buttons["finder.done"]
+                XCTAssertTrue(done.isEnabled)
+                done.click()
+                XCTAssertTrue(done.waitForNonExistence(timeout: 3))
+                XCTAssertTrue(settings.toolbars.buttons["General"].isEnabled)
+                settings.toolbars.buttons["General"].click()
+                settings.toolbars.buttons["Headphones"].click()
+            }
+            app.terminate()
+        }
+    }
+
+    @MainActor
+    func testFindEarbudsShowsControlRecoveryAfterSoundStops() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "wfXM5", "--finder-no-wear-sensor",
+                               "--finder-controls-lost-after-stop", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        panel.buttons["menu.settings"].click()
+        let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 3))
+        settings.toolbars.buttons["Headphones"].click()
+        let open = settings.buttons["finder.open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 3))
+        for _ in 0..<5 where !open.isHittable {
+            settings.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -200)
+        }
+        open.click()
+        settings.buttons["finder.left"].click()
+        let confirm = settings.buttons["Play Sound"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 3))
+        confirm.click()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@ OR value == %@", "Playing a sound in the left earbud.", "Playing a sound in the left earbud."),
+            object: app.staticTexts["finder.status"]
+        )], timeout: 5), .completed)
+        settings.buttons["finder.stop"].click()
+        let sheet = app.sheets.firstMatch
+        let reconnect = sheet.buttons["headphones.connect"]
+        XCTAssertTrue(reconnect.waitForExistence(timeout: 3))
+        XCTAssertTrue(reconnect.isEnabled)
+        XCTAssertTrue(sheet.descendants(matching: .any)["headphones.bluetoothSettings"].isHittable)
+        XCTAssertFalse(sheet.buttons["finder.left"].isEnabled)
+        XCTAssertFalse(sheet.buttons["finder.right"].isEnabled)
+        XCTAssertFalse(sheet.staticTexts["Sound stopped."].exists)
+        let done = sheet.buttons["finder.done"]
+        XCTAssertTrue(done.isEnabled)
+        done.click()
+        XCTAssertTrue(done.waitForNonExistence(timeout: 3))
+        settings.toolbars.buttons["General"].click()
+        XCTAssertTrue(settings.descendants(matching: .any)["menuBar.keepIcon"].isHittable)
     }
 
     @MainActor

@@ -999,7 +999,7 @@ struct HeadphoneConnectionView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(connectionTitle).font(.headline)
-                        if isSearching || isConnecting || headphones.isPoweringOff {
+                        if isSearching || isConnecting || isAutomaticallyReconnecting || headphones.isPoweringOff {
                             ProgressView().controlSize(.small)
                                 .accessibilityLabel(connectionTitle)
                         }
@@ -1011,7 +1011,7 @@ struct HeadphoneConnectionView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("headphones.connectionStatus")
                 HStack(spacing: 12) {
-                    Button(headphones.powerOffState != nil || headphones.headphoneTestNeedsRecovery ? String(localized: "Reconnect Controls") : headphones.isDeviceConnected ? String(localized: "Retry Controls") : String(localized: "Connect")) {
+                    Button(headphones.powerOffState != nil || headphones.headphoneTestNeedsRecovery || headphones.isDeviceConnected ? String(localized: "Reconnect Controls") : String(localized: "Connect")) {
                         if headphones.address.isEmpty { devices.refreshDiscovery() }
                         else { headphones.connect() }
                     }
@@ -1023,7 +1023,7 @@ struct HeadphoneConnectionView: View {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
                     }
                     .buttonStyle(.link)
-                    .tint(.primary)
+                    .foregroundStyle(Color(nsColor: .controlAccentColor))
                     .accessibilityIdentifier("headphones.bluetoothSettings")
                 }
             }
@@ -1037,6 +1037,10 @@ struct HeadphoneConnectionView: View {
         headphones.linkState == .opening || headphones.linkState == .handshaking
     }
 
+    private var isAutomaticallyReconnecting: Bool {
+        headphones.isDeviceConnected && headphones.retrySecondsRemaining != nil
+    }
+
     private var connectionTitle: String {
         if headphones.headGesturePracticeTransition?.phase == .interrupted { return String(localized: "Head Gesture Practice Needs Attention") }
         if headphones.earTipFitTransition?.phase == .interrupted { return String(localized: "Fit Test Needs Attention") }
@@ -1045,7 +1049,7 @@ struct HeadphoneConnectionView: View {
         case .acknowledged: String(localized: "Power Off Requested")
         case .disconnected: String(localized: "Headphones Disconnected")
         case .unconfirmed: String(localized: "Power Off Not Confirmed")
-        case nil: isSearching ? String(localized: "Checking Bluetooth…") : isConnecting ? String(localized: "Connecting…") : headphones.isDeviceConnected ? String(localized: "Controls Unavailable") : String(localized: "Not Connected")
+        case nil: isSearching ? String(localized: "Checking Bluetooth…") : isAutomaticallyReconnecting ? String(localized: "Reconnecting Controls…") : isConnecting ? String(localized: "Connecting…") : headphones.isDeviceConnected ? String(localized: "Reconnect Headphone Controls") : String(localized: "Not Connected")
         }
     }
 
@@ -1066,11 +1070,12 @@ struct HeadphoneConnectionView: View {
             return String(localized: "\(outcome) Automatic reconnect is paused. \(turnOn)")
         }
         if isSearching { return headphones.statusText }
+        if isAutomaticallyReconnecting { return String(localized: "Bluetooth is connected. Controls are reconnecting automatically.") }
         return isConnecting
             ? String(localized: "Waiting for a response…")
-            : headphones.lastErrorMessage ?? (headphones.isDeviceConnected
-                ? String(localized: "Bluetooth is connected, but the headphones haven’t opened their controls.")
-                : String(localized: "Connect the headphones in Bluetooth settings."))
+            : headphones.isDeviceConnected
+                ? String(localized: "Bluetooth is connected. Try Reconnect Controls. If that doesn’t help, reconnect the headphones in Bluetooth Settings.")
+                : headphones.lastErrorMessage ?? String(localized: "Connect the headphones in Bluetooth settings.")
     }
 }
 
@@ -1306,7 +1311,7 @@ private struct MultipointPopoverContent: View {
                 }
                 .buttonStyle(.borderless)
                 .tint(nil)
-                .foregroundStyle(.primary)
+                .foregroundStyle(Color(nsColor: .controlAccentColor))
                 .accessibilityIdentifier("multipoint.bluetoothSettings")
             }
             .padding(14)

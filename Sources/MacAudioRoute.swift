@@ -37,6 +37,14 @@ struct MacAudioRoute: Equatable, Sendable {
         return "\(channels) · \(rate) PCM"
     }
 
+    var diagnosticReport: String {
+        [
+            "Mac audio output: Selected; name omitted",
+            "Output transport: \(transport?.title ?? "Unknown")",
+            "Output format: \(pcmFormatDescription)",
+        ].joined(separator: "\n")
+    }
+
     static func channelCount(in data: Data) -> UInt32? {
         let offset = MemoryLayout<AudioBufferList>.offset(of: \AudioBufferList.mBuffers)!
         guard data.count >= offset else { return nil }
@@ -76,6 +84,11 @@ final class MacAudioRouteObserver: ObservableObject {
             }
             refresh()
         }
+    }
+
+    var diagnosticReport: String {
+        let output = route?.diagnosticReport ?? "Mac audio output: \(error == nil ? "No output selected" : "Unavailable")"
+        return output + "\nCoreAudio issue: \(error ?? "None")"
     }
 
     func refresh() {

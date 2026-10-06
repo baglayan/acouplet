@@ -587,6 +587,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         let (coordinator, owner, finder) = try findingCoordinator()
         defer { finishFinding(coordinator) }
         finder.play(.left)
+        let firstSessionID = try XCTUnwrap(finder.session?.id)
         finder.simulateConnectionOpened()
         let ring = try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30)?.message.encoded)
         let stop = try XCTUnwrap(FastPairRingCommand.stop.message.encoded)
@@ -606,18 +607,22 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         try acknowledgeFindingStop(finder)
         await receiveFindingUpdates()
         XCTAssertEqual(completions, 1)
+        XCTAssertEqual(finder.simulatedTransportCloseCount, 2)
         XCTAssertFalse(coordinator.prepareEarbudFindingForTermination { XCTFail("A completed session must not run cleanup again.") })
         XCTAssertTrue(owner.beginEarbudFinder())
         let next = try XCTUnwrap(owner.earbudFinder)
+        XCTAssertTrue(next === finder)
         next.play(.right)
-        XCTAssertNotEqual(next.session?.id, finder.session?.id)
+        XCTAssertNotEqual(next.session?.id, firstSessionID)
         next.simulateConnectionOpened()
         XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
         XCTAssertEqual(next.session?.phase, .stopping)
         try acknowledgeFindingStop(next)
         await receiveFindingUpdates()
         XCTAssertEqual(completions, 2)
-        XCTAssertEqual(finder.simulatedSentMessages, [ring, stop])
+        XCTAssertEqual(finder.simulatedTransportCloseCount, 3)
+        let rightRing = try XCTUnwrap(FastPairRingCommand.ring(.right, timeoutSeconds: 30)?.message.encoded)
+        XCTAssertEqual(finder.simulatedSentMessages, [ring, stop, rightRing, stop])
     }
 
     @MainActor

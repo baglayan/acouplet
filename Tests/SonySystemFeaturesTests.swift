@@ -529,7 +529,7 @@ final class SonySystemFeaturesTests: XCTestCase {
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: invalidation))
             acknowledgeSimulatedCommands(controller)
             XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xFC })
-            XCTAssertEqual(controller.lastErrorMessage, "Speak-to-Chat settings changed while waiting. Reconnect controls and try again.")
+            XCTAssertEqual(controller.lastErrorMessage, "Speak-to-Chat settings changed while waiting. Reconnect the headphones and try again.")
             XCTAssertTrue(controller.pendingChanges.isEmpty)
         }
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)

@@ -672,7 +672,7 @@ final class SonyLegacyControllerTests: XCTestCase {
             controller.simulateNoiseReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
             XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect controls to try again."))
+            XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect the headphones to try again."))
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: capability), session: session)
             XCTAssertNil(controller.legacyControls)
         }
@@ -691,7 +691,7 @@ final class SonyLegacyControllerTests: XCTestCase {
         for _ in 0..<4 { await Task.yield() }
         XCTAssertFalse(controller.isReady)
         XCTAssertGreaterThan(controller.simulatedControlSession, session)
-        XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect controls to try again."))
+        XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect the headphones to try again."))
         controller.simulateDeviceConnection(named: "WF-1000XM4", galleryModel: .wfXM4)
         controller.simulateNoiseReadTimeout([0x66, 2])
         controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: ambient), session: session)
@@ -856,7 +856,7 @@ final class SonyLegacyControllerTests: XCTestCase {
             for _ in 0..<4 { await Task.yield() }
             XCTAssertFalse(controller.isReady)
             XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            XCTAssertEqual(controller.linkState, .failed("DSEE settings were not received. Reconnect controls to try again."))
+            XCTAssertEqual(controller.linkState, .failed("DSEE settings were not received. Reconnect the headphones to try again."))
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 2, 0, 1]), session: session)
             XCTAssertNil(controller.dseeMode)
         }
@@ -873,7 +873,7 @@ final class SonyLegacyControllerTests: XCTestCase {
         controller.simulateLegacyDSEEReadTimeout([0xE6, 2])
         for _ in 0..<4 { await Task.yield() }
         XCTAssertFalse(controller.isReady)
-        XCTAssertEqual(controller.linkState, .failed("DSEE settings were not received. Reconnect controls to try again."))
+        XCTAssertEqual(controller.linkState, .failed("DSEE settings were not received. Reconnect the headphones to try again."))
         controller.simulateDeviceConnection(named: "WF-1000XM4", galleryModel: .wfXM4)
         controller.simulateLegacyDSEEReadTimeout([0xE6, 2])
         for _ in 0..<4 { await Task.yield() }

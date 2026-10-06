@@ -554,6 +554,45 @@ final class SonyProtocolTests: XCTestCase {
     }
 
     @MainActor
+    func testClosedMenuReleasesItsHostingControllerWithoutDisconnectingHeadphones() async throws {
+        let suite = "dev.baglayan.Acouplet.menu-lifecycle-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        headphones.simulateDeviceConnection(named: "WF-1000XM5")
+        defer { headphones.simulateControlLoss() }
+        let environment = AppEnvironment(settings: SettingsStore(defaults: defaults), headphones: headphones,
+                                         audioRoute: MacAudioRouteObserver(startAutomatically: false))
+        let menu = MenuBarController(environment: environment, showSettings: {})
+        defer { menu.stop() }
+        XCTAssertNil(menu.simulatedPopoverContent)
+        let session = headphones.notificationSession
+        for stopping in [false, true] {
+            menu.simulatePendingPopoverPresentation()
+            weak var content = menu.simulatedPopoverContent
+            XCTAssertNotNil(content)
+            if !stopping {
+                menu.popoverWillClose(Notification(name: NSPopover.willCloseNotification))
+                menu.simulatePendingPopoverPresentation()
+                menu.popoverDidClose(Notification(name: NSPopover.didCloseNotification))
+                XCTAssertTrue(menu.simulatedPopoverContent === content)
+            }
+            if stopping { menu.stop() }
+            else { menu.simulatePopoverDismissal() }
+            XCTAssertNil(menu.simulatedPopoverContent)
+            for _ in 0..<20 where content != nil {
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            XCTAssertNil(content)
+            headphones.objectWillChange.send()
+            await Task.yield()
+            XCTAssertNil(menu.simulatedPopoverContent)
+            XCTAssertEqual(headphones.notificationSession, session)
+            XCTAssertTrue(headphones.isReady)
+        }
+    }
+
+    @MainActor
     func testBluetoothStartupHonorsSavedAutomaticReconnectPreference() throws {
         let suite = "dev.baglayan.Acouplet.startup-tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

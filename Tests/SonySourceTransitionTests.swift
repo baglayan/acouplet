@@ -194,7 +194,7 @@ final class SonySourceTransitionTests: XCTestCase {
             XCTAssertEqual(transition, initial)
             XCTAssertTrue(transition.capabilitiesChanged(session: 7))
             XCTAssertEqual(transition.phase, .failed)
-            XCTAssertEqual(transition.failureMessage, "Headphone capabilities changed before the audio source change was confirmed.")
+            XCTAssertEqual(transition.failureMessage, "The headphone settings changed before the audio source change was confirmed.")
             XCTAssertNil(transition.expectedPayload)
             XCTAssertFalse(transition.capabilitiesChanged(session: 7))
             XCTAssertFalse(transition.receive(inventory(selected: 2), model: model, session: 7, readbackOwned: true))

@@ -19,9 +19,9 @@ final class SonyNativeAppearanceRefresh: NSObject, @preconcurrency CBCentralMana
     private var startedAt: Date?
 
     var diagnosticDescription: String {
-        let target = identity.map { "\($0.classicAddress), canonical UUID \($0.peripheralIdentifier!.uuidString)" } ?? "No verified target"
+        let target = identity.map { "Verified \($0.model.name) target" } ?? "No verified target"
         let started = startedAt.map { "; started \($0.ISO8601Format())" } ?? ""
-        let seen = observations.keys.sorted { $0.uuidString < $1.uuidString }.map { "\($0.uuidString): \(observations[$0]!)" }
+        let seen = observations.values.sorted()
         return "\(state); \(target)\(started); \(seen.isEmpty ? "No matching advertisement observed" : seen.joined(separator: "; ")); native artwork not verified"
     }
 

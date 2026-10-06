@@ -362,26 +362,129 @@ final class SonyDeviceActionControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testProgressDoesNotRemoveDeadlineAndTimeoutNeverAutomaticallyReconnects() throws {
+    func testConnectProgressKeepsDeadlineAndTimeoutRefreshesInventoryWithoutClosingControls() throws {
         let controller = preparedController()
+        deliver(inventory(secondConnection: 0), to: controller)
         let phone = try XCTUnwrap(controller.multipoint.devices.last)
-        controller.changeDeviceConnection(.disconnect, device: phone)
+        let session = controller.simulatedControlSession
+        controller.changeDeviceConnection(.connect, device: phone)
         acknowledgeAll(controller)
-        for _ in 0..<3 { deliver(result(address: phone.address, value: 2), to: controller) }
+        for _ in 0..<3 { deliver([0x3D, 2, 1, 0x12] + Array(phone.address.utf8), to: controller) }
         XCTAssertEqual(controller.deviceActionTransition?.phase, .awaitingResult)
         XCTAssertTrue(controller.simulatedDeviceActionTimeoutPending)
         controller.simulateDeviceActionTimeout()
-        XCTAssertEqual(controller.deviceActionTransition?.phase, .failed)
+        let failed = try XCTUnwrap(controller.deviceActionTransition)
+        XCTAssertEqual(failed.phase, .failed)
         XCTAssertFalse(controller.simulatedDeviceActionTimeoutPending)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x36, 2])
+        acknowledgeAll(controller)
+        deliver(inventory(), to: controller)
+        XCTAssertEqual(controller.deviceActionTransition, failed)
+        XCTAssertTrue(controller.multipoint.devices.last?.isConnected == true)
+        XCTAssertFalse(controller.simulatedInventoryReadPending)
+        controller.simulateAutomaticRefresh()
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload.prefix(2) == [0x3C, 2] }.map(\.payload),
+                       [[0x3C, 2, 1] + Array(phone.address.utf8)])
+        controller.simulateControlLoss()
+    }
+
+    @MainActor
+    func testConnectControlLossAllowsOnlyTwoRecoveryAttemptsWithoutReplayingAction() throws {
+        let controller = preparedController()
+        deliver(inventory(secondConnection: 0), to: controller)
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        controller.changeDeviceConnection(.connect, device: phone)
+        acknowledgeAll(controller)
+        controller.simulateControlLoss()
+        let failed = try XCTUnwrap(controller.deviceActionTransition)
+        XCTAssertEqual(failed.phase, .failed)
+        for _ in 0..<2 {
+            controller.simulateAutomaticRefresh()
+            XCTAssertEqual(controller.linkState, .handshaking)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x00, 0x00])
+            XCTAssertTrue(controller.simulatedHandshakeTimeoutPending)
+            controller.simulateControlLoss()
+        }
+        let transmitted = controller.simulatedTransmittedFrames
+        for _ in 0..<5 { controller.simulateAutomaticRefresh() }
         XCTAssertFalse(controller.isReady)
         XCTAssertNil(controller.simulatedPendingFrame)
-        let transmitted = controller.simulatedTransmittedFrames
-        controller.simulateAutomaticRefresh()
+        XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
         XCTAssertEqual(controller.simulatedTransmittedFrames, transmitted)
-        XCTAssertNil(controller.simulatedPendingFrame)
-        controller.simulateDeviceConnection(named: "WF-1000XM5")
-        XCTAssertEqual(controller.simulatedTransmittedFrames, transmitted)
+        XCTAssertEqual(controller.deviceActionTransition, failed)
+        XCTAssertEqual(transmitted.filter { $0.type == 0x0E && $0.payload.prefix(2) == [0x3C, 2] }.map(\.payload),
+                       [[0x3C, 2, 1] + Array(phone.address.utf8)])
         controller.simulateControlLoss()
+    }
+
+    @MainActor
+    func testConnectBLERecoveryUsesTwoBoundedAttemptsWithoutReplayingAction() throws {
+        let ordinary = preparedController()
+        XCTAssertTrue(ordinary.simulateBLEReconnectWait(automatic: true, priorBluetoothLE: true, classicConnected: true))
+        XCTAssertTrue(ordinary.simulatedBLEWaitsForConnection)
+        ordinary.simulateControlLoss()
+
+        let controller = preparedController()
+        deliver(inventory(secondConnection: 0), to: controller)
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        controller.changeDeviceConnection(.connect, device: phone)
+        acknowledgeAll(controller)
+        controller.simulateControlLoss()
+        for _ in 0..<2 {
+            XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: true, priorBluetoothLE: true, classicConnected: true))
+            XCTAssertEqual(controller.linkState, .opening)
+            XCTAssertFalse(controller.simulatedBLEWaitsForConnection)
+            controller.simulateBLEDisconnect("The headphone connection timed out.")
+            XCTAssertFalse(controller.usesBluetoothLE)
+        }
+        XCTAssertFalse(controller.simulateBLEReconnectWait(automatic: true, priorBluetoothLE: true, classicConnected: true))
+        XCTAssertFalse(controller.usesBluetoothLE)
+        XCTAssertEqual(controller.deviceActionTransition?.phase, .failed)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload.prefix(2) == [0x3C, 2] }.map(\.payload),
+                       [[0x3C, 2, 1] + Array(phone.address.utf8)])
+        controller.simulateControlLoss()
+    }
+
+    @MainActor
+    func testConnectRecoverySuccessRestoresOrdinaryControlRecovery() throws {
+        for failedAttempts in 0..<2 {
+            let controller = preparedController()
+            deliver(inventory(secondConnection: 0), to: controller)
+            let phone = try XCTUnwrap(controller.multipoint.devices.last)
+            controller.changeDeviceConnection(.connect, device: phone)
+            acknowledgeAll(controller)
+            controller.simulateControlLoss()
+            for _ in 0..<failedAttempts {
+                controller.simulateAutomaticRefresh()
+                XCTAssertEqual(controller.linkState, .handshaking)
+                controller.simulateControlLoss()
+            }
+            controller.simulateAutomaticRefresh()
+            XCTAssertEqual(controller.linkState, .handshaking)
+            acknowledgeAll(controller)
+            deliver([0x01, 0x00, 0x03, 0x00, 0x30, 0x18, 0x00, 0x00], type: 0x0C, to: controller)
+            acknowledgeAll(controller)
+            let functions: [UInt8] = [0x6B, 0x14, 0x90, 0xE7]
+            deliver([0x07, 0, UInt8(functions.count)] + functions.flatMap { [$0, 0] }, type: 0x0C, to: controller)
+            acknowledgeAll(controller)
+            deliver([0x61, 0x17, 2, 0, 1, 20, 1, 1, 1, 20, 1], type: 0x0C, to: controller)
+            deliver([0x63, 0x17, 0], type: 0x0C, to: controller)
+            acknowledgeAll(controller)
+            deliver([0x67, 0x17, 0x01, 0x01, 0, 0, 10], type: 0x0C, to: controller)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertNil(controller.deviceActionTransition)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload.prefix(2) == [0x3C, 2] }.map(\.payload),
+                           [[0x3C, 2, 1] + Array(phone.address.utf8)])
+            controller.simulateControlLoss()
+            controller.simulateAutomaticRefresh()
+            XCTAssertEqual(controller.linkState, .handshaking)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x00, 0x00])
+            controller.simulateControlLoss()
+        }
     }
 
     @MainActor

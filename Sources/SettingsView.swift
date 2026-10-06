@@ -256,9 +256,7 @@ struct SettingsView: View {
             if headphones.earTipFit.isSupported || headphones.earTipFitTransition != nil {
                 Section("Earbud Fit") { EarTipFitControl() }
             }
-            if headphones.supportsEarbudFinding || headphones.earbudFinder?.isBusy == true || headphones.earbudFinder?.mayBeRinging == true {
-                Section("Find Earbuds") { FindEarbudsControl() }
-            }
+            FindEarbudsControl()
             if headphones.multipoint.supportsInventory || headphones.sourceTransition?.phase == .failed
                 || headphones.deviceActionTransition?.phase == .failed || headphones.systemFeatures.multipoint != nil || headphones.multipointTransition != nil {
                 Section("Devices") {
@@ -415,15 +413,7 @@ struct SettingsView: View {
 
     private func copyDiagnostics() {
         NSPasteboard.general.clearContents()
-        let route = audioRoute.route
-        let audioReport = [
-            "Mac audio output: \(route?.name ?? (route != nil || audioRoute.error != nil ? "Unavailable" : "No output selected"))",
-            "Output UID: \(route?.uid ?? "Unknown")",
-            "Output transport: \(route?.transport?.title ?? "Unknown")",
-            "Output format: \(route?.pcmFormatDescription ?? "Unknown")",
-            "CoreAudio issue: \(audioRoute.error ?? "None")",
-        ].joined(separator: "\n")
-        NSPasteboard.general.setString(headphones.diagnosticReport + "\n" + audioReport, forType: .string)
+        NSPasteboard.general.setString(headphones.diagnosticReport + "\n" + audioRoute.diagnosticReport, forType: .string)
     }
 }
 
@@ -1316,6 +1306,7 @@ private struct ConnectionModeControl: View {
                     Button("Bluetooth Settings…") {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
                     }
+                    .foregroundStyle(Color(nsColor: .controlAccentColor))
                     Button("Check Connection") { headphones.connect() }
                         .accessibilityIdentifier("audio.checkPairedConnection")
                 }
@@ -1918,7 +1909,6 @@ private struct MultipointDeviceRow: View {
     let device: SonyMultipointDevice
     @EnvironmentObject private var headphones: SonyHeadphonesController
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
-    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     @State private var hovered = false
     @FocusState private var sourceFocused: Bool
     @FocusState private var actionFocused: Bool
@@ -1930,10 +1920,15 @@ private struct MultipointDeviceRow: View {
     private var status: String {
         selected ? String(localized: "Selected for audio") : device.isConnected ? String(localized: "Connected") : String(localized: "Saved")
     }
-    private var showsAction: Bool { hovered || sourceFocused || actionFocused || voiceOverEnabled }
+    private var pendingAction: SonyPeripheralAction? {
+        guard let transition = headphones.deviceActionTransition, !transition.isFinished,
+              transition.targetAddress == device.id else { return nil }
+        return transition.action
+    }
+    private var showsAction: Bool { hovered || sourceFocused || actionFocused || voiceOverEnabled || pendingAction != nil }
     private var progressLabel: String? {
-        if let transition = headphones.deviceActionTransition, !transition.isFinished, transition.targetAddress == device.id {
-            return transition.action == .connect ? String(localized: "Connecting device…") : String(localized: "Disconnecting device…")
+        if let pendingAction {
+            return pendingAction == .connect ? String(localized: "Connecting device…") : String(localized: "Disconnecting device…")
         }
         if let transition = headphones.sourceTransition, !transition.isFinished,
            (transition.targetAddress ?? headphones.multipoint.selectedSource?.id) == device.id {
@@ -1948,6 +1943,7 @@ private struct MultipointDeviceRow: View {
                 Button { headphones.selectAudioSource(device) } label: { deviceLabel }
                     .buttonStyle(.plain)
                     .focused($sourceFocused)
+                    .focusEffectDisabled()
                     .disabled(headphones.sourceControlUnavailableReason != nil)
                     .help(headphones.sourceControlUnavailableReason ?? title)
                     .accessibilityLabel("Use \(title) for Audio")
@@ -1958,14 +1954,17 @@ private struct MultipointDeviceRow: View {
                 deviceLabel
                     .focusable(headphones.multipoint.supportsInventory)
                     .focused($sourceFocused)
+                    .focusEffectDisabled()
                     .accessibilityElement(children: .combine)
                     .accessibilityValue(progressLabel ?? status)
             }
             if headphones.multipoint.supportsInventory {
-                let action: SonyPeripheralAction = device.isConnected ? .disconnect : .connect
+                let action: SonyPeripheralAction = pendingAction ?? (device.isConnected ? .disconnect : .connect)
                 let reason = headphones.deviceActionUnavailableReason(action, device: device)
-                Button(device.isConnected ? String(localized: "Disconnect") : String(localized: "Connect")) {
+                Button {
                     headphones.changeDeviceConnection(action, device: device)
+                } label: {
+                    Text(action == .disconnect ? String(localized: "Disconnect") : String(localized: "Connect"))
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 6))
@@ -1974,10 +1973,18 @@ private struct MultipointDeviceRow: View {
                 .focused($actionFocused)
                 .disabled(reason != nil)
                 .help(reason ?? (device.isConnected ? String(localized: "Disconnect this device from the headphones") : String(localized: "Connect this device to the headphones")))
-                .accessibilityLabel("\(device.isConnected ? String(localized: "Disconnect") : String(localized: "Connect")) \(title)")
-                .accessibilityIdentifier("multipoint.\(device.isConnected ? "disconnect" : "connect").\(device.id)")
-                .opacity(showsAction ? 1 : 0)
+                .accessibilityLabel("\(action == .disconnect ? String(localized: "Disconnect") : String(localized: "Connect")) \(title)")
+                .accessibilityIdentifier("multipoint.\(action == .disconnect ? "disconnect" : "connect").\(device.id)")
+                .accessibilityHidden(pendingAction != nil)
+                .opacity(showsAction && pendingAction == nil ? 1 : 0)
                 .fixedSize()
+                .overlay {
+                    if let pendingAction {
+                        ProgressView().controlSize(.mini)
+                            .accessibilityLabel(pendingAction == .connect ? String(localized: "Connecting device…") : String(localized: "Disconnecting device…"))
+                            .accessibilityIdentifier("multipoint.progress.\(device.id)")
+                    }
+                }
             }
         }
         .padding(.horizontal, 8)
@@ -1992,16 +1999,16 @@ private struct MultipointDeviceRow: View {
     private var deviceLabel: some View {
         HStack(spacing: 10) {
             ZStack {
-                Circle().fill(selected ? Color.accentColor : Color.primary.opacity(0.1))
-                if progressLabel != nil {
+                Circle().fill(Color.primary.opacity(0.1))
+                if pendingAction == nil, progressLabel != nil {
                     ProgressView()
                         .controlSize(.small)
-                        .tint(selected ? .white : .secondary)
+                        .tint(.secondary)
                         .accessibilityHidden(true)
                 } else {
                     Image(systemName: device.symbolName)
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(selected ? Color.white : .primary)
+                        .foregroundStyle(.primary)
                         .accessibilityHidden(true)
                 }
             }
@@ -2010,7 +2017,7 @@ private struct MultipointDeviceRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(device.isConnected ? .primary : .secondary)
-            if selected && differentiateWithoutColor {
+            if selected {
                 Image(systemName: "checkmark").accessibilityHidden(true)
             }
             Spacer(minLength: 0)

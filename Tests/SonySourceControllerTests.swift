@@ -169,6 +169,36 @@ final class SonySourceControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testQueuedSourceInvalidationKeepsControlsAndTransmitsFollowingQueuedCommand() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        let session = controller.simulatedControlSession
+        controller.setDSEE(.off)
+        let previous = try XCTUnwrap(controller.simulatedPendingFrame)
+        controller.selectAudioSource(phone)
+        XCTAssertEqual(controller.sourceTransition?.phase, .queued)
+        controller.refreshEqualizer()
+        deliver([0x39, 2, 2] + entry(address: "02:00:00:00:00:01", id: 1, name: "MacBook Pro")
+                + entry(address: phone.address, id: 0, name: "Phone") + [1], to: controller)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - previous.sequence, payload: []))
+        XCTAssertEqual(controller.sourceTransition?.phase, .failed)
+        XCTAssertFalse(controller.simulatedSourceTimeoutPending)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.prefix(2) == [0x3C, 1] })
+        let next = try XCTUnwrap(controller.simulatedPendingFrame)
+        XCTAssertEqual(next.payload, controller.equalizer.parameterQueryPayload)
+        XCTAssertEqual(next.sequence, 1 - previous.sequence)
+        acknowledgeAll(controller)
+        controller.simulateSourceTimeout()
+        XCTAssertEqual(controller.sourceTransition?.phase, .failed)
+        XCTAssertFalse(controller.simulatedSourceTimeoutPending)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+    }
+
+    @MainActor
     func testRepeatedCapabilitiesDoNotStealReadbackAndChangedCapabilitiesCancelQueuedWrites() throws {
         let controller = preparedController()
         let phone = try XCTUnwrap(controller.multipoint.devices.last)

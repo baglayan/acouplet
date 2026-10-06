@@ -180,8 +180,29 @@ final class EarbudFindingSessionTests: XCTestCase {
         XCTAssertEqual(session.receive(.acknowledgement(status(0))), [.close])
         XCTAssertEqual(session.phase, .finished)
         XCTAssertFalse(session.mayBeRinging)
-        XCTAssertEqual(session.receive(.status(status(2, timeout: 20))), [])
+        XCTAssertEqual(session.receive(.status(status(2, timeout: 20))), [.send(.stop)])
+        XCTAssertTrue(session.mayBeRinging)
+        XCTAssertEqual(session.phase, .stopping)
         XCTAssertEqual(session.begin(), [])
+    }
+
+    func testPeerRingBeforeStartOrAfterCompletionRequiresStop() throws {
+        for phase in [EarbudFindingSession.Phase.connecting, .awaitingWearingConfirmation, .starting, .finished] {
+            var session = EarbudFindingSession(target: .left, timeoutSeconds: 30)
+            _ = session.begin()
+            if phase != .connecting { _ = session.connectionOpened(worn: phase != .starting) }
+            if phase == .finished { _ = session.stop() }
+            XCTAssertEqual(session.phase, phase)
+            XCTAssertFalse(session.mayBeRinging)
+            XCTAssertEqual(session.receive(.status(status(1, timeout: 30))), [.send(.stop)])
+            XCTAssertEqual(session.phase, .stopping)
+            XCTAssertTrue(session.mayBeRinging)
+            XCTAssertFalse(session.commandWillSend(try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30))))
+            XCTAssertEqual(session.receive(.acknowledgement(status(0))), [])
+            XCTAssertTrue(session.commandWillSend(.stop))
+            XCTAssertEqual(session.receive(.acknowledgement(status(0))), [.close])
+            XCTAssertFalse(session.mayBeRinging)
+        }
     }
 
     func testWrongSideBothAndUnverifiedTimeoutStopInsteadOfConfirmingRinging() throws {
@@ -1425,43 +1446,146 @@ final class EarbudFinderControllerTests: XCTestCase {
         XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
     }
 
-    func testReopeningKeepsThePendingFinderUntilStopIsConfirmed() async throws {
+    func testReopeningReusesTheFinderAndRequiresFreshWearingChecks() async throws {
         let (headphones, _) = readyFinder()
         XCTAssertTrue(headphones.beginEarbudFinder())
         let finder = try XCTUnwrap(headphones.earbudFinder)
         defer { finish(finder, headphones: headphones) }
         finder.play(.left)
-        XCTAssertTrue(headphones.beginEarbudFinder())
-        XCTAssertTrue(headphones.earbudFinder === finder)
+        let firstID = try XCTUnwrap(finder.session?.id)
         finder.simulateConnectionOpened()
         acknowledgeAll(headphones)
         deliver([0xF3, 0, 4], to: headphones)
         await receiveQueuedUpdates()
         finder.dismiss()
         XCTAssertEqual(finder.session?.phase, .stopping)
-        XCTAssertTrue(finder.needsNewControlSession)
+        XCTAssertFalse(finder.needsNewControlSession)
         XCTAssertTrue(headphones.beginEarbudFinder())
         XCTAssertTrue(headphones.earbudFinder === finder)
         let stopped = try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded)
         finder.simulateProtocolData(stopped)
         XCTAssertEqual(finder.session?.phase, .finished)
         XCTAssertFalse(finder.mayBeRinging)
+        XCTAssertEqual(finder.simulatedTransportCloseCount, 0)
         XCTAssertTrue(headphones.beginEarbudFinder())
-        let replacement = try XCTUnwrap(headphones.earbudFinder)
-        XCTAssertFalse(replacement === finder)
-        XCTAssertFalse(replacement.needsNewControlSession)
-        XCTAssertNil(replacement.session)
-        XCTAssertTrue(replacement.canPlay(.left))
-        XCTAssertTrue(replacement.canPlay(.right))
+        XCTAssertTrue(headphones.earbudFinder === finder)
+        XCTAssertTrue(finder.canPlay(.right))
+        finder.play(.right)
+        XCTAssertNotEqual(finder.session?.id, firstID)
         finder.simulateConnectionOpened()
-        finder.simulateProtocolData(stopped)
-        finder.simulateAcknowledgementTimeout()
-        finder.retryStop()
-        await receiveQueuedUpdates()
-        XCTAssertTrue(headphones.earbudFinder === replacement)
-        XCTAssertNil(replacement.session)
-        XCTAssertTrue(replacement.simulatedSentMessages.isEmpty)
+        XCTAssertTrue(finder.isCheckingWearing)
         XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 2], to: headphones)
+        await receiveQueuedUpdates()
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+        XCTAssertEqual(finder.simulatedTransportCloseCount, 0)
+    }
+
+    func testRetainedStreamIgnoresPartialStatusFromBeforeANewStart() async throws {
+        let stale = try XCTUnwrap(FastPairMessage(group: 4, code: 1, payload: [2, 30]).encoded)
+        let stopped = try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded)
+        for split in 1..<stale.count {
+            let (headphones, finder) = readyFinder()
+            defer { finish(finder, headphones: headphones) }
+            finder.play(.left)
+            finder.simulateConnectionOpened()
+            acknowledgeAll(headphones)
+            deliver([0xF3, 0, 4], to: headphones)
+            await receiveQueuedUpdates()
+            finder.stop()
+            finder.simulateProtocolData(stopped)
+            XCTAssertEqual(finder.session?.phase, .finished)
+            finder.simulateProtocolData(Data(stale.prefix(split)))
+            finder.play(.left)
+            finder.simulateConnectionOpened()
+            acknowledgeAll(headphones)
+            deliver([0xF3, 0, 4], to: headphones)
+            await receiveQueuedUpdates()
+            XCTAssertEqual(finder.session?.phase, .starting)
+            finder.simulateProtocolData(Data(stale.dropFirst(split)))
+            XCTAssertEqual(finder.session?.phase, .starting)
+            XCTAssertTrue(finder.mayBeRinging)
+            finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 2, 30]).encoded))
+            XCTAssertEqual(finder.session?.phase, .ringing)
+            finder.stop()
+            finder.simulateProtocolData(stopped)
+            XCTAssertEqual(finder.session?.phase, .finished)
+            XCTAssertEqual(finder.simulatedTransportCloseCount, 0)
+        }
+    }
+
+    func testIdlePeerRingStatusRequestsStopAndExplicitRetirementClosesHealthyTransport() async throws {
+        let (headphones, finder) = readyFinder()
+        defer { finish(finder, headphones: headphones) }
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 0], to: headphones)
+        await receiveQueuedUpdates()
+        finder.stop()
+        XCTAssertEqual(finder.session?.phase, .finished)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 4, code: 1, payload: [2, 30]).encoded))
+        XCTAssertEqual(finder.session?.phase, .stopping)
+        XCTAssertTrue(finder.mayBeRinging)
+        XCTAssertEqual(finder.simulatedSentMessages.filter { $0.prefix(2) == Data([4, 1]) }, [try stopData()])
+        finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded))
+        XCTAssertEqual(finder.session?.phase, .finished)
+        XCTAssertFalse(finder.mayBeRinging)
+        XCTAssertEqual(finder.simulatedTransportCloseCount, 0)
+        finder.requestTransportRetirement()
+        XCTAssertEqual(finder.simulatedTransportCloseCount, 1)
+        finder.requestTransportRetirement()
+        XCTAssertEqual(finder.simulatedTransportCloseCount, 1)
+    }
+
+    func testIdlePeerRingPreservesRiskWhenAcknowledgementCannotBeSent() async throws {
+        let (headphones, finder) = readyFinder()
+        defer { finish(finder, headphones: headphones) }
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 0], to: headphones)
+        await receiveQueuedUpdates()
+        finder.stop()
+        XCTAssertEqual(finder.session?.phase, .finished)
+        finder.simulatesSendFailure = true
+        finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 4, code: 1, payload: [2, 30]).encoded))
+        XCTAssertEqual(finder.session?.phase, .unconfirmed)
+        XCTAssertTrue(finder.mayBeRinging)
+        XCTAssertEqual(finder.simulatedTransportCloseCount, 1)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
+    func testPeerRingDuringPreparationCancelsWearCheckAndAuthorization() async throws {
+        for confirming in [false, true] {
+            let (headphones, finder) = readyFinder()
+            defer { finish(finder, headphones: headphones) }
+            finder.play(.left)
+            finder.simulateConnectionOpened()
+            if confirming {
+                acknowledgeAll(headphones)
+                deliver([0xF3, 0, 0], to: headphones)
+                await receiveQueuedUpdates()
+                finder.authenticateWearingOverride(sessionID: try XCTUnwrap(finder.session?.id))
+                XCTAssertTrue(finder.isAuthenticating)
+            } else {
+                XCTAssertTrue(finder.isCheckingWearing)
+            }
+            finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 4, code: 1, payload: [1, 30]).encoded))
+            XCTAssertEqual(finder.session?.phase, .stopping)
+            XCTAssertTrue(finder.mayBeRinging)
+            XCTAssertFalse(finder.isCheckingWearing)
+            XCTAssertFalse(finder.isAuthenticating)
+            XCTAssertNil(finder.wearingAuthorization)
+            XCTAssertEqual(finder.simulatedSentMessages.filter { $0.prefix(2) == Data([4, 1]) }, [try stopData()])
+            acknowledgeAll(headphones)
+            deliver([0xF3, 0, 4], to: headphones)
+            await receiveQueuedUpdates()
+            XCTAssertEqual(finder.session?.phase, .stopping)
+            XCTAssertEqual(finder.simulatedSentMessages.filter { $0.prefix(2) == Data([4, 1]) }, [try stopData()])
+        }
     }
 
     func testReconnectKeepsUnconfirmedSoundUntilStopBeforeCreatingAFreshFinder() async throws {
@@ -1534,6 +1658,129 @@ final class EarbudFinderControllerTests: XCTestCase {
         XCTAssertFalse(finder.mayBeRinging)
         XCTAssertFalse(headphones.showsMenuBarIcon)
         XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
+    func testQueuedStartIsCancelledBeforeNativeAdmission() async throws {
+        for interruption in ["stop", "dismiss", "timeout", "wearing"] {
+            let (headphones, finder) = readyFinder()
+            defer { finish(finder, headphones: headphones) }
+            let started = expectation(description: "Preceding write started")
+            let drained = expectation(description: "Write queue drained")
+            let release = DispatchSemaphore(value: 0)
+            let channel = RFCOMMChannelIOTests.TestChannel(onFirstWrite: {
+                started.fulfill()
+                XCTAssertEqual(release.wait(timeout: .now() + 5), .success)
+            })
+            let io = RFCOMMChannelIO(channel: channel)
+            io.write(Data([1])) { _ in drained.fulfill() }
+            await fulfillment(of: [started], timeout: 2)
+            finder.simulatedChannelIO = io
+            finder.play(.left)
+            finder.simulateConnectionOpened()
+            acknowledgeAll(headphones)
+            deliver([0xF3, 0, 4], to: headphones)
+            await receiveQueuedUpdates()
+            XCTAssertEqual(finder.session?.phase, .starting)
+            XCTAssertFalse(finder.mayBeRinging)
+            switch interruption {
+            case "stop": finder.stop()
+            case "dismiss": finder.dismiss()
+            case "timeout": finder.simulateAcknowledgementTimeout()
+            default:
+                deliver([0xF5, 0, 0], to: headphones)
+                await receiveQueuedUpdates()
+            }
+            XCTAssertEqual(finder.session?.phase, .finished)
+            release.signal()
+            await fulfillment(of: [drained], timeout: 2)
+            let cancelled = expectation(description: "Cancelled queue drained")
+            io.write(Data([2]), willSend: { false }) { status in
+                XCTAssertNotEqual(status, 0)
+                cancelled.fulfill()
+            }
+            await fulfillment(of: [cancelled], timeout: 2)
+            XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+            XCTAssertEqual(finder.simulatedTransportCloseCount, 0)
+            XCTAssertEqual(channel.writes, [Data([1])])
+        }
+    }
+
+    func testPeerRingBeforeQueuedStartAdmissionCancelsStartAndRequestsStop() async throws {
+        let (headphones, finder) = readyFinder()
+        defer { finish(finder, headphones: headphones) }
+        let started = expectation(description: "Preceding write started")
+        let release = DispatchSemaphore(value: 0)
+        let channel = RFCOMMChannelIOTests.TestChannel(onFirstWrite: {
+            started.fulfill()
+            XCTAssertEqual(release.wait(timeout: .now() + 5), .success)
+        })
+        let io = RFCOMMChannelIO(channel: channel)
+        io.write(Data([1])) { _ in }
+        await fulfillment(of: [started], timeout: 2)
+        finder.simulatedChannelIO = io
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 4], to: headphones)
+        await receiveQueuedUpdates()
+        XCTAssertEqual(finder.session?.phase, .starting)
+        XCTAssertFalse(finder.mayBeRinging)
+        finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 4, code: 1, payload: [1, 30]).encoded))
+        XCTAssertEqual(finder.session?.phase, .stopping)
+        XCTAssertTrue(finder.mayBeRinging)
+        let stopped = try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded)
+        finder.simulateProtocolData(stopped)
+        XCTAssertEqual(finder.session?.phase, .stopping)
+        release.signal()
+        let drained = expectation(description: "Queued start cancellation and stop drained")
+        io.write(Data([2]), willSend: { false }) { _ in drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertEqual(finder.session?.phase, .stopping)
+        XCTAssertEqual(finder.simulatedSentMessages.filter { $0.prefix(2) == Data([4, 1]) }, [try stopData()])
+        XCTAssertFalse(channel.writes.contains(try ringData(.left)))
+        XCTAssertEqual(finder.simulatedTransportCloseCount, 0)
+        finder.simulateProtocolData(stopped)
+        XCTAssertEqual(finder.session?.phase, .finished)
+        XCTAssertFalse(finder.mayBeRinging)
+    }
+
+    func testBlockedNativeStartRetiresQueuedStopOnTimeout() async throws {
+        let (headphones, finder) = readyFinder()
+        defer { finish(finder, headphones: headphones) }
+        let started = expectation(description: "Locating write started")
+        let release = DispatchSemaphore(value: 0)
+        let channel = RFCOMMChannelIOTests.TestChannel(onFirstWrite: {
+            started.fulfill()
+            XCTAssertEqual(release.wait(timeout: .now() + 5), .success)
+        })
+        let io = RFCOMMChannelIO(channel: channel)
+        finder.simulatedChannelIO = io
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 4], to: headphones)
+        await receiveQueuedUpdates()
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(finder.mayBeRinging)
+        finder.simulateAcknowledgementTimeout()
+        XCTAssertEqual(finder.session?.phase, .stopping)
+        finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded))
+        XCTAssertEqual(finder.session?.phase, .stopping)
+        XCTAssertTrue(finder.mayBeRinging)
+        finder.simulateAcknowledgementTimeout()
+        XCTAssertEqual(finder.session?.phase, .unconfirmed)
+        XCTAssertTrue(finder.mayBeRinging)
+        XCTAssertFalse(finder.isBusy)
+        release.signal()
+        let drained = expectation(description: "Retired stop queue drained")
+        io.write(Data([2])) { status in
+            XCTAssertNotEqual(status, 0)
+            drained.fulfill()
+        }
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left)])
+        XCTAssertEqual(channel.writes, [try ringData(.left)])
+        XCTAssertEqual(finder.session?.phase, .unconfirmed)
     }
 
     private func completeFinderHandshake(on headphones: SonyHeadphonesController) {

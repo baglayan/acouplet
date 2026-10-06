@@ -51,6 +51,64 @@ final class SessionEvents {
 
 extension LDACNativeSession {
     @MainActor
+    static func failurePresentationCheck(logURL: URL) async throws {
+        let raw = "PCM_FAILED helper=probe reason=nonfinite sourceSamples=128"
+        for (mode, expected) in [
+            ("setup", "LDAC could not start. Try again."),
+            ("active", "LDAC playback stopped unexpectedly. Try again."),
+            ("stopping", "LDAC did not stop completely."),
+            ("restoring", "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings."),
+            ("restored", "LDAC did not stop completely."),
+            ("restore-preparation", "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings."),
+        ] {
+            let events = SessionEvents()
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(bundle: .main), gain: 1, receive: { events.values.append($0) })
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            session.log = try FileHandle(forWritingTo: logURL)
+            session.active = mode == "active"
+            session.requestedStop = mode == "stopping"
+            session.restoring = mode == "restoring" || mode == "restored"
+            session.nativeAudioRestored = mode == "restored"
+            if mode == "restore-preparation" {
+                session.requestedStop = true
+                session.fail(raw, userMessage: "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings.")
+            } else {
+                session.fail(raw)
+            }
+            session.finish()
+            try session.log?.close()
+            session.log = nil
+            for _ in 0..<100 { await Task.yield() }
+            let messages = events.values.compactMap { event -> String? in
+                switch event {
+                case .failed(let message): message
+                case .finished(let completion): completion.message
+                default: nil
+                }
+            }
+            try require(messages == [expected, expected], "Internal failure reached public events in \(mode): \(messages)")
+            try require(session.failure == raw, "Failure presentation changed internal failure state")
+            try require(String(contentsOf: logURL, encoding: .utf8).contains(raw), "Failure detail was lost from diagnostics")
+        }
+        let events = SessionEvents()
+        let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+            helpers: Helpers(bundle: .main), gain: 1, receive: { events.values.append($0) })
+        session.capturePermissionDenied()
+        session.finish()
+        for _ in 0..<100 { await Task.yield() }
+        let messages = events.values.compactMap { event -> String? in
+            switch event {
+            case .failed(let message): message
+            case .finished(let completion): completion.message
+            default: nil
+            }
+        }
+        try require(messages == [LDACAudioCaptureAccess.permissionGuidance, LDACAudioCaptureAccess.permissionGuidance],
+            "Permission instructions were replaced by a generic failure")
+    }
+
+    @MainActor
     private static func lossSession(active: Bool, events: SessionEvents) throws -> LDACNativeSession {
         let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
             helpers: Helpers(bundle: .main), gain: 1,
@@ -107,6 +165,13 @@ extension LDACNativeSession {
             try require(session.mediaCloseRequired, "Real closure marker did not advance cleanup")
         }
         for _ in 0..<100 { await Task.yield() }
+        if unavailable && rejected {
+            let message = events.values.compactMap { event -> String? in
+                if case .failed(let message) = event { return message }
+                return nil
+            }.first
+            try require(message == session.failure, "LDAC availability instructions were replaced by a generic failure")
+        }
         try require(events.names == (rejected ? [recoverable ? "connectionLost" : "failed"] : []),
             "Probe events were missing, duplicated, or reactivated playback: \(events.names)")
     }
@@ -364,6 +429,8 @@ enum LDACSessionClosureCheck {
         let executable = URL(fileURLWithPath: CommandLine.arguments[0])
         let raw = executable.deletingLastPathComponent().appendingPathComponent("signaling.bin")
         try Data().write(to: raw)
+        try await LDACNativeSession.failurePresentationCheck(logURL: raw.deletingLastPathComponent().appendingPathComponent("errors.log"))
+        print("PASS LDAC failure presentation preserves diagnostics and actionable permission/availability messages")
         var failures = 0
         for site in ["media-transport", "media-closed", "signaling-transport"] {
             for (mode, fault) in [("exit", "none"), ("broken", "none"), ("read", "none"),

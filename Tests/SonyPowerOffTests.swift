@@ -270,7 +270,7 @@ final class SonyPowerOffTests: XCTestCase {
                 XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: false, priorBluetoothLE: true, classicConnected: false))
                 XCTAssertTrue(controller.showsMenuBarIcon)
                 switch ending {
-                case "bleTimeout": controller.simulateBLEDisconnect(String(localized: "Sony BLE control connection timed out."))
+                case "bleTimeout": controller.simulateBLEDisconnect(String(localized: "The headphone connection timed out. Try again."))
                 case "disconnect": controller.simulateBLEDisconnect(nil)
                 default: controller.stop()
                 }

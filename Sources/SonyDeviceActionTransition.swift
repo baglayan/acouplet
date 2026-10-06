@@ -116,7 +116,7 @@ struct SonyDeviceActionTransition: Equatable, Sendable {
     @discardableResult
     mutating func capabilitiesChanged(session: UInt64) -> Bool {
         guard session == self.session, !isFinished else { return false }
-        fail(String(localized: "Headphone capabilities changed before the device connection change was confirmed."))
+        fail(String(localized: "The headphone settings changed before the device connection change was confirmed."))
         return true
     }
 

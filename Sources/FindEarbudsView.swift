@@ -6,11 +6,17 @@ struct FindEarbudsControl: View {
     @State private var showsFinder = false
 
     var body: some View {
-        Button("Find Earbuds…") {
-            if headphones.beginEarbudFinder() { showsFinder = true }
+        Group {
+            if headphones.supportsEarbudFinding || showsFinder || headphones.earbudFinder?.isBusy == true || headphones.earbudFinder?.mayBeRinging == true {
+                Section("Find Earbuds") {
+                    Button("Find Earbuds…") {
+                        if headphones.beginEarbudFinder() { showsFinder = true }
+                    }
+                    .tint(.primary)
+                    .accessibilityIdentifier("finder.open")
+                }
+            }
         }
-        .tint(.primary)
-        .accessibilityIdentifier("finder.open")
         .sheet(isPresented: $showsFinder) {
             if let finder = headphones.earbudFinder {
                 FindEarbudsView(finder: finder)
@@ -27,6 +33,7 @@ struct FindEarbudsControl: View {
 
 struct FindEarbudsView: View {
     @ObservedObject var finder: EarbudFinderController
+    @EnvironmentObject private var headphones: SonyHeadphonesController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmationTarget = FastPairRingTarget.left
@@ -57,15 +64,19 @@ struct FindEarbudsView: View {
                 earbud(.left)
                 earbud(.right)
             }
-            HStack(alignment: .top, spacing: 8) {
-                if finder.isAuthenticating || finder.isSavingAuthorization || finder.isCheckingWearing || finder.session?.phase == .connecting {
-                    ProgressView().controlSize(.small)
-                        .accessibilityHidden(true)
+            if !finder.isBusy, !finder.mayBeRinging, !headphones.isReady {
+                HeadphoneConnectionView()
+            } else {
+                HStack(alignment: .top, spacing: 8) {
+                    if finder.isAuthenticating || finder.isSavingAuthorization || finder.isCheckingWearing || finder.session?.phase == .connecting {
+                        ProgressView().controlSize(.small)
+                            .accessibilityHidden(true)
+                    }
+                    Text(status)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("finder.status")
                 }
-                Text(status)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("finder.status")
             }
             HStack {
                 if finder.isBusy || finder.mayBeRinging {
@@ -81,6 +92,7 @@ struct FindEarbudsView: View {
                 Button("Done") { close() }
                     .keyboardShortcut(.cancelAction)
                     .tint(.primary)
+                    .accessibilityIdentifier("finder.done")
             }
         }
         .padding(20)

@@ -41,6 +41,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
     var onReady: ((UUID, String?) -> Void)?
     var onData: ((Data) -> Void)?
     var onDisconnect: ((String?) -> Void)?
+    private(set) var diagnosticError: String?
     private(set) var isReady = false
     private(set) var isWaitingForConnection = false
     var shouldCancelAutomaticConnection: Bool { waitsForConnection && !isReady }
@@ -75,6 +76,14 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
     }
 
     #if DEBUG
+    func simulateFailure(_ error: Error) {
+        fail(error)
+    }
+
+    func simulateFailure(_ message: String) {
+        fail(message)
+    }
+
     func simulateWaitingForConnection() {
         isWaitingForConnection = true
     }
@@ -95,6 +104,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
 
     func start(model: SonyDeviceModel, identityHash: String, preferredIdentifier: UUID? = nil) {
         stop()
+        diagnosticError = nil
         expectedHash = identityHash
         expectedModel = model
         self.preferredIdentifier = preferredIdentifier
@@ -111,7 +121,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
         setupTimeout = Task { [weak self] in
             do { try await Task.sleep(for: duration) } catch { return }
             guard let self, self.sessionID == id, !self.isReady else { return }
-            self.fail(String(localized: "Sony BLE control connection timed out."))
+            self.fail(String(localized: "The headphone connection timed out. Try again."))
         }
     }
 
@@ -173,7 +183,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
         case .unauthorized:
             fail(String(localized: "Bluetooth access is not allowed."))
         case .unsupported:
-            fail(String(localized: "Bluetooth LE is not supported on this Mac."))
+            fail(String(localized: "This Mac does not support this headphone connection."))
         case .unknown, .resetting:
             if peripheral != nil { fail(String(localized: "Bluetooth was reset.")) }
         @unknown default:
@@ -194,7 +204,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
             guard let self, self.sessionID == id, let central = self.manager else { return }
             self.selectionTask = nil
             guard self.candidates.count == 1, let (target, name) = self.candidates.values.first else {
-                self.fail(String(localized: "Multiple Sony devices found. Choose a device before connecting to BLE controls."))
+                self.fail(String(localized: "Multiple headphones were found. Select the headphones you want to connect."))
                 return
             }
             self.candidates.removeAll()
@@ -221,21 +231,23 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
 
     func centralManager(_ central: CBCentralManager, didFailToConnect target: CBPeripheral, error: Error?) {
         guard central === manager, target === peripheral else { return }
-        fail(error?.localizedDescription ?? String(localized: "Could not connect to Sony BLE controls."))
+        if let error { fail(error) }
+        else { fail(String(localized: "Could not connect to the headphone controls. Try again.")) }
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral target: CBPeripheral, error: Error?) {
         guard central === manager, target === peripheral else { return }
-        let message = error?.localizedDescription
+        let message = error.map { _ in String(localized: "The connection to the headphones was lost.") }
+        diagnosticError = error.map(Self.diagnosticDescription)
         stop()
         onDisconnect?(message)
     }
 
     func peripheral(_ target: CBPeripheral, didDiscoverServices error: Error?) {
         guard target === peripheral else { return }
-        if let error { fail(error.localizedDescription); return }
+        if let error { fail(error); return }
         guard let service = target.services?.first(where: { $0.uuid == Self.serviceUUID }) else {
-            fail(String(localized: "The headphones’ controls are unavailable over Bluetooth LE."))
+            fail(String(localized: "The headphone controls are unavailable through this connection."))
             return
         }
         target.discoverCharacteristics([Self.writeUUID, Self.notifyUUID, Self.lengthUUID], for: service)
@@ -248,7 +260,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
 
     func peripheral(_ target: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard target === peripheral, service.uuid == Self.serviceUUID else { return }
-        if let error { fail(error.localizedDescription); return }
+        if let error { fail(error); return }
         let characteristics = service.characteristics ?? []
         guard let writer = characteristics.first(where: { $0.uuid == Self.writeUUID }), writer.properties.contains(.writeWithoutResponse),
               let notifier = characteristics.first(where: { $0.uuid == Self.notifyUUID }), notifier.properties.contains(.notify),
@@ -264,15 +276,15 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
 
     func peripheral(_ target: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard target === peripheral, characteristic === lengthCharacteristic || characteristic === notifyCharacteristic else { return }
-        if let error { fail(error.localizedDescription); return }
+        if let error { fail(error); return }
         guard let data = characteristic.value else {
-            fail(String(localized: "Sony BLE controls returned no data."))
+            fail(String(localized: "The headphones returned an empty response. Try again."))
             return
         }
         if characteristic === lengthCharacteristic {
             guard !isReady, let length = SonyBLEWriteBuffer.maximumLength(from: data, hostMaximum: target.maximumWriteValueLength(for: .withoutResponse)),
                   let notifier = notifyCharacteristic else {
-                fail(String(localized: "Sony BLE controls returned an invalid write length."))
+                fail(String(localized: "The headphones returned an invalid response. Try again."))
                 return
             }
             maximumLength = length
@@ -284,9 +296,9 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
 
     func peripheral(_ target: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         guard target === peripheral, characteristic === notifyCharacteristic else { return }
-        if let error { fail(error.localizedDescription); return }
+        if let error { fail(error); return }
         guard characteristic.isNotifying, maximumLength != nil else {
-            fail(String(localized: "Sony BLE notifications are unavailable."))
+            fail(String(localized: "Could not receive updates from the headphones. Try again."))
             return
         }
         guard !isReady else { return }
@@ -329,11 +341,23 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
             guard !Task.isCancelled, let self, self.sessionID == id, !self.writes.isEmpty else { return }
             self.drain()
             guard !Task.isCancelled, self.sessionID == id, !self.writes.isEmpty else { return }
-            self.fail(String(localized: "Sony BLE control writes timed out."))
+            self.fail(String(localized: "Sending the headphone command timed out. Try again."))
         }
     }
 
+    private nonisolated static func diagnosticDescription(_ error: Error) -> String {
+        let error = error as NSError
+        return "\(error.domain) (code \(error.code))"
+    }
+
+    private func fail(_ error: Error) {
+        diagnosticError = Self.diagnosticDescription(error)
+        stop()
+        onDisconnect?(String(localized: "Could not connect to the headphone controls. Try again."))
+    }
+
     private func fail(_ message: String) {
+        diagnosticError = message
         stop()
         onDisconnect?(message)
     }

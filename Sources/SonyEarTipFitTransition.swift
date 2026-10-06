@@ -189,7 +189,7 @@ struct SonyEarTipFitTransition: Equatable {
     mutating func timeout() {
         switch phase {
         case .checking:
-            interrupt(String(localized: "Fit information was not received. Reconnect controls to try again."))
+            interrupt(String(localized: "Fit information was not received. Reconnect the headphones to try again."))
         case .entering:
             message = String(localized: "The fit test could not start.")
             move(to: .leaving)

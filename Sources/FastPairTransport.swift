@@ -13,16 +13,20 @@ final class FastPairTransport: NSObject {
     private let onFailure: (String) -> Void
     private var session: UUID?
     private var device: IOBluetoothDevice?
+    private var address: String?
     private var channel: IOBluetoothRFCOMMChannel?
     private var channelDelegate: ChannelDelegate?
     private var discovery: ServiceDiscovery?
     private var openTimeout: DispatchWorkItem?
+    private var pendingOpenNotificationID: UUID?
     private var writes: [UInt: NSMutableData] = [:]
     private var nextWriteID: UInt = 0
     private var isOpen = false
+    let closeCompletion: DispatchGroup
 
-    init(onOpen: @escaping () -> Void, onData: @escaping (Data) -> Void,
+    init(closeCompletion: DispatchGroup = DispatchGroup(), onOpen: @escaping () -> Void, onData: @escaping (Data) -> Void,
          onFailure: @escaping (String) -> Void) {
+        self.closeCompletion = closeCompletion
         self.onOpen = onOpen
         self.onData = onData
         self.onFailure = onFailure
@@ -31,31 +35,80 @@ final class FastPairTransport: NSObject {
 
     isolated deinit {
         openTimeout?.cancel()
-        channelDelegate?.retire()
-        channel?.close()
+        channelDelegate?.retire(completion: closeCompletion)
+    }
+
+    #if DEBUG
+    func simulateConnection(address: String, device: IOBluetoothDevice, channel: IOBluetoothRFCOMMChannel) {
+        close()
+        let identifier = UUID()
+        session = identifier
+        self.address = address
+        self.device = device
+        self.channel = channel
+        let delegate = ChannelDelegate(owner: self, session: identifier)
+        delegate.channel = channel
+        delegate.channelIO = RFCOMMChannelIO(channel: channel)
+        channelDelegate = delegate
+        isOpen = true
+    }
+    #endif
+
+    func canReuse(address: String) -> Bool {
+        self.address == address && isOpen && channel?.isOpen() == true
+            && device?.isPaired() == true && device?.isConnected() == true && channelDelegate?.channelIO != nil
     }
 
     func open(address: String) {
-        close()
-        guard let target = IOBluetoothDevice(addressString: address),
-              target.isPaired(), target.isConnected() else {
-            onFailure(String(localized: "Connect your paired earbuds before finding them."))
+        if canReuse(address: address), let identifier = session {
+            let notificationID = UUID()
+            pendingOpenNotificationID = notificationID
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.session == identifier, self.pendingOpenNotificationID == notificationID else { return }
+                self.pendingOpenNotificationID = nil
+                guard self.canReuse(address: address) else {
+                    self.fail(String(localized: "The earbuds disconnected."))
+                    return
+                }
+                self.onOpen()
+            }
             return
         }
+        close()
         let identifier = UUID()
         session = identifier
-        device = target
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.session == identifier else { return }
-            self.fail(String(localized: "The earbud finding connection timed out."))
+            self.fail(String(localized: "Connecting to the earbuds to play a locating sound timed out. Try again."))
         }
         openTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
+        closeCompletion.notify(queue: .main) { [weak self] in
+            guard let self, self.session == identifier else { return }
+            self.openAfterClose(address: address, session: identifier)
+        }
+    }
+
+    private func openAfterClose(address: String, session identifier: UUID) {
+        guard session == identifier else { return }
+        if closeCompletion.wait(timeout: .now()) != .success {
+            closeCompletion.notify(queue: .main) { [weak self] in
+                self?.openAfterClose(address: address, session: identifier)
+            }
+            return
+        }
+        guard let target = IOBluetoothDevice(addressString: address),
+              target.isPaired(), target.isConnected() else {
+            fail(String(localized: "Connect your paired earbuds before finding them."))
+            return
+        }
+        device = target
+        self.address = address
         resolveChannel(on: target, session: identifier, discoverIfMissing: true)
     }
 
-    func send(_ data: Data, isStopping: Bool = false) -> Bool {
-        guard isOpen, let channel, channel.isOpen(),
+    func send(_ data: Data, isStopping: Bool = false, willSend: (@MainActor @Sendable () -> Bool)? = nil) -> Bool {
+        guard isOpen, let channel, let channelIO = channelDelegate?.channelIO, let session, channel.isOpen(),
               device?.isPaired() == true, device?.isConnected() == true,
               !channel.isTransmissionPaused(), writes.count < (isStopping ? 9 : 8), !data.isEmpty,
               data.count <= Int(channel.getMTU()), data.count <= Int(UInt16.max) else { return false }
@@ -63,28 +116,30 @@ final class FastPairTransport: NSObject {
         let identifier = nextWriteID
         let buffer = NSMutableData(data: data)
         writes[identifier] = buffer
-        let result = channel.writeAsync(buffer.mutableBytes, length: UInt16(data.count),
-                                        refcon: UnsafeMutableRawPointer(bitPattern: identifier))
-        guard result == kIOReturnSuccess else {
-            writes[identifier] = nil
-            return false
+        channelIO.write(data, willSend: { [weak self] in
+            guard let self, self.channel === channel, self.session == session else { return false }
+            let allowed = willSend?() ?? true
+            if !allowed { self.writes[identifier] = nil }
+            return allowed
+        }) { [weak self] result in
+            self?.didWrite(on: channel, identifier: identifier, status: result, session: session)
         }
         return true
     }
 
     func close() {
+        pendingOpenNotificationID = nil
         session = nil
         isOpen = false
         openTimeout?.cancel()
         openTimeout = nil
-        let oldChannel = channel
         channel = nil
-        channelDelegate?.retire()
-        oldChannel?.close()
+        channelDelegate?.retire(completion: closeCompletion)
         channelDelegate = nil
         writes.removeAll()
         discovery = nil
         device = nil
+        address = nil
     }
 
     private func resolveChannel(on target: IOBluetoothDevice, session identifier: UUID,
@@ -99,14 +154,14 @@ final class FastPairTransport: NSObject {
         }
         guard let record = target.getServiceRecord(for: uuid) else {
             guard discoverIfMissing else {
-                fail(String(localized: "These earbuds do not offer the finding service."))
+                fail(String(localized: "Playing a locating sound is not available for these earbuds."))
                 return
             }
             let query = ServiceDiscovery { [weak self] foundDevice, status in
                 guard let self, self.session == identifier, self.device === foundDevice else { return }
                 self.discovery = nil
                 guard status == kIOReturnSuccess else {
-                    self.fail(String(localized: "Could not discover the earbud finding service."))
+                    self.fail(String(localized: "Could not check whether these earbuds can play a locating sound. Try again."))
                     return
                 }
                 self.resolveChannel(on: foundDevice, session: identifier, discoverIfMissing: false)
@@ -119,7 +174,7 @@ final class FastPairTransport: NSObject {
         var channelID: BluetoothRFCOMMChannelID = 0
         guard record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess,
               (1...30).contains(channelID) else {
-            fail(String(localized: "The earbud finding service has no valid connection channel."))
+            fail(String(localized: "Could not connect to the earbuds to play a locating sound. Try again."))
             return
         }
         let delegate = ChannelDelegate(owner: self, session: identifier)
@@ -128,8 +183,9 @@ final class FastPairTransport: NSObject {
         let result = target.openRFCOMMChannelAsync(&openedChannel, withChannelID: channelID, delegate: delegate)
         channel = openedChannel
         delegate.channel = openedChannel
+        if let openedChannel { delegate.channelIO = RFCOMMChannelIO(channel: openedChannel) }
         guard result == kIOReturnSuccess, openedChannel != nil else {
-            fail(String(localized: "Could not open the earbud finding connection."))
+            fail(String(localized: "Could not connect to the earbuds to play a locating sound. Try again."))
             return
         }
     }
@@ -142,7 +198,7 @@ final class FastPairTransport: NSObject {
     private func didOpen(_ openedChannel: IOBluetoothRFCOMMChannel, status: IOReturn, session identifier: UUID) {
         guard channel === openedChannel, session == identifier else { return }
         guard status == kIOReturnSuccess, device?.isConnected() == true else {
-            fail(String(localized: "Could not open the earbud finding connection."))
+            fail(String(localized: "Could not connect to the earbuds to play a locating sound. Try again."))
             return
         }
         openTimeout?.cancel()
@@ -160,37 +216,41 @@ final class FastPairTransport: NSObject {
                           session sessionID: UUID) {
         guard channel === source, session == sessionID, writes.removeValue(forKey: identifier) != nil else { return }
         if status != kIOReturnSuccess {
-            fail(String(localized: "Could not send the earbud finding command."))
+            fail(String(localized: "Could not send the locating-sound request. Try again."))
         }
     }
 
     private func didClose(_ source: IOBluetoothRFCOMMChannel, session identifier: UUID) {
         guard channel === source, session == identifier else { return }
-        fail(String(localized: "The earbud finding connection closed."))
+        fail(String(localized: "The connection for playing a locating sound was lost. Try again."))
     }
 
     @MainActor
-    private final class ChannelDelegate: NSObject {
+    final class ChannelDelegate: NSObject {
         weak var owner: FastPairTransport?
         let session: UUID
         var channel: IOBluetoothRFCOMMChannel?
-        private var retainedSelf: ChannelDelegate?
+        var channelIO: RFCOMMChannelIO?
 
         init(owner: FastPairTransport, session: UUID) {
             self.owner = owner
             self.session = session
         }
 
-        func retire() {
+        func retire(completion: DispatchGroup) {
             owner = nil
-            if retainedSelf == nil { channel?.setDelegate(nil) }
-            DispatchQueue.main.async { withExtendedLifetime(self) {} }
+            channel = nil
+            guard let channelIO else { return }
+            self.channelIO = nil
+            completion.enter()
+            channelIO.close {
+                withExtendedLifetime(self) { completion.leave() }
+            }
         }
 
         @objc nonisolated
         func rfcommChannelOpenComplete(_ channel: IOBluetoothRFCOMMChannel, status: IOReturn) {
             DispatchQueue.main.async {
-                if status == kIOReturnSuccess, self.owner != nil { self.retainedSelf = self }
                 self.owner?.didOpen(channel, status: status, session: self.session)
             }
         }
@@ -206,6 +266,7 @@ final class FastPairTransport: NSObject {
         @objc nonisolated
         func rfcommChannelWriteComplete(_ channel: IOBluetoothRFCOMMChannel,
                                         refcon: UnsafeMutableRawPointer?, status: IOReturn) {
+            guard let refcon else { return }
             let identifier = UInt(bitPattern: refcon)
             DispatchQueue.main.async {
                 self.owner?.didWrite(on: channel, identifier: identifier, status: status, session: self.session)
@@ -215,10 +276,8 @@ final class FastPairTransport: NSObject {
         @objc nonisolated
         func rfcommChannelClosed(_ channel: IOBluetoothRFCOMMChannel) {
             DispatchQueue.main.async {
-                channel.setDelegate(nil)
+                guard self.channel === channel else { return }
                 self.owner?.didClose(channel, session: self.session)
-                self.channel = nil
-                self.retainedSelf = nil
             }
         }
     }

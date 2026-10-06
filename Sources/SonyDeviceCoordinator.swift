@@ -150,6 +150,7 @@ final class SonyDeviceCoordinator: ObservableObject {
 
     func prepareEarbudFindingForTermination(completion: @escaping () -> Void) -> Bool {
         guard earbudFindingTerminationObserver == nil else { return true }
+        for finder in controllers.compactMap(\.earbudFinder) { finder.requestTransportRetirement() }
         let finders = controllers.compactMap(\.earbudFinder).filter { finder in
             guard let session = finder.session else { return false }
             return (finder.isBusy || finder.mayBeRinging) && !earbudFindingTerminationSessions.contains(session.id)

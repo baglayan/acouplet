@@ -92,6 +92,14 @@ struct EarbudFindingSession: Equatable, Sendable {
     }
 
     mutating func receive(_ response: FastPairRingResponse) -> [Effect] {
+        if !mayBeRinging, [.finished, .connecting, .awaitingWearingConfirmation, .starting].contains(phase),
+           case .status(let status) = response, status.components != .stopped {
+            mayBeRinging = true
+            stopRequested = false
+            stopAttempted = false
+            phase = .ringing
+            return stop()
+        }
         guard [.starting, .ringing, .stopping].contains(phase), mayBeRinging else { return [] }
         let status: FastPairRingStatus?
         switch response {

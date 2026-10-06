@@ -72,6 +72,18 @@ final class MacAudioRouteTests: XCTestCase {
     }
     #endif
 
+    func testDiagnosticsOmitOutputNameAndUIDWhilePreservingTransportAndFormat() {
+        let route = MacAudioRoute(deviceID: 123, name: "Private living room speaker",
+            uid: "private-output-identifier", transport: MacAudioTransport(rawValue: kAudioDeviceTransportTypeBluetooth),
+            outputChannels: 2, nominalSampleRate: 96_000)
+        let report = route.diagnosticReport
+        XCTAssertFalse(report.contains(route.name!))
+        XCTAssertFalse(report.contains(route.uid!))
+        XCTAssertFalse(report.contains("Output UID:"))
+        XCTAssertTrue(report.contains("Output transport: Bluetooth Classic"))
+        XCTAssertTrue(report.contains(route.pcmFormatDescription))
+    }
+
     func testChannelCountRejectsTruncatedAndOverflowingBufferLists() {
         func configuration(_ channels: [UInt32]) -> Data {
             let offset = MemoryLayout<AudioBufferList>.offset(of: \AudioBufferList.mBuffers)!

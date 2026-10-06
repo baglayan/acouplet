@@ -178,7 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateLater
         }
         #if !ACOUPLET_PUBLIC_APIS_ONLY
-        if environment.ldac.isSessionRunning {
+        if environment.ldac.needsStopBeforeTermination {
             environment.ldac.stop(reason: "app is terminating") { [weak self] in
                 guard let self else { sender.reply(toApplicationShouldTerminate: true); return }
                 let reply = self.applicationShouldTerminate(sender)

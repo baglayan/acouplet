@@ -6,6 +6,7 @@ import SwiftUI
 final class MenuBarController: NSObject, NSPopoverDelegate {
     private let devices: SonyDeviceCoordinator
     private let settings: SettingsStore
+    private let showSettings: () -> Void
     #if ACOUPLET_SPARKLE
     private let updater: AppUpdater
     #endif
@@ -31,6 +32,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         #endif
         self.devices = devices
         self.settings = settings
+        self.showSettings = showSettings
         #if ACOUPLET_SPARKLE
         updater = environment.updater
         #endif
@@ -46,26 +48,6 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             statusItem.button?.target = self
             statusItem.button?.action = #selector(togglePopover)
         }
-        let controller = NSHostingController(rootView: SelectedDeviceView(devices: devices) { [weak self] in
-            MenuBarView(showSettings: showSettings, closeMenu: { [weak self] in self?.closeMenu() })
-                .environmentObject(settings)
-                #if ACOUPLET_SPARKLE
-                .environmentObject(environment.updater)
-                #endif
-                #if !ACOUPLET_PUBLIC_APIS_ONLY
-                .environmentObject(ldac)
-                #endif
-                .onGeometryChange(for: CGSize.self) { $0.size } action: { [weak self] size in
-                    self?.measuredContentSize = size
-                    Task { @MainActor [weak self] in
-                        guard let self, self.wantsPopover else { return }
-                        self.updatePopoverSize()
-                        if !self.popover.isShown { self.showPopover() }
-                    }
-                }
-        }.frame(minHeight: 0, maxHeight: .infinity, alignment: .top))
-        controller.sizingOptions = []
-        popover.contentViewController = controller
         popover.appearance = NSApp.appearance
         popover.behavior = .transient
         popover.delegate = self
@@ -87,6 +69,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         dismissalObservations.removeAll()
         closeMenu()
         popover.close()
+        releasePopoverContent()
         popover.delegate = nil
         if #available(macOS 27.0, *) { statusItem.expandedInterfaceDelegate = nil }
         #if !ACOUPLET_PUBLIC_APIS_ONLY
@@ -94,6 +77,55 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         #endif
         NSStatusBar.system.removeStatusItem(statusItem)
     }
+
+    private func preparePopoverContent() {
+        guard popover.contentViewController == nil else { return }
+        let settings = self.settings
+        let showSettings = self.showSettings
+        #if ACOUPLET_SPARKLE
+        let updater = self.updater
+        #endif
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        let ldac = self.ldac
+        #endif
+        let controller = NSHostingController(rootView: SelectedDeviceView(devices: devices) { [weak self] in
+            MenuBarView(showSettings: showSettings, closeMenu: { [weak self] in self?.closeMenu() })
+                .environmentObject(settings)
+                #if ACOUPLET_SPARKLE
+                .environmentObject(updater)
+                #endif
+                #if !ACOUPLET_PUBLIC_APIS_ONLY
+                .environmentObject(ldac)
+                #endif
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { [weak self] size in
+                    guard let self, self.wantsPopover else { return }
+                    self.measuredContentSize = size
+                    Task { @MainActor [weak self] in
+                        guard let self, self.wantsPopover else { return }
+                        self.updatePopoverSize()
+                        if !self.popover.isShown { self.showPopover() }
+                    }
+                }
+        }.frame(minHeight: 0, maxHeight: .infinity, alignment: .top))
+        controller.sizingOptions = []
+        popover.contentViewController = controller
+    }
+
+    private func releasePopoverContent() {
+        popover.contentViewController = nil
+        measuredContentSize = .zero
+    }
+
+    #if DEBUG
+    var simulatedPopoverContent: NSViewController? { popover.contentViewController }
+
+    func simulatePendingPopoverPresentation() {
+        wantsPopover = true
+        preparePopoverContent()
+    }
+
+    func simulatePopoverDismissal() { closeMenu() }
+    #endif
 
     private func updateStatusItem() {
         let headphones = devices.selectedController
@@ -192,6 +224,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             return
         }
         wantsPopover = true
+        preparePopoverContent()
         popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.contentViewController?.view.layoutSubtreeIfNeeded()
         guard measuredContentSize.width > 0, measuredContentSize.height > 0 else { return }
@@ -204,12 +237,12 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     }
 
     private func closeMenu() {
+        wantsPopover = false
         if #available(macOS 27.0, *), let session = statusItem.expandedInterfaceSession {
             session.cancel()
-        } else {
-            wantsPopover = false
-            popover.close()
         }
+        popover.close()
+        if !popover.isShown { releasePopoverContent() }
     }
 
     @objc private func togglePopover() {
@@ -271,6 +304,14 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         if #available(macOS 27.0, *) { statusItem.expandedInterfaceSession?.cancel() }
     }
 
+    func popoverDidClose(_ notification: Notification) {
+        if wantsPopover {
+            if !popover.isShown { showPopover() }
+        } else {
+            releasePopoverContent()
+        }
+    }
+
 }
 
 #if !ACOUPLET_PUBLIC_APIS_ONLY
@@ -296,5 +337,6 @@ extension MenuBarController: @MainActor NSStatusItemExpandedInterfaceDelegate {
         wantsPopover = false
         popover.animates = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.close()
+        if !popover.isShown { releasePopoverContent() }
     }
 }

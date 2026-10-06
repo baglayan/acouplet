@@ -155,7 +155,7 @@ struct EqualizerEditorView: View {
                 if headphones.isRunningHeadphoneTest {
                     Text("Finish the current headphone test before applying changes.")
                 } else if headphones.powerOffState != nil {
-                    Text("Draft saved on this Mac. Reconnect controls before applying changes.")
+                    Text("Draft saved on this Mac. Reconnect the headphones before applying changes.")
                 } else if !headphones.isReady {
                     Text("Draft saved on this Mac. Headphones unavailable.")
                 } else if headphones.isEqualizerUpdatePending {
