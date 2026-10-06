@@ -97,7 +97,7 @@ def inspect_package(package, signatures_only=False, dmg=None):
     _, _, signature = command(['/usr/bin/codesign', '--display', '--verbose=4', str(app)])
     match = re.search(r'^TeamIdentifier=([A-Z0-9]{10})$', signature.decode(errors='replace'), re.MULTILINE)
     team = match[1] if match else None
-    targets = [app, app / 'Contents/Helpers/Acouplet Battery Publisher', app / 'Contents/Frameworks/SonyNativeHUD.dylib', *sparkle['code_targets'](app),
+    targets = [app, app / 'Contents/Helpers/Acouplet Battery Publisher', app / 'Contents/Frameworks/SonyNativeHUD.dylib', app / 'Contents/Helpers/SonyNativeHUDCheck', *sparkle['code_targets'](app),
                *[app / 'Contents/Helpers' / name for name in ['LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver']], *panes]
     code = {str(path.relative_to(package)): inspect_code(path, team) for path in targets}
     installer = inspect_installer(app, team)

@@ -35,6 +35,7 @@ if name == 'xcrun':
     helper.parent.mkdir(parents=True)
     hud = app / 'Contents/Frameworks/SonyNativeHUD.dylib'
     hud.parent.mkdir(parents=True)
+    hud_check = app / 'Contents/Helpers/SonyNativeHUDCheck'
     sparkle = app / 'Contents/Frameworks/Sparkle.framework'
     sparkle_codes = [sparkle / 'Versions/B/XPCServices/Installer.xpc', sparkle / 'Versions/B/Autoupdate', sparkle / 'Versions/B/Updater.app', sparkle]
     ldac_audio = app / 'Contents/Helpers/Acouplet Audio.app'
@@ -49,7 +50,7 @@ if name == 'xcrun':
     (sparkle / 'Resources/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString': '2.10.0'}))
     team = settings.get('DEVELOPMENT_TEAM', 'ABCDE12345')
     adhoc = settings['CODE_SIGN_IDENTITY'] == '-'
-    for bundle in (app, helper, hud, *sparkle_codes, *ldac_codes):
+    for bundle in (app, helper, hud, hud_check, *sparkle_codes, *ldac_codes):
         metadata = {'apple': not adhoc, 'team': 'not set' if adhoc else team,
                     'runtime': settings.get('ENABLE_HARDENED_RUNTIME') == 'YES',
                     'debuggable': settings.get('CODE_SIGN_INJECT_BASE_ENTITLEMENTS') != 'NO'}
@@ -69,6 +70,10 @@ if name == 'xcrun':
         if bundle == hud:
             if mode == 'different-hud-team': metadata['team'] = 'OTHER67890'
             if mode == 'missing-runtime-hud': metadata['runtime'] = False
+        if bundle == hud_check:
+            if mode == 'different-hud-check-team': metadata['team'] = 'OTHER67890'
+            if mode == 'missing-runtime-hud-check': metadata['runtime'] = False
+            if mode == 'debuggable-hud-check': metadata['debuggable'] = True
         if bundle == sparkle:
             if mode == 'different-sparkle-team': metadata['team'] = 'OTHER67890'
             if mode == 'missing-runtime-sparkle': metadata['runtime'] = False
@@ -97,7 +102,7 @@ if name == 'xcrun':
                 'SUVerifyUpdateBeforeExtraction': True, 'SURequireSignedFeed': True, 'SUSignedFeedFailureExpirationInterval': 0,
                 'SUEnableInstallerLauncherService': False, 'SUEnableDownloaderService': False, 'SUEnableSystemProfiling': False,
                 'SUEnableAutomaticChecks': True, 'SUAutomaticallyUpdate': False}))
-    for relative in ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Resources/Assets.car', 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput'):
+    for relative in ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput'):
         binary = app / relative
         binary.parent.mkdir(parents=True, exist_ok=True)
         binary.write_text(relative)
@@ -112,6 +117,7 @@ if name == 'xcrun':
     if mode == 'embedded-controls': controls.mkdir(parents=True)
     if mode == 'missing-helper': helper.with_suffix('.signature.json').unlink(); helper.unlink()
     if mode == 'missing-hud': hud.with_suffix('.signature.json').unlink(); hud.unlink()
+    if mode == 'missing-hud-check': hud_check.with_suffix('.signature.json').unlink(); hud_check.unlink()
 elif name == 'codesign':
     target = Path(args[-1])
     metadata_file = target / 'signature.json' if target.is_dir() else target.with_suffix('.signature.json')
@@ -268,12 +274,12 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
             assert '-allowProvisioningUpdates' not in builds[0], builds[0]
             if succeeds and identity != '-':
                 checks = [command for command in commands if '--test-requirement==anchor apple generic' in command]
-                assert [Path(command[-1]).name for command in checks] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], checks
+                assert [Path(command[-1]).name for command in checks] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], checks
         if succeeds:
             for notice in ('LICENSE', 'THIRD-PARTY-NOTICES.md'):
                 assert (root / '.build/Build/Products/Release/Acouplet.app/Contents/Resources' / notice).read_bytes() == (root / notice).read_bytes()
             entitlements = [command for command in commands if '--entitlements' in command]
-            assert [Path(command[-1]).name for command in entitlements] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], entitlements
+            assert [Path(command[-1]).name for command in entitlements] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], entitlements
             if local:
                 assert previous.read_text() == 'previous package'
                 assert archive.read_text() == 'previous archive'
@@ -305,7 +311,7 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
                 if not line.startswith('SHA256\t'): continue
                 _, digest, relative = line.split('\t')
                 assert hashlib.sha256((package / 'Acouplet.app' / relative).read_bytes()).hexdigest() == digest
-            assert receipt.count('SHA256\t') == 16
+            assert receipt.count('SHA256\t') == 17
             assert not (package / 'Acouplet LDAC Output.pkg').exists()
             assert (package / 'Acouplet.app/Contents/Resources/Acouplet LDAC Output.pkg').read_text() == 'driver-only installer'
             assert (package / 'Acouplet.app/Contents/MacOS/Acouplet').read_text() == 'resigned app'
@@ -360,7 +366,7 @@ for failure in ('missing-runtime-app', 'debuggable-app'):
 check('local-stage-receipt-without-archive', {}, local=True)
 check('local-ad-hoc-receipt-without-archive', {'CODE_SIGN_IDENTITY': '-'}, local=True)
 
-for failure in ('missing-helper', 'adhoc-helper', 'different-helper-team', 'missing-runtime-helper', 'debuggable-helper', 'sandboxed-helper', 'inherited-helper', 'extra-helper-entitlement', 'wrong-build', 'missing-hud', 'different-hud-team', 'missing-runtime-hud', 'different-sparkle-team', 'missing-runtime-sparkle'):
+for failure in ('missing-helper', 'adhoc-helper', 'different-helper-team', 'missing-runtime-helper', 'debuggable-helper', 'sandboxed-helper', 'inherited-helper', 'extra-helper-entitlement', 'wrong-build', 'missing-hud', 'different-hud-team', 'missing-runtime-hud', 'missing-hud-check', 'different-hud-check-team', 'missing-runtime-hud-check', 'debuggable-hud-check', 'different-sparkle-team', 'missing-runtime-sparkle'):
     check(failure, {'CODE_SIGN_IDENTITY': 'Apple Development'}, failure, False)
 check('counter-restored-from-installed', {}, 'counter-restore', local=True)
 check('counter-keeps-larger-persisted-build', {}, 'counter-persisted', local=True)

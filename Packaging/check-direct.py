@@ -108,11 +108,11 @@ with tempfile.TemporaryDirectory(prefix='acouplet-direct-check-') as directory:
         report = inspect_package(root, False, dmg)
         assert not report['blockers'] and report['stapled_tickets_verified']
         assert [args[-1] for args in calls if args[1:3] == ['stapler', 'validate']] == [str(root / 'Acouplet.app/Contents/Resources/Acouplet LDAC Output.pkg'), str(dmg)]
-        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'release.dmg'):
+        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'release.dmg'):
             for check in ('signature', 'developer-id', 'timestamp', 'team'):
                 failure = (check, name)
                 assert inspect_package(root, True, dmg)['blockers'], failure
-        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'):
+        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'):
             for check in ('runtime', 'debugger'):
                 failure = (check, name)
                 assert inspect_package(root, True, dmg)['blockers'], failure
@@ -220,7 +220,7 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True, a
         script.write_text(source)
         prepared = root / '.build/package/Acouplet'
         app = prepared / 'Acouplet.app'
-        for relative in ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Resources/Assets.car', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist'):
+        for relative in ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist'):
             target = app / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('original')
@@ -261,11 +261,12 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True, a
             if notarize:
                 notary_index = next(index for index, args in enumerate(commands) if args[0] == 'python3' and Path(args[1]).name == 'notarize-ldac-installer.py')
                 assert installer_index < notary_index < outer_index
-            assert signed == ['SonyNativeHUD.dylib', 'Acouplet Battery Publisher', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'Acouplet.app', 'Acouplet-0.22.dmg'], signed
+            assert signed == ['SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Acouplet Battery Publisher', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'Acouplet.app', 'Acouplet-0.22.dmg'], signed
             assert previous.read_text() == ('signed image' if notarize else 'previous release')
             assert any(args[:3] == ['xcrun', 'notarytool', 'submit'] for args in commands) == notarize
             assert (prepared / 'Build Receipt.txt').read_text() == 'original receipt'
             assert (app / 'Contents/Frameworks/SonyNativeHUD.dylib').read_text() == 'original'
+            assert (app / 'Contents/Helpers/SonyNativeHUDCheck').read_text() == 'original'
             assert not (app / 'Contents/Resources/DMGBackground.tiff').exists()
         else:
             assert previous.read_text() == 'previous release'

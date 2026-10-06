@@ -2,7 +2,6 @@ import Foundation
 #if !ACOUPLET_PUBLIC_APIS_ONLY
 import AppKit
 import Darwin
-import MachO
 import OSLog
 import SwiftUI
 #endif
@@ -29,37 +28,80 @@ struct SonyNoiseModeChange: Equatable {
 }
 
 #if !ACOUPLET_PUBLIC_APIS_ONLY
-enum SonyNativeHUDABI {
-    static let frameworkPath = "/System/Library/PrivateFrameworks/SystemBannerUI.framework/SystemBannerUI"
-    static let frameworkUUID = UUID(uuidString: "8C0AD32A-B8E6-374D-9096-C722751C57CD")!
+@MainActor
+final class SonyNativeHUDProbe {
+    static let shared = SonyNativeHUDProbe(executableURL:
+        Bundle.main.bundleURL.appending(path: "Contents/Helpers/SonyNativeHUDCheck"))
+    private let executableURL: URL
+    private let timeout: TimeInterval
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "dev.baglayan.Acouplet", category: "NoiseModeHUD")
+    private var result: Task<Bool, Never>?
+    private var completion: CheckedContinuation<Bool, Never>?
+    private var expiry: Task<Void, Never>?
 
-    static func supports(version: OperatingSystemVersion, build: String, uuid: UUID?) -> Bool {
-        version.majorVersion == 27 && version.minorVersion == 2 && version.patchVersion == 0 &&
-            build == "26B5091g" && uuid == frameworkUUID
+    init(executableURL: URL, timeout: TimeInterval = 8) {
+        self.executableURL = executableURL
+        self.timeout = timeout
     }
 
-    static func loadedFrameworkUUID() -> UUID? {
-        for index in 0..<_dyld_image_count() {
-            guard let name = _dyld_get_image_name(index),
-                  String(cString: name).hasPrefix("/System/Library/PrivateFrameworks/SystemBannerUI.framework/"),
-                  URL(fileURLWithPath: String(cString: name)).lastPathComponent == "SystemBannerUI",
-                  let header = _dyld_get_image_header(index), header.pointee.magic == MH_MAGIC_64 else { continue }
-            var command = UnsafeRawPointer(header).advanced(by: MemoryLayout<mach_header_64>.size)
-            for _ in 0..<header.pointee.ncmds {
-                let value = command.load(as: load_command.self)
-                if value.cmd == LC_UUID { return UUID(uuid: command.load(as: uuid_command.self).uuid) }
-                command = command.advanced(by: Int(value.cmdsize))
+    static func supports(version: OperatingSystemVersion) -> Bool {
+        version.majorVersion > 27 || (version.majorVersion == 27 && version.minorVersion >= 2)
+    }
+
+    func check() async -> Bool {
+        if let result { return await result.value }
+        let result = Task { await run() }
+        self.result = result
+        return await result.value
+    }
+
+    private func run() async -> Bool {
+        await withCheckedContinuation { completion in
+            self.completion = completion
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = executableURL
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = output
+            process.standardError = FileHandle.standardError
+            process.terminationHandler = { [weak self] process in
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                try? output.fileHandleForReading.close()
+                let status = process.terminationStatus
+                let passed = process.terminationReason == .exit && status == 0
+                    && data == Data("ACOUPLET_NATIVE_HUD_OK\n".utf8)
+                Task { @MainActor [weak self] in
+                    guard let self, self.completion != nil else { return }
+                    self.logger.info("Native indicator compatibility probe completed; passed=\(passed, privacy: .public), status=\(status, privacy: .public)")
+                    self.finish(passed)
+                }
+            }
+            do {
+                try process.run()
+                try? output.fileHandleForWriting.close()
+                expiry = Task { [weak self, timeout] in
+                    do { try await Task.sleep(for: .seconds(timeout)) }
+                    catch { return }
+                    guard let self else { return }
+                    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                    self.logger.error("Native indicator compatibility probe timed out")
+                    self.finish(false)
+                }
+            } catch {
+                process.terminationHandler = nil
+                try? output.fileHandleForReading.close()
+                try? output.fileHandleForWriting.close()
+                logger.error("Native indicator compatibility probe could not launch: \(error.localizedDescription, privacy: .public)")
+                finish(false)
             }
         }
-        return nil
     }
 
-    static func systemBuild() -> String? {
-        var size = 0
-        guard sysctlbyname("kern.osversion", nil, &size, nil, 0) == 0 else { return nil }
-        var value = [CChar](repeating: 0, count: size)
-        guard sysctlbyname("kern.osversion", &value, &size, nil, 0) == 0 else { return nil }
-        return String(decoding: value.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    private func finish(_ passed: Bool) {
+        expiry?.cancel()
+        expiry = nil
+        completion?.resume(returning: passed)
+        completion = nil
     }
 }
 
@@ -72,11 +114,23 @@ final class SonyNoiseModeHUD {
     private var fallbackPanel: NSPanel?
     private let fallbackLifetime = BannerLifetime()
     private var attemptedLoad = false
+    private var nativeCompatible = false
     private var menuVisible = false
     var onAvailable: () -> Void = {}
 
     init() {
         fallbackLifetime.onExpire = { [weak self] in self?.dismissFallback() }
+        #if arch(arm64)
+        guard SonyNativeHUDProbe.supports(version: ProcessInfo.processInfo.operatingSystemVersion) else { return }
+        #if DEBUG
+        if CommandLine.arguments.contains("--fallback-hud-preview") { return }
+        #endif
+        Task { [weak self] in
+            let compatible = await SonyNativeHUDProbe.shared.check()
+            guard let self else { return }
+            nativeCompatible = compatible
+        }
+        #endif
     }
 
     var anchorDescription: String {
@@ -230,6 +284,7 @@ final class SonyNoiseModeHUD {
             dismiss()
             return nil
         }
+        guard nativeCompatible, fallbackPanel?.isVisible != true else { return nil }
         if !attemptedLoad {
             attemptedLoad = true
             nativeHUD = loadNativeHUD()
@@ -246,18 +301,6 @@ final class SonyNoiseModeHUD {
         if CommandLine.arguments.contains("-ui-testing"), CommandLine.arguments.contains("--fallback-hud-preview") { return nil }
         #endif
         #if arch(arm64)
-        let version = ProcessInfo.processInfo.operatingSystemVersion
-        guard version.majorVersion == 27, version.minorVersion == 2, version.patchVersion == 0,
-              let build = SonyNativeHUDABI.systemBuild(), build == "26B5091g",
-              dlopen(SonyNativeHUDABI.frameworkPath, RTLD_NOW | RTLD_LOCAL) != nil else {
-            logger.info("Native mode indicator skipped; unsupported system build")
-            return nil
-        }
-        let uuid = SonyNativeHUDABI.loadedFrameworkUUID()
-        guard SonyNativeHUDABI.supports(version: version, build: build, uuid: uuid) else {
-            logger.error("Native mode indicator skipped; unsupported SystemBannerUI ABI")
-            return nil
-        }
         guard let url = Bundle.main.privateFrameworksURL?.appendingPathComponent("SonyNativeHUD.dylib"),
               let hud = NativeHUD(url: url) else {
             logger.error("Native mode indicator helper could not be loaded")

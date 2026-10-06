@@ -25,7 +25,7 @@ def check_bundle(artifact):
     if not executable.is_file():
         raise ValueError('Missing main executable')
     for path in artifact.rglob('*'):
-        if path.suffix in {'.prefPane', '.appex', '.xpc', '.driver'} or path.name in {'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'Sparkle.framework', 'Sparkle-LICENSE.txt', 'Autoupdate', 'Updater.app', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletAudio', 'Acouplet LDAC Output.pkg', 'LDAC-LICENSE.txt', 'LDAC-NOTICE.txt', 'Install.command', 'Uninstall Service.command'} or path.name.startswith('libldac') or path.suffix == '.command':
+        if path.suffix in {'.prefPane', '.appex', '.xpc', '.driver'} or path.name in {'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Sparkle.framework', 'Sparkle-LICENSE.txt', 'Autoupdate', 'Updater.app', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletAudio', 'Acouplet LDAC Output.pkg', 'LDAC-LICENSE.txt', 'LDAC-NOTICE.txt', 'Install.command', 'Uninstall Service.command'} or path.name.startswith('libldac') or path.suffix == '.command':
             raise ValueError(f'Excluded integration or installer in artifact: {path}')
     binaries = []
     for path in artifact.rglob('*'):

@@ -115,6 +115,7 @@ done
 signing_team="${DEVELOPMENT_TEAM:-}"
 helper="$build_app/Contents/Helpers/Acouplet Battery Publisher"
 hud="$build_app/Contents/Frameworks/SonyNativeHUD.dylib"
+hud_check="$build_app/Contents/Helpers/SonyNativeHUDCheck"
 sparkle="$build_app/Contents/Frameworks/Sparkle.framework"
 ldac_audio="$build_app/Contents/Helpers/Acouplet Audio.app"
 ldac_driver="$build_app/Contents/Helpers/AcoupletLDACOutput.driver"
@@ -125,7 +126,7 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ldac_driver/Co
     exit 1
 fi
 ldac_codes=("$build_app/Contents/Helpers/LDACSignaling" "$build_app/Contents/Helpers/LDACMediaTransport" "$build_app/Contents/Helpers/SonyAudioConnection" "$ldac_audio" "$ldac_driver")
-for signed_bundle in "$build_app" "$helper" "$hud" "$sparkle/Versions/B/XPCServices/Installer.xpc" "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app" "$sparkle" "${ldac_codes[@]}"; do
+for signed_bundle in "$build_app" "$helper" "$hud" "$hud_check" "$sparkle/Versions/B/XPCServices/Installer.xpc" "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app" "$sparkle" "${ldac_codes[@]}"; do
     signature="$(/usr/bin/codesign --display --verbose=2 "$signed_bundle" 2>&1)"
     signature_flags="$(print -r -- "$signature" | /usr/bin/sed -n 's/^CodeDirectory .*flags=[^(]*(\([^)]*\)).*/\1/p')"
     if [[ ",$signature_flags," != *,runtime,* ]]; then
@@ -211,7 +212,7 @@ if [[ "$local_update" == true ]]; then receipt="$package_dir/Local Build Receipt
     else
         print "Release app: Acouplet.app"
     fi
-    for relative in "Contents/MacOS/Acouplet" "Contents/Helpers/Acouplet Battery Publisher" "Contents/Frameworks/SonyNativeHUD.dylib" "Contents/Resources/Assets.car" "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater" "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer" "Contents/Helpers/LDACSignaling" "Contents/Helpers/LDACMediaTransport" "Contents/Helpers/SonyAudioConnection" "Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist" "Contents/Resources/Acouplet LDAC Output.pkg" "Contents/_CodeSignature/CodeResources"; do
+    for relative in "Contents/MacOS/Acouplet" "Contents/Helpers/Acouplet Battery Publisher" "Contents/Frameworks/SonyNativeHUD.dylib" "Contents/Helpers/SonyNativeHUDCheck" "Contents/Resources/Assets.car" "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater" "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer" "Contents/Helpers/LDACSignaling" "Contents/Helpers/LDACMediaTransport" "Contents/Helpers/SonyAudioConnection" "Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist" "Contents/Resources/Acouplet LDAC Output.pkg" "Contents/_CodeSignature/CodeResources"; do
         /usr/bin/cmp "$build_app/$relative" "$package_dir/Acouplet.app/$relative"
         digest="$(/usr/bin/shasum -a 256 "$build_app/$relative" | /usr/bin/awk '{print $1}')"
         print -r -- $'SHA256\t'"$digest"$'\t'"$relative"

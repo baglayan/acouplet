@@ -41,6 +41,7 @@ mkdir "$stage"
 app="$stage/Acouplet.app"
 /usr/bin/ditto "$repo_root/.build/package/Acouplet/Acouplet.app" "$app"
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --timestamp "$app/Contents/Frameworks/SonyNativeHUD.dylib"
+/usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --timestamp "$app/Contents/Helpers/SonyNativeHUDCheck"
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --timestamp --entitlements "$repo_root/Helpers/BatteryHelper.entitlements" --generate-entitlement-der "$app/Contents/Helpers/Acouplet Battery Publisher"
 sparkle="$app/Contents/Frameworks/Sparkle.framework"
 for sparkle_code in "$sparkle/Versions/B/XPCServices/Installer.xpc" "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app" "$sparkle"; do
@@ -62,7 +63,7 @@ fi
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --timestamp --entitlements "$release_dir/Direct.entitlements" --generate-entitlement-der "$app"
 /usr/bin/python3 "$repo_root/Packaging/check-distribution.py" "$stage" --signatures-only > "$release_dir/signatures.json"
 /bin/cp "$repo_root/.build/package/Acouplet/Build Receipt.txt" "$release_dir/Original Build Receipt.txt"
-for relative in 'Contents/MacOS/Acouplet' 'Contents/Helpers/Acouplet Battery Publisher' 'Contents/Frameworks/SonyNativeHUD.dylib' 'Contents/Resources/Assets.car' 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle' 'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate' 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater' 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer' 'Contents/Helpers/LDACSignaling' 'Contents/Helpers/LDACMediaTransport' 'Contents/Helpers/SonyAudioConnection' 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio' 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput' 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist' 'Contents/Resources/Acouplet LDAC Output.pkg' 'Contents/_CodeSignature/CodeResources'; do
+for relative in 'Contents/MacOS/Acouplet' 'Contents/Helpers/Acouplet Battery Publisher' 'Contents/Frameworks/SonyNativeHUD.dylib' 'Contents/Helpers/SonyNativeHUDCheck' 'Contents/Resources/Assets.car' 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle' 'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate' 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater' 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer' 'Contents/Helpers/LDACSignaling' 'Contents/Helpers/LDACMediaTransport' 'Contents/Helpers/SonyAudioConnection' 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio' 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput' 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist' 'Contents/Resources/Acouplet LDAC Output.pkg' 'Contents/_CodeSignature/CodeResources'; do
     /usr/bin/shasum -a 256 "$app/$relative"
 done > "$release_dir/Binary SHA256.txt"
 /usr/bin/ditto "$repo_root/.build/Build/Products/Release/Acouplet.app.dSYM" "$release_dir/Acouplet.app.dSYM"

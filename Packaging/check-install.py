@@ -394,13 +394,13 @@ for scenario in ('success', 'orphan-service', 'unexpected-agent', 'unexpected-lo
         assert (root / 'Preferences/dev.baglayan.Acouplet.plist').read_text() == 'preserve'
         print('uninstall-' + scenario + ': passed')
 
-for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-stage-changed', 'local-ldac-media-changed', 'local-audio-capture-changed', 'local-output-driver-changed', 'local-output-driver-info-changed', 'local-driver-installer-changed', 'local-resource-seal-changed'):
+for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-stage-changed', 'local-hud-check-changed', 'local-ldac-media-changed', 'local-audio-capture-changed', 'local-output-driver-changed', 'local-output-driver-info-changed', 'local-driver-installer-changed', 'local-resource-seal-changed'):
     with tempfile.TemporaryDirectory(prefix='acouplet-local-install-check-') as directory:
         root = Path(directory)
         mode = 'success' if scenario == 'running' else 'inactive-update'
         _, initial_state = fixture(root, mode)
         source = root / 'package/Acouplet.app'
-        binaries = ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Resources/Assets.car', 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist', 'Contents/Resources/Acouplet LDAC Output.pkg', 'Contents/_CodeSignature/CodeResources')
+        binaries = ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist', 'Contents/Resources/Acouplet LDAC Output.pkg', 'Contents/_CodeSignature/CodeResources')
         for relative in binaries[1:]:
             binary = source / relative
             binary.parent.mkdir(parents=True, exist_ok=True)
@@ -412,6 +412,7 @@ for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-sta
         (root / 'package/Local Build Receipt.txt').write_text('\n'.join(lines) + '\n')
         if scenario == 'local-release-changed': (release / binaries[0]).write_text('later build')
         if scenario == 'local-stage-changed': (source / binaries[1]).write_text('changed stage')
+        if scenario == 'local-hud-check-changed': (source / 'Contents/Helpers/SonyNativeHUDCheck').write_text('changed probe')
         if scenario == 'local-ldac-media-changed': (source / 'Contents/Helpers/LDACMediaTransport').write_text('changed encoder')
         if scenario == 'local-audio-capture-changed': (release / 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio').write_text('changed capture')
         if scenario == 'local-output-driver-changed': (source / 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput').write_text('changed driver')

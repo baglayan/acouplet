@@ -36,18 +36,91 @@ final class SonyNoiseModeHUDTests: XCTestCase {
     }
 
     #if !ACOUPLET_PUBLIC_APIS_ONLY
-    func testPrivateHUDRequiresTheVerifiedSystemAndFrameworkABI() {
-        let version = OperatingSystemVersion(majorVersion: 27, minorVersion: 2, patchVersion: 0)
-        XCTAssertTrue(SonyNativeHUDABI.supports(version: version, build: "26B5091g", uuid: SonyNativeHUDABI.frameworkUUID))
-        XCTAssertFalse(SonyNativeHUDABI.supports(version: version, build: "26B5091h", uuid: SonyNativeHUDABI.frameworkUUID))
-        XCTAssertFalse(SonyNativeHUDABI.supports(version: version, build: "26B5091g", uuid: UUID()))
-        XCTAssertFalse(SonyNativeHUDABI.supports(version: version, build: "26B5091g", uuid: nil))
-        XCTAssertFalse(SonyNativeHUDABI.supports(version: OperatingSystemVersion(majorVersion: 27, minorVersion: 3, patchVersion: 0),
-                                               build: "26B5091g", uuid: SonyNativeHUDABI.frameworkUUID))
-        for version in [OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0),
-                        OperatingSystemVersion(majorVersion: 15, minorVersion: 7, patchVersion: 0)] {
-            XCTAssertFalse(SonyNativeHUDABI.supports(version: version, build: "26B5091g", uuid: SonyNativeHUDABI.frameworkUUID))
+    @MainActor
+    func testNativeHUDProbeAllowsFutureSystemVersionsAboveItsDeploymentTarget() {
+        for version in [OperatingSystemVersion(majorVersion: 27, minorVersion: 2, patchVersion: 0),
+                        OperatingSystemVersion(majorVersion: 27, minorVersion: 2, patchVersion: 1),
+                        OperatingSystemVersion(majorVersion: 27, minorVersion: 3, patchVersion: 0),
+                        OperatingSystemVersion(majorVersion: 28, minorVersion: 0, patchVersion: 0)] {
+            XCTAssertTrue(SonyNativeHUDProbe.supports(version: version))
         }
+        for version in [OperatingSystemVersion(majorVersion: 27, minorVersion: 1, patchVersion: 9),
+                        OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0),
+                        OperatingSystemVersion(majorVersion: 15, minorVersion: 7, patchVersion: 0)] {
+            XCTAssertFalse(SonyNativeHUDProbe.supports(version: version))
+        }
+    }
+
+    @MainActor
+    func testNativeHUDProbeRequiresCompletedChecksAndCleanExit() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appending(path: "probe")
+        for (body, expected) in [("echo ACOUPLET_NATIVE_HUD_OK", true),
+                                 ("echo ACOUPLET_NATIVE_HUD_OK; exit 7", false),
+                                 ("echo incomplete", false),
+                                 ("exit 0", false),
+                                 ("kill -KILL $$", false)] {
+            try ("#!/bin/sh\n" + body + "\n").write(to: executable, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+            let passed = await SonyNativeHUDProbe(executableURL: executable).check()
+            XCTAssertEqual(passed, expected, body)
+        }
+        try FileManager.default.removeItem(at: executable)
+        let missing = await SonyNativeHUDProbe(executableURL: executable).check()
+        XCTAssertFalse(missing)
+    }
+
+    @MainActor
+    func testNativeHUDProbeSharesOneAttemptAndRetainsSuccessOrFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appending(path: "probe")
+        for (body, expected) in [("echo ACOUPLET_NATIVE_HUD_OK", true), ("exit 1", false)] {
+            let script = "#!/bin/sh\n/bin/rm -- \"$0\"\n/bin/sleep 0.1\n" + body + "\n"
+            try script.write(to: executable, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+            let probe = SonyNativeHUDProbe(executableURL: executable)
+            async let first = probe.check()
+            async let second = probe.check()
+            let results = await (first, second)
+            XCTAssertEqual(results.0, expected)
+            XCTAssertEqual(results.1, expected)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: executable.path))
+            let repeated = await probe.check()
+            XCTAssertEqual(repeated, expected)
+        }
+    }
+
+    @MainActor
+    func testNativeHUDProbeTimesOutWithoutBlockingTheMainActorAndKillsTheChild() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appending(path: "probe")
+        let pidFile = directory.appending(path: "pid")
+        let script = "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\nexec /bin/sleep 30\n"
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let probe = SonyNativeHUDProbe(executableURL: executable, timeout: 0.3)
+        let start = ContinuousClock.now
+        let attempt = Task { await probe.check() }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertLessThan(start.duration(to: .now), .seconds(1))
+        let passed = await attempt.value
+        XCTAssertFalse(passed)
+        XCTAssertLessThan(start.duration(to: .now), .seconds(2))
+        let pid = try XCTUnwrap(Int32(String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        for _ in 0..<20 {
+            if kill(pid, 0) == -1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(kill(pid, 0), -1)
+        XCTAssertEqual(errno, ESRCH)
+        let repeated = await probe.check()
+        XCTAssertFalse(repeated)
     }
 
     @MainActor
