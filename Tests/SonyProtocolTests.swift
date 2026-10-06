@@ -600,7 +600,7 @@ final class SonyProtocolTests: XCTestCase {
                                        beginConnection: true, expectedBLEHash: "ABCDEF12")
         XCTAssertEqual(controller.protocolInformation?.generation, .v1)
         XCTAssertFalse(controller.isReady)
-        XCTAssertEqual(controller.statusText, String(localized: "The older Sony control protocol requires a classic Bluetooth connection."))
+        XCTAssertEqual(controller.statusText, String(localized: "These headphones need a Bluetooth Classic connection for their controls."))
         XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
         XCTAssertNil(controller.retrySecondsRemaining)
         let frames = controller.simulatedTransmittedFrames

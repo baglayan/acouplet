@@ -217,6 +217,7 @@ struct SettingsView: View {
                 LabeledContent("Mac audio output", value: audioOutputName)
                     .accessibilityIdentifier("audio.macOutput")
                 Link("Sound Settings…", destination: URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension")!)
+                    .foregroundStyle(Color(nsColor: .controlAccentColor))
                 if headphones.supportsConnectionMode || headphones.connectionTransition != nil {
                     ConnectionModeControl()
                         .disabled(headphones.isRunningHeadphoneTest || headphones.powerOffState != nil)
@@ -346,7 +347,7 @@ struct SettingsView: View {
                             .textSelection(.enabled)
                     }
                 }
-                LabeledContent("Sony control") {
+                LabeledContent("Headphone controls") {
                     Text(headphones.isReady && headphones.powerOffState == nil ? String(localized: "Ready") : headphones.statusText).foregroundStyle(.primary)
                 }
             }

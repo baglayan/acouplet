@@ -227,7 +227,7 @@ final class SonyPowerOffTests: XCTestCase {
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
                 payload: [0x01, 0, 0x03, 0, 0x30, 0x18, 1, 0]), beginConnection: true)
             acknowledgeAll(controller)
-            XCTAssertEqual(controller.linkState, .failed(String(localized: "These headphones do not support the required Sony control protocol.")))
+            XCTAssertEqual(controller.linkState, .failed(String(localized: "Acouplet does not support this device’s control protocol.")))
             XCTAssertNil(controller.powerOffState)
             XCTAssertFalse(controller.isDeviceConnected)
             XCTAssertEqual(controller.deviceModel, .wfXM5)

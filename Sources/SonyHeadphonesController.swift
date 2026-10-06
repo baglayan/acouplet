@@ -107,6 +107,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         var timedOut = false
     }
 
+    private struct ClassicWrite {
+        let data: NSMutableData
+        let channel: IOBluetoothRFCOMMChannel
+        let session: UInt64
+        let waitsForResponse: Bool
+        let timeout: DispatchWorkItem
+        let completion: () -> Void
+    }
+
     private struct MultipointConnection {
         let device: IOBluetoothDevice?
         let address: String
@@ -626,6 +635,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var serviceDiscoveries: [UUID: ServiceDiscovery] = [:]
     var pairedDeviceInventory: [IOBluetoothDevice]?
     private var channel: IOBluetoothRFCOMMChannel?
+    private var classicWrites: [UInt: ClassicWrite] = [:]
+    private var nextClassicWriteID: UInt = 0
+    private var classicIncomingData = Data()
     private var bleTransport: SonyBLETransport?
     private var expectedBLEHash: String?
     private var controlSession: UInt64 = 0
@@ -906,6 +918,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     func simulateHandshakeTimeout() { handshakeTimeoutWorkItem?.perform() }
+
+    func simulateClassicWriteTimeout() {
+        guard isSimulated else { return }
+        classicWrites.values.first(where: { $0.session == controlSession })?.timeout.perform()
+    }
 
     func simulateConnectionModeTimeout() {
         guard isSimulated else { return }
@@ -3874,7 +3891,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         var channelID: BluetoothRFCOMMChannelID = 0
         guard record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess else {
-            fail(String(localized: "Could not resolve Sony control channel"))
+            fail(String(localized: "Could not open the headphones’ Bluetooth control connection."))
             return
         }
         var openedChannel: IOBluetoothRFCOMMChannel?
@@ -3929,7 +3946,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     private func sonyServiceUnavailable(on device: IOBluetoothDevice, automatically: Bool) {
         if multipointTransition?.phase != .recovering, openSavedBluetoothLE(for: device, automatically: automatically) { return }
-        fail(String(localized: "Sony control service is unavailable"))
+        fail(String(localized: "Could not connect to the headphones’ controls."))
     }
 
     @MainActor
@@ -3991,6 +4008,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         controlAddresses = []
         let closingChannel = channel
         channel = nil
+        classicIncomingData.removeAll(keepingCapacity: false)
+        for write in classicWrites.values { write.timeout.cancel() }
         closingChannel?.close()
         handshakeTimeoutWorkItem?.cancel()
         handshakeTimeoutWorkItem = nil
@@ -4090,6 +4109,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         inventoryRead = nil
         announcedAudioSourceAddress = nil
         controlSession += 1
+        classicIncomingData.removeAll(keepingCapacity: false)
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         nativeBatterySnapshot = nil
         #endif
@@ -4950,7 +4970,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     private func write(_ frame: SonyFrame, isCurrent: (() -> Bool)? = nil, onCancelled: @escaping () -> Void = {},
                        onQueued: (() -> Void)? = nil, completion: @escaping () -> Void = {}) -> Bool {
-        if isSimulated {
+        if isSimulated, channel == nil {
             #if DEBUG
             let completed = { [weak self] in
                 guard isCurrent?() != false else { onCancelled(); return }
@@ -4980,17 +5000,42 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         guard isCurrent?() != false else { onCancelled(); return true }
         guard let channel else { return false }
-        let result = data.withUnsafeBytes { bytes -> IOReturn in
-            guard let baseAddress = bytes.baseAddress else { return kIOReturnBadArgument }
-            return channel.writeSync(UnsafeMutableRawPointer(mutating: baseAddress), length: UInt16(data.count))
+        guard data.count <= Int(channel.getMTU()), classicWrites.count < 64 else {
+            fail(String(localized: "Could not send to headphones (\(kIOReturnNoSpace))"))
+            return false
         }
+        nextClassicWriteID += 1
+        let identifier = nextClassicWriteID
+        let session = controlSession
+        let buffer = NSMutableData(data: data)
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.controlSession == session, self.classicWrites[identifier] != nil else { return }
+            self.fail(String(localized: "Could not send to headphones (\(kIOReturnTimeout))"))
+        }
+        classicWrites[identifier] = ClassicWrite(data: buffer, channel: channel, session: session, waitsForResponse: frame.type != 0x01,
+                                                timeout: timeout, completion: completion)
+        let result = channel.writeAsync(buffer.mutableBytes, length: UInt16(buffer.length),
+                                        refcon: UnsafeMutableRawPointer(bitPattern: identifier))
         guard result == kIOReturnSuccess else {
+            classicWrites.removeValue(forKey: identifier)
             fail(String(localized: "Could not send to headphones (\(result))"))
             return false
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
         onQueued?()
-        completion()
         return true
+    }
+
+    private func receiveClassic(_ data: Data) {
+        if classicWrites.values.contains(where: { $0.session == controlSession && $0.waitsForResponse }) {
+            guard classicIncomingData.count + data.count <= SonyFrameStream.maximumFrameLength else {
+                fail(String(localized: "Could not send to headphones (\(kIOReturnNoSpace))"))
+                return
+            }
+            classicIncomingData.append(data)
+        } else {
+            receive(data)
+        }
     }
 
     private func receive(_ data: Data) {
@@ -5418,8 +5463,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             protocolVersion = info.version
             guard info.supportsTable1, info.generation != .v1 || !usesBluetoothLE else {
                 rejectUnsupportedProtocol(info.generation == .v1
-                    ? String(localized: "The older Sony control protocol requires a classic Bluetooth connection.")
-                    : String(localized: "These headphones do not support the required Sony control protocol."))
+                    ? String(localized: "These headphones need a Bluetooth Classic connection for their controls.")
+                    : String(localized: "Acouplet does not support this device’s control protocol."))
                 return
             }
             if info.generation == .v1 {
@@ -6699,26 +6744,52 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     @objc nonisolated
     func rfcommChannelData(_ rfcommChannel: IOBluetoothRFCOMMChannel, data dataPointer: UnsafeMutableRawPointer, length dataLength: Int) {
         let copied = Data(bytes: dataPointer, count: dataLength)
-        Task { @MainActor in
-            guard channel === rfcommChannel else { return }
-            receive(copied)
+        DispatchQueue.main.async {
+            guard self.channel === rfcommChannel else { return }
+            self.receiveClassic(copied)
+        }
+    }
+
+    @objc nonisolated
+    func rfcommChannelWriteComplete(_ rfcommChannel: IOBluetoothRFCOMMChannel,
+                                    refcon: UnsafeMutableRawPointer?, status: IOReturn) {
+        let identifier = UInt(bitPattern: refcon)
+        DispatchQueue.main.async {
+            guard let write = self.classicWrites.removeValue(forKey: identifier) else { return }
+            write.timeout.cancel()
+            guard self.channel === rfcommChannel, self.controlSession == write.session else { return }
+            guard status == kIOReturnSuccess else {
+                self.fail(String(localized: "Could not send to headphones (\(status))"))
+                return
+            }
+            write.completion()
+            guard self.channel === rfcommChannel, self.controlSession == write.session,
+                  !self.classicIncomingData.isEmpty,
+                  !self.classicWrites.values.contains(where: { $0.session == self.controlSession && $0.waitsForResponse }) else { return }
+            let pending = self.classicIncomingData
+            self.classicIncomingData.removeAll(keepingCapacity: false)
+            self.receive(pending)
         }
     }
 
     @objc nonisolated
     func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel) {
-        Task { @MainActor in
-            guard channel === rfcommChannel else { return }
-            closeSonyLink()
-            isDeviceConnected = device?.isConnected() ?? false
+        DispatchQueue.main.async {
+            for (identifier, write) in self.classicWrites where write.channel === rfcommChannel {
+                write.timeout.cancel()
+                self.classicWrites[identifier] = nil
+            }
+            guard self.channel === rfcommChannel else { return }
+            self.closeSonyLink()
+            self.isDeviceConnected = self.device?.isConnected() ?? false
             Self.logger.info("Sony control link closed; Classic connected at callback=\(self.isDeviceConnected)")
-            if isDeviceConnected {
-                linkState = .controlBusy
-                lastErrorMessage = String(localized: "Sony controls disconnected.")
-                scheduleRetry()
+            if self.isDeviceConnected {
+                self.linkState = .controlBusy
+                self.lastErrorMessage = String(localized: "Sony controls disconnected.")
+                self.scheduleRetry()
             } else {
-                linkState = .disconnected
-                if multipointTransition?.phase == .recovering { scheduleMultipointRecovery() }
+                self.linkState = .disconnected
+                if self.multipointTransition?.phase == .recovering { self.scheduleMultipointRecovery() }
             }
         }
     }

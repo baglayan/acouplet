@@ -3865,19 +3865,19 @@
         }
       }
     },
-    "Could not resolve Sony control channel": {
+    "Could not open the headphones’ Bluetooth control connection.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony denetim kanalı belirlenemedi"
+            "value": "Kulaklığın Bluetooth denetim bağlantısı açılamadı."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not resolve Sony control channel"
+            "value": "Could not open the headphones’ Bluetooth control connection."
           }
         }
       }
@@ -10631,19 +10631,19 @@
         }
       }
     },
-    "Sony BLE control characteristics are unavailable.": {
+    "Could not set up the headphones’ Bluetooth control connection.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE denetim karakteristikleri kullanılamıyor."
+            "value": "Kulaklığın Bluetooth denetim bağlantısı kurulamadı."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE control characteristics are unavailable."
+            "value": "Could not set up the headphones’ Bluetooth control connection."
           }
         }
       }
@@ -10665,19 +10665,19 @@
         }
       }
     },
-    "Sony BLE control services changed. Reconnect to continue.": {
+    "The headphones’ Bluetooth control connection changed. Reconnect to continue.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE denetim servisleri değişti. Sürdürmek için yeniden bağlanın."
+            "value": "Kulaklığın Bluetooth denetim bağlantısı değişti. Devam etmek için yeniden bağlanın."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony BLE control services changed. Reconnect to continue."
+            "value": "The headphones’ Bluetooth control connection changed. Reconnect to continue."
           }
         }
       }
@@ -10767,19 +10767,19 @@
         }
       }
     },
-    "Sony control": {
+    "Headphone controls": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony denetimi"
+            "value": "Kulaklık denetimleri"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony control"
+            "value": "Headphone controls"
           }
         }
       }
@@ -10801,19 +10801,19 @@
         }
       }
     },
-    "Sony control service is unavailable": {
+    "Could not connect to the headphones’ controls.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony denetim servisi kullanılamıyor"
+            "value": "Kulaklığın denetimlerine bağlanılamadı."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sony control service is unavailable"
+            "value": "Could not connect to the headphones’ controls."
           }
         }
       }
@@ -12771,19 +12771,19 @@
         }
       }
     },
-    "The older Sony control protocol requires a classic Bluetooth connection.": {
+    "These headphones need a Bluetooth Classic connection for their controls.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Eski Sony denetim protokolü Classic Bluetooth bağlantısı gerektiriyor."
+            "value": "Bu kulaklığın denetimleri için Bluetooth Classic bağlantısı gerekiyor."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The older Sony control protocol requires a classic Bluetooth connection."
+            "value": "These headphones need a Bluetooth Classic connection for their controls."
           }
         }
       }
@@ -13247,19 +13247,19 @@
         }
       }
     },
-    "These headphones do not support the required Sony control protocol.": {
+    "Acouplet does not support this device’s control protocol.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bu kulaklıklar gerekli Sony denetim protokolünü desteklemiyor."
+            "value": "Acouplet bu aygıtın denetim protokolünü desteklemiyor."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "These headphones do not support the required Sony control protocol."
+            "value": "Acouplet does not support this device’s control protocol."
           }
         }
       }
@@ -13349,19 +13349,19 @@
         }
       }
     },
-    "This connection does not expose Sony BLE controls.": {
+    "The headphones’ controls are unavailable over Bluetooth LE.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bu bağlantı Sony BLE denetimlerini sunmuyor."
+            "value": "Kulaklığın denetimlerine Bluetooth LE üzerinden erişilemiyor."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This connection does not expose Sony BLE controls."
+            "value": "The headphones’ controls are unavailable over Bluetooth LE."
           }
         }
       }

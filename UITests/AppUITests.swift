@@ -58,6 +58,47 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testSoundSettingsUsesSystemAccent() throws {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for (appearance, language, accent) in [("light", "en", "0"), ("dark", "tr", "0"),
+                                                ("light", "tr", "3"), ("dark", "en", "3")] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--\(appearance)-appearance",
+                                   "-AppleAccentColor", accent, "-AppleLanguages", "(\(language))"]
+            app.launch()
+            app.typeKey(",", modifierFlags: .command)
+            let window = app.windows["com_apple_SwiftUI_Settings_window"]
+            XCTAssertTrue(window.waitForExistence(timeout: 5))
+            let tab = window.toolbars.buttons[language == "tr" ? "Kulaklıklar" : "Headphones"]
+            XCTAssertTrue(tab.waitForExistence(timeout: 3))
+            tab.click()
+            let label = language == "tr" ? "Ses Ayarları…" : "Sound Settings…"
+            let link = window.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
+            XCTAssertTrue(link.waitForExistence(timeout: 3))
+            XCTAssertTrue(link.isHittable)
+            let screenshot = link.screenshot()
+            captureGalleryScreenshot(screenshot, named: "Sound Settings accent — \(appearance), \(language), \(accent)")
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(data: screenshot.pngRepresentation))
+            var accentPixels = 0
+            var bluePixels = 0
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+                    if accent == "0" {
+                        if color.redComponent > color.blueComponent + 0.2 && color.redComponent > color.greenComponent + 0.2 { accentPixels += 1 }
+                    } else {
+                        if color.greenComponent > color.redComponent + 0.1 && color.greenComponent > color.blueComponent + 0.1 { accentPixels += 1 }
+                    }
+                    if color.blueComponent > color.redComponent + 0.2 && color.blueComponent > color.greenComponent + 0.1 { bluePixels += 1 }
+                }
+            }
+            XCTAssertGreaterThan(accentPixels, 20)
+            XCTAssertGreaterThan(accentPixels, bluePixels)
+            app.terminate()
+        }
+    }
+
+    @MainActor
     func testChargingCaseUsesOfficialOpenCaseArtwork() {
         let app = XCUIApplication()
         defer { app.terminate() }

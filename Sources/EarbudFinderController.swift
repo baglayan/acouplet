@@ -21,6 +21,7 @@ final class EarbudFinderController: ObservableObject {
     @Published private(set) var wearingAuthorization: WearingAuthorization?
 
     private static let verifiedFirmware: [SonyDeviceModel: Set<String>] = [.wfXM5: ["6.1.0"]]
+    private static let logger = Logger(subsystem: "dev.baglayan.Acouplet", category: "EarbudFinding")
     private static let authorizationLogger = Logger(subsystem: "dev.baglayan.Acouplet", category: "EarbudFindingAuthorization")
 
     static func isSupported(model: SonyDeviceModel?, firmware: String?) -> Bool {
@@ -380,6 +381,7 @@ final class EarbudFinderController: ObservableObject {
 
     private func begin(_ target: FastPairRingTarget) {
         guard canPlay(target) else { return }
+        Self.logger.notice("Locating sound requested; target=\(target.rawValue) left_connected=\(self.headphones?.audioFeatures.leftConnected == true) right_connected=\(self.headphones?.audioFeatures.rightConnected == true)")
         stream.reset()
         requiresWearingCheck = headphones?.wearingStatus.isSupported == true
         session = EarbudFindingSession(target: target, timeoutSeconds: 30)
@@ -470,8 +472,12 @@ final class EarbudFinderController: ObservableObject {
                 if packet.group == 0x04 || packet.group == 0xFF { stop() }
                 continue
             }
-            if case .rejection = response, session?.phase == .starting {
-                message = String(localized: "The earbuds declined the locating-sound request.")
+            if case .rejection(let reason, let status) = response {
+                let components = status.map { String($0.components.rawValue) } ?? "unknown"
+                Self.logger.notice("Locating sound rejected; reason=\(reason.rawValue) components=\(components, privacy: .public)")
+                if session?.phase == .starting {
+                    message = String(localized: "The earbuds declined the locating-sound request.")
+                }
             }
             if case .status(let status) = response, let bytes = status.acknowledgement.encoded {
                 if !send(bytes) {

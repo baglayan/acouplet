@@ -235,7 +235,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
         guard target === peripheral else { return }
         if let error { fail(error.localizedDescription); return }
         guard let service = target.services?.first(where: { $0.uuid == Self.serviceUUID }) else {
-            fail(String(localized: "This connection does not expose Sony BLE controls."))
+            fail(String(localized: "The headphones’ controls are unavailable over Bluetooth LE."))
             return
         }
         target.discoverCharacteristics([Self.writeUUID, Self.notifyUUID, Self.lengthUUID], for: service)
@@ -243,7 +243,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
 
     func peripheral(_ target: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
         guard target === peripheral, invalidatedServices.contains(where: { $0.uuid == Self.serviceUUID }) else { return }
-        fail(String(localized: "Sony BLE control services changed. Reconnect to continue."))
+        fail(String(localized: "The headphones’ Bluetooth control connection changed. Reconnect to continue."))
     }
 
     func peripheral(_ target: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
@@ -253,7 +253,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
         guard let writer = characteristics.first(where: { $0.uuid == Self.writeUUID }), writer.properties.contains(.writeWithoutResponse),
               let notifier = characteristics.first(where: { $0.uuid == Self.notifyUUID }), notifier.properties.contains(.notify),
               let length = characteristics.first(where: { $0.uuid == Self.lengthUUID }), length.properties.contains(.read) else {
-            fail(String(localized: "Sony BLE control characteristics are unavailable."))
+            fail(String(localized: "Could not set up the headphones’ Bluetooth control connection."))
             return
         }
         writeCharacteristic = writer

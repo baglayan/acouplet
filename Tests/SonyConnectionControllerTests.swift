@@ -4,6 +4,150 @@ import IOBluetooth
 
 final class SonyConnectionControllerTests: XCTestCase {
     @MainActor
+    func testPausedClassicWriteKeepsMainQueueResponsiveAndTimesOut() async throws {
+        let channel = DeferredRFCOMMChannel()
+        let controller = await openClassicController(channel: channel)
+        defer { controller.simulateControlLoss() }
+        let write = try XCTUnwrap(channel.writes.first)
+        XCTAssertEqual(SonyFrameCodec.decode(write.data)?.payload, [0x00, 0x00])
+        XCTAssertEqual(channel.synchronousWrites, 0)
+        XCTAssertEqual(controller.linkState, .handshaking)
+
+        let responsive = expectation(description: "Main queue runs while the device has not completed its write")
+        DispatchQueue.main.async { responsive.fulfill() }
+        await fulfillment(of: [responsive], timeout: 1)
+        XCTAssertEqual(Data(bytes: write.buffer, count: write.data.count), write.data)
+
+        controller.simulateClassicWriteTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        guard case .failed = controller.linkState else { return XCTFail("A stalled write must fail the control session") }
+        XCTAssertEqual(channel.closeCount, 1)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
+        let state = controller.linkState
+        controller.rfcommChannelWriteComplete(channel, refcon: write.refcon, status: kIOReturnSuccess)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.linkState, state)
+        XCTAssertEqual(channel.writes.count, 1)
+    }
+
+    @MainActor
+    func testClassicReplyBeforeWriteCompletionPreservesAcknowledgmentAndCommandOrder() async throws {
+        let channel = DeferredRFCOMMChannel()
+        let controller = await openClassicController(channel: channel)
+        defer { controller.simulateControlLoss() }
+        let write = try XCTUnwrap(channel.writes.first)
+        let acknowledgment = SonyFrameCodec.encode(type: 0x01, sequence: 1, payload: [])
+        let reply = SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x01, 0x00, 0x03, 0x00, 0x30, 0x18, 0x00, 0x00])
+        var received = acknowledgment + reply
+        received.withUnsafeMutableBytes { bytes in
+            controller.rfcommChannelData(channel, data: bytes.baseAddress!, length: bytes.count)
+        }
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(channel.writes.count, 1)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x00, 0x00])
+
+        controller.rfcommChannelWriteComplete(channel, refcon: write.refcon, status: kIOReturnSuccess)
+        for _ in 0..<4 { await Task.yield() }
+        let frames = channel.writes.compactMap { SonyFrameCodec.decode($0.data) }
+        XCTAssertEqual(frames.prefix(2).map(\.type), [0x0C, 0x01])
+        XCTAssertEqual(frames.last?.payload, [0x04, 0x01])
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x04, 0x01])
+        XCTAssertEqual(channel.synchronousWrites, 0)
+    }
+
+    @MainActor
+    func testClassicWriteCallbacksFromClosedSessionCannotAffectReplacement() async throws {
+        let oldChannel = DeferredRFCOMMChannel()
+        let controller = await openClassicController(channel: oldChannel)
+        defer { controller.simulateControlLoss() }
+        let oldWrite = try XCTUnwrap(oldChannel.writes.first)
+        controller.simulateControlLoss()
+        XCTAssertEqual(Data(bytes: oldWrite.buffer, count: oldWrite.data.count), oldWrite.data)
+
+        let newChannel = DeferredRFCOMMChannel()
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        device.channel = newChannel
+        controller.simulateSonyLink(to: device)
+        controller.rfcommChannelOpenComplete(newChannel, status: kIOReturnSuccess)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(newChannel.writes.count, 1)
+        let session = controller.simulatedControlSession
+
+        controller.rfcommChannelWriteComplete(oldChannel, refcon: oldWrite.refcon, status: kIOReturnError)
+        controller.rfcommChannelClosed(oldChannel)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.linkState, .handshaking)
+        XCTAssertEqual(newChannel.closeCount, 0)
+        XCTAssertEqual(newChannel.writes.count, 1)
+        controller.simulateClassicWriteTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        guard case .failed = controller.linkState else { return XCTFail("The replacement write must retain its own timeout") }
+        XCTAssertEqual(newChannel.closeCount, 1)
+    }
+
+    @MainActor
+    func testClassicChannelCloseReleasesUncompletedWriteWithoutClosingReplacement() async throws {
+        var oldChannel: DeferredRFCOMMChannel? = DeferredRFCOMMChannel()
+        weak var retainedChannel = oldChannel
+        let controller = await openClassicController(channel: try XCTUnwrap(oldChannel))
+        defer { controller.simulateControlLoss() }
+        controller.simulateControlLoss()
+        let newChannel = DeferredRFCOMMChannel()
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        device.channel = newChannel
+        controller.simulateSonyLink(to: device)
+        controller.rfcommChannelOpenComplete(newChannel, status: kIOReturnSuccess)
+        for _ in 0..<4 { await Task.yield() }
+        let session = controller.simulatedControlSession
+        oldChannel = nil
+        XCTAssertNotNil(retainedChannel)
+
+        if let retainedChannel { controller.rfcommChannelClosed(retainedChannel) }
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertNil(retainedChannel)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.linkState, .handshaking)
+        XCTAssertEqual(newChannel.closeCount, 0)
+        XCTAssertEqual(newChannel.writes.count, 1)
+    }
+
+    @MainActor
+    func testClassicWriteFailureClosesSessionWithoutWaitingForCompletion() async {
+        for immediate in [true, false] {
+            let channel = DeferredRFCOMMChannel()
+            channel.writeStatus = immediate ? kIOReturnError : kIOReturnSuccess
+            let controller = await openClassicController(channel: channel)
+            defer { controller.simulateControlLoss() }
+            XCTAssertEqual(channel.writes.count, 1)
+            if !immediate {
+                controller.rfcommChannelWriteComplete(channel, refcon: channel.writes.first?.refcon, status: kIOReturnError)
+                for _ in 0..<4 { await Task.yield() }
+            }
+            guard case .failed = controller.linkState else { XCTFail("A failed write must close the control session"); continue }
+            XCTAssertEqual(channel.closeCount, 1)
+            XCTAssertNil(controller.simulatedPendingFrame)
+            XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
+            XCTAssertEqual(channel.synchronousWrites, 0)
+        }
+    }
+
+    @MainActor
+    private func openClassicController(channel: DeferredRFCOMMChannel) async -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        device.channel = channel
+        controller.simulateSonyLink(to: device)
+        controller.rfcommChannelOpenComplete(channel, status: kIOReturnSuccess)
+        for _ in 0..<4 { await Task.yield() }
+        return controller
+    }
+
+    @MainActor
     func testVisibleControlsRetryReopensOnlyAnIdleConnectedControlLink() {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         defer { controller.simulateControlLoss() }
@@ -125,7 +269,7 @@ final class SonyConnectionControllerTests: XCTestCase {
             for _ in 0..<4 { await Task.yield() }
             XCTAssertEqual(device.discoveryCallbacks.count, 1)
             XCTAssertTrue(device.openedChannels.isEmpty)
-            XCTAssertEqual(controller.linkState, .failed(String(localized: "Sony control service is unavailable")))
+            XCTAssertEqual(controller.linkState, .failed(String(localized: "Could not connect to the headphones’ controls.")))
             XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
         }
     }
@@ -1581,6 +1725,7 @@ private final class ServiceDiscoveryRecord: IOBluetoothSDPServiceRecord {
 private final class ServiceDiscoveryDevice: IOBluetoothDevice {
     var connected = true
     var service: IOBluetoothSDPServiceRecord?
+    var channel: IOBluetoothRFCOMMChannel?
     var discoveryStartStatus = kIOReturnSuccess
     var discoveryCallbacks: [AnyObject] = []
     var openedChannels: [BluetoothRFCOMMChannelID] = []
@@ -1601,10 +1746,43 @@ private final class ServiceDiscoveryDevice: IOBluetoothDevice {
     override func openRFCOMMChannelAsync(_ channel: AutoreleasingUnsafeMutablePointer<IOBluetoothRFCOMMChannel?>!,
                                         withChannelID channelID: BluetoothRFCOMMChannelID, delegate: Any!) -> IOReturn {
         openedChannels.append(channelID)
+        channel.pointee = self.channel
         return kIOReturnSuccess
     }
 
     func complete(_ index: Int = 0, status: IOReturn = kIOReturnSuccess) {
         discoveryCallbacks[index].sdpQueryComplete?(self, status: status)
+    }
+}
+
+private final class DeferredRFCOMMChannel: IOBluetoothRFCOMMChannel {
+    struct Write {
+        let data: Data
+        let buffer: UnsafeMutableRawPointer
+        let refcon: UnsafeMutableRawPointer?
+    }
+
+    var writes: [Write] = []
+    var writeStatus = kIOReturnSuccess
+    var synchronousWrites = 0
+    var closeCount = 0
+
+    override func getMTU() -> BluetoothRFCOMMMTU { 1024 }
+    override func isTransmissionPaused() -> Bool { true }
+
+    override func writeAsync(_ data: UnsafeMutableRawPointer!, length: UInt16, refcon: UnsafeMutableRawPointer!) -> IOReturn {
+        writes.append(Write(data: Data(bytes: data, count: Int(length)), buffer: data, refcon: refcon))
+        return writeStatus
+    }
+
+    override func writeSync(_ data: UnsafeMutableRawPointer!, length: UInt16) -> IOReturn {
+        synchronousWrites += 1
+        XCTFail("Synchronous RFCOMM writes can block the main thread while device transmission is paused")
+        return kIOReturnError
+    }
+
+    override func close() -> IOReturn {
+        closeCount += 1
+        return kIOReturnSuccess
     }
 }
