@@ -1,0 +1,582 @@
+import AppKit
+import Combine
+import Foundation
+import LocalAuthentication
+import OSLog
+
+@MainActor
+final class EarbudFinderController: ObservableObject {
+    struct WearingAuthorization: Equatable, Identifiable {
+        let id: UUID
+        let accountName: String
+        let accountID: UInt32
+        var expiresAt: ContinuousClock.Instant
+    }
+
+    @Published private(set) var session: EarbudFindingSession?
+    @Published private(set) var message: String?
+    @Published private(set) var isCheckingWearing = false
+    @Published private(set) var isAuthenticating = false
+    @Published private(set) var isSavingAuthorization = false
+    @Published private(set) var wearingAuthorization: WearingAuthorization?
+
+    private static let verifiedFirmware: [SonyDeviceModel: Set<String>] = [.wfXM5: ["6.1.0"]]
+    private static let authorizationLogger = Logger(subsystem: "dev.baglayan.Acouplet", category: "EarbudFindingAuthorization")
+
+    static func isSupported(model: SonyDeviceModel?, firmware: String?) -> Bool {
+        guard let model, let firmware else { return false }
+        return verifiedFirmware[model]?.contains(firmware) == true
+    }
+
+    private weak var headphones: SonyHeadphonesController?
+    private let controlSession: UInt64
+    private let address: String
+    private var model: SonyDeviceModel?
+    private var firmware: String?
+    private var observations = Set<AnyCancellable>()
+    private var stream = FastPairMessageStream()
+    private var bufferedReplyPredatesStop = false
+    private var acknowledgementTimeout: DispatchWorkItem?
+    private var ringingTimeout: DispatchWorkItem?
+    private var wearingTimeout: DispatchWorkItem?
+    private var wearingRequest: UUID?
+    private var pendingTarget: FastPairRingTarget?
+    private var requiresWearingCheck = false
+    private var dismissed = false
+    private var isSimulated = false
+    private var authenticationContext: LAContext?
+    private var authenticationSessionID: UUID?
+    private var authenticationRequestID: UUID?
+    private var pendingAuthorizationSave: (id: UUID, authorization: WearingAuthorization)?
+    private lazy var transport = FastPairTransport(
+        onOpen: { [weak self] in self?.opened() },
+        onData: { [weak self] in self?.receive($0) },
+        onFailure: { [weak self] in self?.failed($0) }
+    )
+
+    init(headphones: SonyHeadphonesController, simulated: Bool = false) {
+        #if DEBUG
+        isSimulated = simulated
+        #endif
+        self.headphones = headphones
+        controlSession = headphones.notificationSession
+        address = headphones.address
+        model = headphones.deviceInformation.model
+        firmware = headphones.firmwareVersion
+        headphones.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.headphonesChanged() }
+            .store(in: &observations)
+        headphones.$wearingStatus
+            .removeDuplicates()
+            .sink { [weak self] status in self?.wearingStatusChanged(status) }
+            .store(in: &observations)
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
+                     NSWorkspace.sessionDidResignActiveNotification] {
+            NSWorkspace.shared.notificationCenter.publisher(for: name)
+                .sink { [weak self] _ in self?.dismiss() }
+                .store(in: &observations)
+        }
+        NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+            .sink { [weak self] _ in
+                guard let self, !self.isAuthenticating else { return }
+                self.stop()
+            }
+            .store(in: &observations)
+        NotificationCenter.default.publisher(for: NSApplication.didHideNotification)
+            .sink { [weak self] _ in self?.stop() }
+            .store(in: &observations)
+    }
+
+    isolated deinit {
+        acknowledgementTimeout?.cancel()
+        ringingTimeout?.cancel()
+        wearingTimeout?.cancel()
+        authenticationContext?.invalidate()
+    }
+
+    #if DEBUG
+    private(set) var simulatedSentMessages: [Data] = []
+    private(set) var simulatedAuthorizationEvents: [UUID] = []
+    var simulatesAuthorizationSaveDelay = false
+    var simulatedAuthenticationRequestID: UUID? { authenticationRequestID }
+    var simulatedAuthorizationSaveRequestID: UUID? { pendingAuthorizationSave?.id }
+    func simulateConnectionOpened() { if isSimulated { opened() } }
+    func simulateProtocolData(_ data: Data) { if isSimulated { receive(data) } }
+    func simulateTransportFailure() { if isSimulated { failed("Simulated connection loss.") } }
+    func simulateWearingTimeout() { if isSimulated { wearingTimeout?.perform() } }
+    func simulateAcknowledgementTimeout() { if isSimulated { acknowledgementTimeout?.perform() } }
+    func simulateAuthorizationCompletion(sessionID: UUID, succeeded: Bool, requestID: UUID? = nil) {
+        if isSimulated, let requestID = requestID ?? authenticationRequestID {
+            authenticationCompleted(sessionID: sessionID, requestID: requestID, succeeded: succeeded)
+        }
+    }
+    func simulateAuthorizationExpired() {
+        if isSimulated { wearingAuthorization?.expiresAt = .now.advanced(by: .seconds(-1)) }
+    }
+    func simulateAuthorizationSaveCompletion(succeeded: Bool, requestID: UUID? = nil) {
+        if isSimulated, let requestID = requestID ?? pendingAuthorizationSave?.id {
+            authorizationSaved(requestID: requestID, succeeded: succeeded)
+        }
+    }
+    #endif
+
+    var deviceName: String { model?.name ?? headphones?.deviceName ?? String(localized: "Earbuds") }
+    var wearingDetectionIsUnavailable: Bool {
+        headphones?.hasCurrentTable2Capabilities == true && headphones?.wearingStatus.isSupported == false
+    }
+    var accountName: String {
+        let name = isSimulated ? "Test User" : NSFullUserName()
+        return name.isEmpty ? NSUserName() : name
+    }
+    var isBusy: Bool { isCheckingWearing || session.map { !$0.isFinished } == true }
+    var mayBeRinging: Bool { session?.mayBeRinging == true }
+    var blocksCommands: Bool {
+        guard let phase = session?.phase else { return false }
+        return phase == .starting || phase == .ringing || phase == .stopping
+    }
+    var canStop: Bool { isBusy || session?.phase == .unconfirmed }
+    var needsNewControlSession: Bool { dismissed || headphones?.notificationSession != controlSession }
+
+    var availabilityMessage: String? {
+        guard !dismissed, let headphones, headphones.notificationSession == controlSession,
+              headphones.address == address, headphones.isDeviceConnected, headphones.isReady else {
+            return String(localized: "Connect your earbuds to find them nearby.")
+        }
+        guard let model, model.isEarbuds, headphones.deviceInformation.model == model,
+              let firmware, headphones.firmwareVersion == firmware,
+              Self.isSupported(model: model, firmware: firmware) else {
+            return String(localized: "Playing a locating sound isn’t available for these earbuds yet.")
+        }
+        guard headphones.hasCurrentTable2Capabilities else {
+            return String(localized: "Waiting for headphone capabilities…")
+        }
+        guard headphones.powerOffState == nil, !headphones.isCheckingEarTipFit,
+              !headphones.isPracticingHeadGestures, headphones.legacyOptimizerTransition?.blocksCommands != true,
+              headphones.connectionTransition?.isFinished != false, headphones.sourceTransition?.isFinished != false,
+              headphones.multipointTransition?.isFinished != false, headphones.deviceActionTransition?.isFinished != false else {
+            return String(localized: "Finish the current headphone action first.")
+        }
+        guard headphones.pendingPlaybackCommand == nil, headphones.pendingChanges[.playbackVolume] == nil,
+              headphones.pendingChanges[.callVolume] == nil else {
+            return String(localized: "Wait for the playback change to finish.")
+        }
+        if mayBeRinging, session?.isFinished == true {
+            return String(localized: "The earbuds haven’t confirmed that the sound stopped. Keep them out of your ears.")
+        }
+        return nil
+    }
+
+    func canPlay(_ target: FastPairRingTarget) -> Bool {
+        guard availabilityMessage == nil, !isBusy, !mayBeRinging, let headphones else { return false }
+        return isConnected(target, headphones: headphones)
+    }
+
+    func play(_ target: FastPairRingTarget) {
+        guard canPlay(target) else { return }
+        message = nil
+        begin(target)
+    }
+
+    func authenticateWearingOverride(sessionID: UUID) {
+        guard session?.id == sessionID, session?.phase == .awaitingWearingConfirmation,
+              !isAuthenticating, !isSavingAuthorization, wearingAuthorization == nil else { return }
+        guard availabilityMessage == nil, let headphones, let target = session?.target,
+              isConnected(target, headphones: headphones) else {
+            stop()
+            return
+        }
+        let requestID = UUID()
+        authenticationSessionID = sessionID
+        authenticationRequestID = requestID
+        isAuthenticating = true
+        message = nil
+        #if DEBUG
+        if isSimulated {
+            if CommandLine.arguments.contains("-ui-testing"), CommandLine.arguments.contains("--finder-auth-success") {
+                DispatchQueue.main.async { [weak self] in
+                    self?.authenticationCompleted(sessionID: sessionID, requestID: requestID, succeeded: true)
+                }
+            }
+            return
+        }
+        #endif
+        let context = LAContext()
+        authenticationContext = context
+        context.touchIDAuthenticationAllowableReuseDuration = 0
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else {
+            authenticationCompleted(sessionID: sessionID, requestID: requestID, succeeded: false)
+            return
+        }
+        context.evaluatePolicy(.deviceOwnerAuthentication,
+            localizedReason: String(localized: "Authorize playing a loud locating sound despite the in-ear warning.")) { [weak self] succeeded, error in
+            let cancelled = (error as? LAError)?.code == .userCancel || (error as? LAError)?.code == .systemCancel
+            Task { @MainActor [weak self] in
+                self?.authenticationCompleted(sessionID: sessionID, requestID: requestID, succeeded: succeeded, cancelled: cancelled)
+            }
+        }
+    }
+
+    private func authenticationCompleted(sessionID: UUID, requestID: UUID, succeeded: Bool, cancelled: Bool = false) {
+        guard authenticationSessionID == sessionID, authenticationRequestID == requestID, isAuthenticating,
+              session?.id == sessionID, session?.phase == .awaitingWearingConfirmation else { return }
+        invalidateAuthorization()
+        guard succeeded else {
+            if !cancelled { message = String(localized: "Couldn’t authorize playback. No sound was started.") }
+            return
+        }
+        guard availabilityMessage == nil, let headphones, let target = session?.target,
+              isConnected(target, headphones: headphones), selectedWornStatus(headphones.wearingStatus) != nil else {
+            stop()
+            return
+        }
+        wearingAuthorization = WearingAuthorization(id: sessionID, accountName: accountName,
+            accountID: isSimulated ? 501 : getuid(), expiresAt: .now.advanced(by: .seconds(60)))
+    }
+
+    func cancelWearingAuthorization() {
+        invalidateAuthorization()
+    }
+
+    func confirmWearingOverride(sessionID: UUID) {
+        guard session?.id == sessionID, session?.phase == .awaitingWearingConfirmation,
+              let authorization = wearingAuthorization, authorization.id == sessionID else { return }
+        guard authorization.expiresAt > .now else {
+            stop()
+            message = String(localized: "Authorization expired. Start again.")
+            return
+        }
+        guard availabilityMessage == nil, let headphones, let target = session?.target,
+              isConnected(target, headphones: headphones), selectedWornStatus(headphones.wearingStatus) != nil,
+              isSimulated || NSApplication.shared.isActive else {
+            stop()
+            return
+        }
+        invalidateAuthorization()
+        let requestID = UUID()
+        pendingAuthorizationSave = (requestID, authorization)
+        isSavingAuthorization = true
+        #if DEBUG
+        if isSimulated {
+            if !simulatesAuthorizationSaveDelay { authorizationSaved(requestID: requestID, succeeded: true) }
+            return
+        }
+        #endif
+        let record = EarbudFindingAuthorizationLog.Record(timestamp: Date(), sessionID: sessionID,
+            accountName: authorization.accountName, accountID: authorization.accountID,
+            side: target == .left ? "left" : "right", model: model!.name, firmware: firmware!)
+        Task { [weak self] in
+            let saved = await Task.detached(priority: .utility) {
+                do {
+                    try EarbudFindingAuthorizationLog.append(record, directory: EarbudFindingAuthorizationLog.directory)
+                    return true
+                } catch {
+                    return false
+                }
+            }.value
+            self?.authorizationSaved(requestID: requestID, succeeded: saved)
+        }
+    }
+
+    private func authorizationSaved(requestID: UUID, succeeded: Bool) {
+        guard let pending = pendingAuthorizationSave, pending.id == requestID,
+              session?.id == pending.authorization.id, session?.phase == .awaitingWearingConfirmation else { return }
+        let authorization = pending.authorization
+        pendingAuthorizationSave = nil
+        isSavingAuthorization = false
+        guard succeeded else {
+            stop()
+            message = String(localized: "Couldn’t save the authorization record. No sound was started.")
+            return
+        }
+        guard authorization.expiresAt > .now else {
+            stop()
+            message = String(localized: "Authorization expired. Start again.")
+            return
+        }
+        guard availabilityMessage == nil, let headphones, let target = session?.target,
+              isConnected(target, headphones: headphones), selectedWornStatus(headphones.wearingStatus) != nil,
+              isSimulated || NSApplication.shared.isActive else {
+            stop()
+            return
+        }
+        #if DEBUG
+        if isSimulated { simulatedAuthorizationEvents.append(authorization.id) }
+        else { logAuthorization(authorization, target: target) }
+        #else
+        logAuthorization(authorization, target: target)
+        #endif
+        let effects = session!.confirmWearingOverride(worn: selectedWornStatus(headphones.wearingStatus))
+        apply(effects)
+    }
+
+    private func logAuthorization(_ authorization: WearingAuthorization, target: FastPairRingTarget) {
+        let side = target == .left ? "left" : "right"
+        Self.authorizationLogger.notice("In-ear locating sound override authorized after device-owner authentication and final confirmation: account_uid=\(authorization.accountID) account=\(authorization.accountName, privacy: .private) side=\(side, privacy: .public) session=\(authorization.id.uuidString, privacy: .public)")
+    }
+
+    private func invalidateAuthorization() {
+        authenticationSessionID = nil
+        authenticationRequestID = nil
+        pendingAuthorizationSave = nil
+        isSavingAuthorization = false
+        isAuthenticating = false
+        authenticationContext?.invalidate()
+        authenticationContext = nil
+        wearingAuthorization = nil
+    }
+
+    private func checkWearingBeforeStarting() {
+        guard let headphones, let target = session?.target, session?.phase == .connecting else { return }
+        requiresWearingCheck = requiresWearingCheck || headphones.wearingStatus.isSupported
+        if requiresWearingCheck {
+            guard let request = headphones.refreshWearingStatus() else {
+                message = headphones.hasPendingWearingStatusRead
+                    ? String(localized: "The earbud wear check hasn’t finished. Reconnect controls to try again.")
+                    : String(localized: "Couldn’t check whether the earbuds are being worn. Try again.")
+                stop()
+                return
+            }
+            pendingTarget = target
+            wearingRequest = request
+            isCheckingWearing = true
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, self.wearingRequest == request else { return }
+                self.stop()
+                self.message = String(localized: "The earbud wear check hasn’t finished. Reconnect controls to try again.")
+            }
+            wearingTimeout = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: timeout)
+        } else {
+            prepared()
+        }
+    }
+
+    func stop() {
+        invalidateAuthorization()
+        wearingTimeout?.cancel()
+        wearingTimeout = nil
+        wearingRequest = nil
+        pendingTarget = nil
+        isCheckingWearing = false
+        guard session != nil else { return }
+        let effects = session!.stop()
+        apply(effects)
+    }
+
+    func dismiss() {
+        dismissed = true
+        stop()
+    }
+
+    func retryStop() {
+        guard session?.phase == .unconfirmed else { return }
+        dismissed = false
+        message = nil
+        stream.reset()
+        let effects = session!.retryStop()
+        apply(effects)
+    }
+
+    private func begin(_ target: FastPairRingTarget) {
+        guard canPlay(target) else { return }
+        stream.reset()
+        requiresWearingCheck = headphones?.wearingStatus.isSupported == true
+        session = EarbudFindingSession(target: target, timeoutSeconds: 30)
+        let effects = session!.begin()
+        apply(effects)
+    }
+
+    private func headphonesChanged() {
+        guard let headphones else { dismiss(); return }
+        if session == nil, headphones.notificationSession == controlSession {
+            model = headphones.deviceInformation.model
+            firmware = headphones.firmwareVersion
+        }
+        if let request = wearingRequest, headphones.wearingStatusReadID == request, let target = pendingTarget {
+            wearingTimeout?.cancel()
+            wearingTimeout = nil
+            wearingRequest = nil
+            pendingTarget = nil
+            isCheckingWearing = false
+            guard let worn = selectedWornStatus(headphones.wearingStatus) else {
+                message = String(localized: "Couldn’t check whether the earbuds are being worn. Try again.")
+                stop()
+                return
+            }
+            if session?.target == target { prepared(worn: worn) }
+        }
+        if isBusy, session?.isRetryingStop != true {
+            let target = session?.target ?? pendingTarget
+            let connected = target == .left ? headphones.audioFeatures.leftConnected : headphones.audioFeatures.rightConnected
+            if availabilityMessage != nil || connected != true {
+                stop()
+            }
+        }
+        objectWillChange.send()
+    }
+
+    private func selectedWornStatus(_ status: SonyWearingStatus) -> Bool? {
+        session?.target == .left ? status.leftWorn : status.rightWorn
+    }
+
+    private func isConnected(_ target: FastPairRingTarget, headphones: SonyHeadphonesController) -> Bool {
+        target == .left ? headphones.audioFeatures.leftConnected == true : headphones.audioFeatures.rightConnected == true
+    }
+
+    private func wearingStatusChanged(_ status: SonyWearingStatus) {
+        guard session != nil else { return }
+        if !requiresWearingCheck, status.isSupported {
+            requiresWearingCheck = true
+            if session?.phase != .connecting { stop(); return }
+        }
+        guard requiresWearingCheck else { return }
+        let worn = selectedWornStatus(status)
+        if session?.phase == .awaitingWearingConfirmation, worn == nil {
+            stop()
+            return
+        }
+        let effects = session!.wearingChanged(worn)
+        apply(effects)
+    }
+
+    private func opened() {
+        if session?.isRetryingStop == true {
+            let effects = session!.connectionOpened()
+            apply(effects)
+            return
+        }
+        guard !dismissed, availabilityMessage == nil, session != nil else { stop(); return }
+        checkWearingBeforeStarting()
+    }
+
+    private func prepared(worn: Bool = false) {
+        guard !dismissed, availabilityMessage == nil, session?.phase == .connecting,
+              let headphones, let target = session?.target else { stop(); return }
+        guard isConnected(target, headphones: headphones) else { stop(); return }
+        let effects = session!.connectionOpened(worn: worn)
+        apply(effects)
+    }
+
+    private func receive(_ data: Data) {
+        let wasStoppingAtReceipt = session?.phase == .stopping
+        let firstReplyPredatesStop = bufferedReplyPredatesStop
+        var messages: [FastPairMessage] = []
+        stream.append(data) { messages.append($0) }
+        if !messages.isEmpty { bufferedReplyPredatesStop = false }
+        for (index, packet) in messages.enumerated() {
+            guard session?.isFinished == false else { break }
+            guard let response = FastPairRingResponse(message: packet) else {
+                if packet.group == 0x04 || packet.group == 0xFF { stop() }
+                continue
+            }
+            if case .rejection = response, session?.phase == .starting {
+                message = String(localized: "The earbuds declined the locating-sound request.")
+            }
+            if case .status(let status) = response, let bytes = status.acknowledgement.encoded {
+                if !send(bytes) {
+                    message = String(localized: "Could not confirm the earbud finding status.")
+                    stop()
+                    return
+                }
+            }
+            if (index == 0 && firstReplyPredatesStop) || (session?.phase == .stopping && !wasStoppingAtReceipt) { continue }
+            let effects = session!.receive(response)
+            if session?.phase == .ringing { acknowledgementTimeout?.cancel(); acknowledgementTimeout = nil }
+            apply(effects)
+        }
+    }
+
+    private func apply(_ effects: [EarbudFindingSession.Effect]) {
+        for effect in effects {
+            switch effect {
+            case .connect:
+                if !isSimulated { transport.open(address: address) }
+                #if DEBUG
+                if isSimulated, CommandLine.arguments.contains("-ui-testing") {
+                    let id = session!.id
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.session?.id == id, self.session?.phase == .connecting else { return }
+                        self.opened()
+                        if self.isCheckingWearing {
+                            self.headphones?.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0xF3, 0, 0]))
+                        }
+                    }
+                }
+                #endif
+            case .send(let command):
+                guard session?.commandWillSend(command) == true else { continue }
+                if command == .stop { bufferedReplyPredatesStop = stream.bufferedByteCount > 0 }
+                guard send(command.message.encoded!, isStopping: command == .stop) else {
+                    failed(String(localized: "Could not send the earbud finding command."))
+                    return
+                }
+                scheduleAcknowledgementTimeout()
+                if command != .stop { scheduleRingingTimeout() }
+            case .close:
+                invalidateAuthorization()
+                wearingTimeout?.cancel()
+                wearingTimeout = nil
+                wearingRequest = nil
+                pendingTarget = nil
+                isCheckingWearing = false
+                acknowledgementTimeout?.cancel()
+                acknowledgementTimeout = nil
+                ringingTimeout?.cancel()
+                ringingTimeout = nil
+                if !isSimulated { transport.close() }
+                stream.reset()
+                bufferedReplyPredatesStop = false
+            }
+        }
+    }
+
+    private func send(_ data: Data, isStopping: Bool = false) -> Bool {
+        #if DEBUG
+        if isSimulated {
+            simulatedSentMessages.append(data)
+            if CommandLine.arguments.contains("-ui-testing"), data.prefix(2) == Data([0x04, 0x01]) {
+                let id = session!.id
+                let reply = FastPairMessage(group: 0xFF, code: 0x01, payload: [0x04, 0x01] + data.dropFirst(4)).encoded!
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.session?.id == id else { return }
+                    self.receive(reply)
+                }
+            }
+            return true
+        }
+        #endif
+        return transport.send(data, isStopping: isStopping)
+    }
+
+    private func scheduleAcknowledgementTimeout() {
+        acknowledgementTimeout?.cancel()
+        let id = session!.id
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.session?.id == id else { return }
+            let effects = self.session!.acknowledgementExpired()
+            self.apply(effects)
+        }
+        acknowledgementTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: timeout)
+    }
+
+    private func scheduleRingingTimeout() {
+        ringingTimeout?.cancel()
+        let id = session!.id
+        let duration = session!.timeoutSeconds
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.session?.id == id else { return }
+            self.stop()
+        }
+        ringingTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(duration), execute: timeout)
+    }
+
+    private func failed(_ error: String) {
+        message = error
+        guard session != nil else { return }
+        let effects = session!.transportFailed()
+        apply(effects)
+    }
+}

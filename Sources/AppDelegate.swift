@@ -170,6 +170,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if environment.devices.prepareEarbudFindingForTermination(completion: { [weak self] in
+            guard let self else { sender.reply(toApplicationShouldTerminate: true); return }
+            let reply = self.applicationShouldTerminate(sender)
+            if reply != .terminateLater { sender.reply(toApplicationShouldTerminate: reply == .terminateNow) }
+        }) {
+            return .terminateLater
+        }
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         if environment.ldac.isSessionRunning {
             environment.ldac.stop(reason: "app is terminating") { [weak self] in
@@ -197,6 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         || $0.legacyOptimizerTransition?.phase == .interrupted
                 }
                 if let interrupted, let self {
+                    self.environment.devices.resetEarbudFindingTermination()
                     self.environment.devices.selectForWorkflow(address: interrupted.address)
                     self.environment.settings.selectedSettingsPane = "headphones"
                     self.showSettings()

@@ -306,7 +306,6 @@ struct MenuBarView: View {
                 }
             }
         }
-        .onAppear { ldac.refreshDriverState() }
     }
 
     #endif
@@ -317,10 +316,10 @@ struct MenuBarView: View {
                 Text(headphones.deviceName)
                     .font(.headline)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, devices.hasMultipleConnectedDevices ? 36 : 0)
+                    .padding(.horizontal, devices.hasOtherSelectableDevices ? 36 : 0)
                     .accessibilityIdentifier("menu.title")
                     .overlay(alignment: .trailing) {
-                        if devices.hasMultipleConnectedDevices {
+                        if devices.hasOtherSelectableDevices {
                             ConnectedHeadphonePicker(showsIconOnly: true)
                         }
                     }
@@ -722,6 +721,7 @@ struct LDACDriverGuidance: View {
         .foregroundStyle(.primary)
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityIdentifier("audio.driverGuidance")
+        .onAppear { ldac.refreshDriverState() }
     }
 }
 
@@ -786,12 +786,23 @@ struct ConnectedHeadphonePicker: View {
             get: { devices.selectedAddress },
             set: { if let address = $0 { devices.select(address: address) } }
         )) {
-            if let address = devices.selectedAddress, !devices.connectedDevices.contains(where: { $0.address == address }) {
+            if let address = devices.selectedAddress, !devices.selectableDevices.contains(where: { $0.address == address }) {
                 Text(devices.selectedController.deviceName).tag(Optional(address)).disabled(true)
             }
             ForEach(devices.connectedDevices) { device in
-                Text(Self.title(for: device, among: devices.connectedDevices))
+                Text(Self.title(for: device, among: devices.selectableDevices))
                     .tag(Optional(device.address))
+            }
+            let disconnected = devices.selectableDevices.filter { device in
+                !devices.connectedDevices.contains(where: { $0.address == device.address })
+            }
+            if !disconnected.isEmpty {
+                Section("Sound may still be playing") {
+                    ForEach(disconnected) { device in
+                        Text(Self.title(for: device, among: devices.selectableDevices))
+                            .tag(Optional(device.address))
+                    }
+                }
             }
         }
     }

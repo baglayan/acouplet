@@ -2578,6 +2578,210 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testFindEarbudsIsHiddenForUnqualifiedFirmwareAndModels() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for (model, language, appearance) in [("wfXM5", "en", "light"), ("wfXM4", "tr", "dark")] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", model,
+                                   "--\(appearance)-appearance", "-AppleLanguages", "(\(language))",
+                                   "-AppleLocale", language == "tr" ? "tr_TR" : "en_US"]
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            panel.buttons["menu.settings"].click()
+            let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 3))
+            let tab = settings.toolbars.buttons[language == "tr" ? "Kulaklıklar" : "Headphones"]
+            XCTAssertTrue(tab.waitForExistence(timeout: 3))
+            tab.click()
+            let device = settings.staticTexts["headphones.deviceName"]
+            XCTAssertTrue(device.waitForExistence(timeout: 3))
+            XCTAssertEqual(device.value as? String, model == "wfXM5" ? "WF-1000XM5" : "WF-1000XM4")
+            let heading = language == "tr" ? "Kulaklıkları Bul" : "Find Earbuds"
+            let scroll = settings.scrollViews.firstMatch
+            for _ in 0..<4 {
+                XCTAssertFalse(settings.buttons["finder.open"].exists)
+                XCTAssertFalse(settings.descendants(matching: .any).matching(NSPredicate(format: "label == %@", heading)).firstMatch.exists)
+                XCTAssertFalse(app.sheets.firstMatch.exists)
+                scroll.scroll(byDeltaX: 0, deltaY: -400)
+            }
+            XCTAssertFalse(settings.buttons["finder.open"].exists)
+            app.terminate()
+        }
+    }
+
+    @MainActor
+    func testFindEarbudsDisclosesUnavailableWearDetection() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for language in ["en", "tr"] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "wfXM5", "--finder-no-wear-sensor",
+                                   "-AppleLanguages", "(\(language))", "-AppleLocale", language == "tr" ? "tr_TR" : "en_US"]
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            panel.buttons["menu.settings"].click()
+            let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 3))
+            let tab = settings.toolbars.buttons[language == "tr" ? "Kulaklıklar" : "Headphones"]
+            XCTAssertTrue(tab.waitForExistence(timeout: 3))
+            tab.click()
+            let open = settings.buttons["finder.open"]
+            XCTAssertTrue(open.waitForExistence(timeout: 3))
+            for _ in 0..<5 where !open.isHittable {
+                settings.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -200)
+            }
+            open.click()
+            let warning = app.staticTexts["finder.wearingUnavailable"]
+            XCTAssertTrue(warning.waitForExistence(timeout: 3))
+            let expected = language == "tr"
+                ? "Acouplet, bu kulaklıkların kulağınızda olup olmadığını algılayamıyor."
+                : "Acouplet can’t detect whether these earbuds are in your ears."
+            XCTAssertEqual(warning.value as? String, expected)
+            XCTAssertTrue(settings.frame.contains(warning.frame))
+            XCTAssertFalse(settings.buttons["finder.stop"].exists)
+            app.terminate()
+        }
+    }
+
+    @MainActor
+    func testFindEarbudsWearingConfirmationDefaultsToCancelAndWarnsOnlySelectedEarbud() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for (language, appearance, target) in [("en", "light", "left"), ("tr", "dark", "right")] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "wfXM5", "--finder-worn", "--finder-auth-success",
+                                   "--\(appearance)-appearance", "-AppleLanguages", "(\(language))",
+                                   "-AppleLocale", language == "tr" ? "tr_TR" : "en_US"]
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            panel.buttons["menu.settings"].click()
+            let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 3))
+            let tab = settings.toolbars.buttons[language == "tr" ? "Kulaklıklar" : "Headphones"]
+            XCTAssertTrue(tab.waitForExistence(timeout: 3))
+            tab.click()
+            let open = settings.buttons["finder.open"]
+            XCTAssertTrue(open.waitForExistence(timeout: 3))
+            for _ in 0..<5 where !open.isHittable {
+                settings.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -200)
+            }
+            open.click()
+            let sheet = app.sheets.firstMatch
+            let play = settings.buttons["finder.\(target)"]
+            let stop = settings.buttons["finder.stop"]
+            let warning = settings.descendants(matching: .any)["finder.\(target)Warning"].firstMatch
+            let otherWarning = settings.descendants(matching: .any)[target == "left" ? "finder.rightWarning" : "finder.leftWarning"].firstMatch
+            let playSound = language == "tr" ? "Ses Çal" : "Play Sound"
+            let playAnyway = language == "tr" ? "Yine de Çal" : "Play Anyway"
+            let alertTitle = language == "tr" ? "Sağ kulaklık kulağa takılı olarak algılandı" : "Left earbud detected in ear"
+            XCTAssertTrue(play.waitForExistence(timeout: 3))
+            XCTAssertFalse(app.staticTexts["finder.wearingUnavailable"].exists)
+            XCTAssertFalse(stop.exists)
+            XCTAssertFalse(warning.exists)
+            XCTAssertFalse(otherWarning.exists)
+            for confirmationStage in 0..<4 {
+                XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "isEnabled == true"), object: play
+                )], timeout: 3), .completed)
+                play.click()
+                let confirm = settings.buttons[playSound]
+                XCTAssertTrue(confirm.waitForExistence(timeout: 3))
+                confirm.click()
+                let proceed = settings.buttons[playAnyway]
+                XCTAssertTrue(proceed.waitForExistence(timeout: 3))
+                XCTAssertTrue(app.staticTexts[alertTitle].exists)
+                XCTAssertFalse(warning.exists)
+                XCTAssertFalse(otherWarning.exists)
+                if confirmationStage == 0 {
+                    app.typeKey(.return, modifierFlags: [])
+                    XCTAssertTrue(proceed.waitForNonExistence(timeout: 3))
+                    XCTAssertTrue(stop.waitForNonExistence(timeout: 3))
+                    XCTAssertFalse(warning.exists)
+                    XCTAssertFalse(otherWarning.exists)
+                } else {
+                    captureGalleryScreenshot(settings.screenshot(), named: "find-earbuds-\(language)-\(appearance)-wearing-alert")
+                    proceed.click()
+                    let authorizedPlay = settings.buttons["finder.authorizedPlay"]
+                    XCTAssertTrue(authorizedPlay.waitForExistence(timeout: 3))
+                    let verification = settings.checkBoxes["finder.verifyNotWorn"]
+                    XCTAssertTrue(verification.waitForExistence(timeout: 3))
+                    XCTAssertEqual(verification.value as? Int, 0)
+                    XCTAssertFalse(authorizedPlay.isEnabled)
+                    let verificationText = language == "tr"
+                        ? "Şu anda sağ kulaklığın kimsenin kulağında olmadığını onaylıyorum."
+                        : "I verify that nobody is wearing the left earbud right now."
+                    XCTAssertEqual(verification.label, verificationText)
+                    captureGalleryScreenshot(settings.screenshot(), named: "find-earbuds-\(language)-\(appearance)-final-confirmation")
+                    let expectedMessage = language == "tr"
+                        ? "Şu anda bu kulaklığın kimsenin kulağında olmadığından EN UFAK BİR ŞÜPHEYE YER BIRAKMAYACAK KADAR EMİN MİSİNİZ? Bu işlem, Test User tarafından yetkilendirilmiş olarak kaydedilecek."
+                        : "Are you ABSOLUTELY CERTAIN BEYOND ANY DOUBT that nobody is wearing the earbud right now? This action will be logged as authorized by Test User."
+                    let finalMessage = app.staticTexts.matching(NSPredicate(format: "value == %@", expectedMessage)).firstMatch
+                    XCTAssertTrue(finalMessage.exists)
+                    XCTAssertEqual(finalMessage.value as? String, expectedMessage)
+                    XCTAssertFalse(warning.exists)
+                    XCTAssertFalse(otherWarning.exists)
+                    XCTAssertTrue(settings.frame.contains(finalMessage.frame))
+                    XCTAssertTrue(settings.frame.contains(verification.frame))
+                    if confirmationStage == 1 {
+                        app.typeKey(.return, modifierFlags: [])
+                        XCTAssertTrue(authorizedPlay.waitForNonExistence(timeout: 3))
+                        XCTAssertTrue(stop.waitForNonExistence(timeout: 3))
+                        XCTAssertFalse(warning.exists)
+                        XCTAssertFalse(otherWarning.exists)
+                    } else {
+                        verification.click()
+                        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                            predicate: NSPredicate(format: "isEnabled == true"), object: authorizedPlay
+                        )], timeout: 3), .completed)
+                        XCTAssertEqual(verification.value as? Int, 1)
+                        XCTAssertFalse(warning.exists)
+                        verification.click()
+                        XCTAssertEqual(verification.value as? Int, 0)
+                        XCTAssertFalse(authorizedPlay.isEnabled)
+                        verification.click()
+                        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                            predicate: NSPredicate(format: "isEnabled == true"), object: authorizedPlay
+                        )], timeout: 3), .completed)
+                        if confirmationStage == 2 {
+                            app.typeKey(.return, modifierFlags: [])
+                            XCTAssertTrue(authorizedPlay.waitForNonExistence(timeout: 3))
+                            XCTAssertTrue(stop.waitForNonExistence(timeout: 3))
+                            XCTAssertFalse(warning.exists)
+                            XCTAssertFalse(otherWarning.exists)
+                        } else {
+                            authorizedPlay.click()
+                        }
+                    }
+                }
+            }
+            XCTAssertTrue(warning.waitForExistence(timeout: 3))
+            XCTAssertFalse(otherWarning.exists)
+            XCTAssertTrue(stop.waitForExistence(timeout: 3))
+            XCTAssertTrue(stop.isEnabled)
+            let warningText = language == "tr" ? "Bu kulaklık kulağınızdaysa DERHAL çıkarın!" : "If you’re wearing this earbud, take it out NOW!"
+            XCTAssertEqual(warning.label, warningText)
+            XCTAssertTrue(settings.frame.contains(sheet.frame))
+            XCTAssertTrue(sheet.frame.contains(warning.frame))
+            XCTAssertTrue(sheet.frame.contains(stop.frame))
+            let textHeight = warningText.boundingRect(with: NSSize(width: warning.frame.width, height: .greatestFiniteMagnitude),
+                                                            options: [.usesLineFragmentOrigin, .usesFontLeading],
+                                                            attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]).height
+            XCTAssertGreaterThanOrEqual(warning.frame.height + 1, textHeight)
+            captureGalleryScreenshot(settings.screenshot(), named: "find-earbuds-\(language)-\(appearance)-wearing-warning")
+            stop.click()
+            XCTAssertTrue(warning.waitForNonExistence(timeout: 3))
+            XCTAssertTrue(stop.waitForNonExistence(timeout: 3))
+            XCTAssertFalse(otherWarning.exists)
+            let stopped = language == "tr" ? "Ses durduruldu." : "Sound stopped."
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "label == %@ OR value == %@", stopped, stopped), object: app.staticTexts["finder.status"]
+            )], timeout: 3), .completed)
+            app.terminate()
+        }
+    }
+
+    @MainActor
     func testEarTipFitUsesExplicitStartSeparateResultsAndConfirmedCleanup() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-testing", "--ui-test-host", "--fit-retry-both-good", "-AppleLanguages", "(en)"]

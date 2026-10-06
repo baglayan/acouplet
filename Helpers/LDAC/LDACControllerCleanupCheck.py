@@ -46,6 +46,10 @@ struct Playback {
     var hasReceivedCapabilities = false
     var musicVolumeRange: ClosedRange<Int>?
 }
+struct EarbudFinder {
+    var isBusy: Bool
+    var mayBeRinging: Bool
+}
 @MainActor
 final class Device: ObservableObject {
     var deviceModel: Model
@@ -53,6 +57,7 @@ final class Device: ObservableObject {
     @Published var isDeviceConnected = true
     var localSource = true
     var playback: Playback
+    var earbudFinder: EarbudFinder?
     var supportsConnectionMode = true
     let address = "02:00:00:00:00:01"
     @Published var connectionMode: SonyConnectionMode? = .stableConnection
@@ -138,6 +143,7 @@ final class Controller: ObservableObject {
     var isOpeningDriverInstaller = false
     var didAttemptAutomaticDriverUpdate = false
     let bundle = Bundle.main
+    let inspectDriver: (Bundle) -> LDACDriverInstaller.State = { LDACDriverInstaller.inspect(bundle: $0) }
     var devices: Devices? = Devices()
     var requestedConfiguration = LDACConfiguration()
     var audioRoute: MacAudioRouteObserver? = MacAudioRouteObserver()
@@ -317,11 +323,16 @@ enum LDACControllerCleanupCheck {
 
         let volumeUnavailable = Device()
         volumeUnavailable.playback.hasReceivedCapabilities = true
+        let finding = Device()
+        finding.earbudFinder = EarbudFinder(isBusy: true, mayBeRinging: false)
+        let unconfirmedStop = Device()
+        unconfirmedStop.earbudFinder = EarbudFinder(isBusy: false, mayBeRinging: true)
         let refused: [(String, Device?)] = [
             ("missing", nil), ("unknown", Device(.unknown)),
             ("WF-1000XM3", Device(.wfXM3)), ("WH-CH720N", Device(.whCH720N)),
             ("disconnected", Device(ready: false)), ("missing playback", Device(playback: false)),
             ("reported no volume control", volumeUnavailable),
+            ("active earbud finding", finding), ("unconfirmed finder Stop", unconfirmedStop),
         ]
         for (name, device) in refused {
             let admission = Controller()
@@ -342,6 +353,10 @@ enum LDACControllerCleanupCheck {
         let missingCoordinator = Controller()
         missingCoordinator.devices = nil
         precondition(missingCoordinator.deviceUnavailableReason(forAddress: address) != nil)
+        let idleFinder = Controller()
+        idleFinder.devices?.controllers[address]?.earbudFinder = EarbudFinder(isBusy: false, mayBeRinging: false)
+        precondition(idleFinder.deviceUnavailableReason(forAddress: address) == nil && idleFinder.canEnable(forAddress: address),
+                     "An idle finder blocked LDAC admission")
         for model in [Model.wfXM5, .whXM5] {
             for state in [LDACDriverInstaller.State.current, .missing, .outdated] {
                 let admission = Controller()
@@ -668,6 +683,7 @@ enum LDACControllerCleanupCheck {
         print("PASS actual LDAC admission, connection preference and cleanup methods: confirmations, readiness, output-before-preference restoration, cancelled startup, user supersession, bounded retry without setter replay, sleep/wake, quit deadline and existing lifecycle checks; fake peers only")
         print("PASS actual disconnect policy: idle waiting, one resume, source/output/selection/driver gates, deferred Stable Connection, manual Off, sleep/wake, cleanup failure and nested-error deduplication")
         print("PASS actual driver update policy: existing outdated driver only, independent of headphones, once per launch, busy/manual deduplication, surfaced errors and manual retry")
+        print("PASS actual finder admission: active finding and unconfirmed Stop block LDAC and manual installation; absent or idle finder allows admission")
     }
 }
 '''.replace("__METHODS__", "\n".join(method(name) for name in ["deviceUnavailableReason", "canEnable", "refreshDriverState", "updateInstalledDriverIfNeeded", "installDriver", "openDriverInstaller", "setEnabled", "stop", "suspend", "resumeIfReady", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))

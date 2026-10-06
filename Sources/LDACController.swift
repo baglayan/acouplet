@@ -1,4 +1,5 @@
 #if !ACOUPLET_PUBLIC_APIS_ONLY
+import AppKit
 import Combine
 import Foundation
 import OSLog
@@ -17,6 +18,7 @@ final class LDACController: ObservableObject {
     @Published private(set) var isOpeningDriverInstaller = false
     private var didAttemptAutomaticDriverUpdate = false
     private let bundle: Bundle
+    private let inspectDriver: (Bundle) -> LDACDriverInstaller.State
     private var session: LDACNativeSession?
     private var sessionID = UUID()
     private var requestedAddress: String?
@@ -56,9 +58,11 @@ final class LDACController: ObservableObject {
     private let devices: SonyDeviceCoordinator?
     private static let logger = Logger(subsystem: "dev.baglayan.Acouplet", category: "LDACLifecycle")
 
-    init(bundle: Bundle = .main, devices: SonyDeviceCoordinator? = nil, audioRoute: MacAudioRouteObserver? = nil) {
+    init(bundle: Bundle = .main, devices: SonyDeviceCoordinator? = nil, audioRoute: MacAudioRouteObserver? = nil,
+         inspectDriver: @escaping (Bundle) -> LDACDriverInstaller.State = { LDACDriverInstaller.inspect(bundle: $0) }) {
         self.bundle = bundle
-        driverState = LDACDriverInstaller.inspect(bundle: bundle)
+        self.inspectDriver = inspectDriver
+        driverState = inspectDriver(bundle)
         helpers = LDACNativeSession.Helpers(bundle: bundle)
         self.devices = devices
         self.audioRoute = audioRoute
@@ -67,6 +71,13 @@ final class LDACController: ObservableObject {
                 Task { @MainActor [weak self] in self?.resumeIfReady() }
             }.store(in: &availabilityObservations)
         }
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      application.bundleIdentifier == "com.apple.installer" else { return }
+                self?.refreshDriverState()
+            }.store(in: &availabilityObservations)
     }
 
     var isNativeOutputAvailable: Bool { LDACNativeOutput.isAvailable }
@@ -80,7 +91,7 @@ final class LDACController: ObservableObject {
 
     func refreshDriverState() {
         guard !isSessionRunning else { return }
-        driverState = LDACDriverInstaller.inspect(bundle: bundle)
+        driverState = inspectDriver(bundle)
     }
 
     func installDriver(forAddress address: String) {
@@ -119,6 +130,9 @@ final class LDACController: ObservableObject {
         }
         guard headphones.isReady else {
             return String(localized: "Connect Sony controls before starting LDAC.")
+        }
+        guard headphones.earbudFinder?.isBusy != true, headphones.earbudFinder?.mayBeRinging != true else {
+            return String(localized: "Stop the locating sound before starting LDAC.")
         }
         guard headphones.playback.isSupported,
               !headphones.playback.hasReceivedCapabilities || headphones.playback.musicVolumeRange != nil else {

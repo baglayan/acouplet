@@ -88,6 +88,9 @@ final class AppEnvironment {
         devices.$selectedAddress
             .removeDuplicates()
             .sink { [weak devices, weak settings] address in
+                for controller in devices?.controllers ?? [] where controller.address != address {
+                    controller.earbudFinder?.dismiss()
+                }
                 guard let address, let controller = devices?.controller(for: address) else { return }
                 settings?.selectEqualizerDevice(address: address, defaultDraft: controller.equalizer.settings ?? controller.equalizer.flatSettings ?? .flat)
             }

@@ -15799,6 +15799,958 @@
           }
         }
       }
+    },
+    "Find Earbuds…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Find Earbuds…"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıkları Bul…"
+          }
+        }
+      }
+    },
+    "Find Earbuds": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Find Earbuds"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıkları Bul"
+          }
+        }
+      }
+    },
+    "Earbuds": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Earbuds"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulak İçi Kulaklıklar"
+          }
+        }
+      }
+    },
+    "Play Sound": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play Sound"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses Çal"
+          }
+        }
+      }
+    },
+    "Stop Sound": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop Sound"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sesi Durdur"
+          }
+        }
+      }
+    },
+    "Play sound in the left earbud?": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play sound in the left earbud?"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sol kulaklıkta ses çalınsın mı?"
+          }
+        }
+      }
+    },
+    "Play sound in the right earbud?": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play sound in the right earbud?"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sağ kulaklıkta ses çalınsın mı?"
+          }
+        }
+      }
+    },
+    "Play sound in the left earbud": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play sound in the left earbud"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sol kulaklıkta ses çal"
+          }
+        }
+      }
+    },
+    "Play sound in the right earbud": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play sound in the right earbud"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sağ kulaklıkta ses çal"
+          }
+        }
+      }
+    },
+    "Take both earbuds out of your ears before continuing. The sound may become loud.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Take both earbuds out of your ears before continuing. The sound may become loud."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Devam etmeden önce iki kulaklığı da kulağınızdan çıkarın. Ses yüksek olabilir."
+          }
+        }
+      }
+    },
+    "Checking whether the earbuds are being worn…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking whether the earbuds are being worn…"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıkların takılı olup olmadığı kontrol ediliyor…"
+          }
+        }
+      }
+    },
+    "Starting sound…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Starting sound…"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses başlatılıyor…"
+          }
+        }
+      }
+    },
+    "Playing a sound in the left earbud.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Playing a sound in the left earbud."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sol kulaklıkta ses çalınıyor."
+          }
+        }
+      }
+    },
+    "Playing a sound in the right earbud.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Playing a sound in the right earbud."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sağ kulaklıkta ses çalınıyor."
+          }
+        }
+      }
+    },
+    "Stopping sound…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stopping sound…"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses durduruluyor…"
+          }
+        }
+      }
+    },
+    "Sound stopped.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sound stopped."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses durduruldu."
+          }
+        }
+      }
+    },
+    "Couldn’t start the locating sound.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t start the locating sound."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bulma sesi başlatılamadı."
+          }
+        }
+      }
+    },
+    "Choose which earbud to find.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose which earbud to find."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bulmak istediğiniz kulaklığı seçin."
+          }
+        }
+      }
+    },
+    "Connect your paired earbuds before finding them.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect your paired earbuds before finding them."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıklarınızı bulmadan önce eşlenmiş kulaklıklarınıza bağlanın."
+          }
+        }
+      }
+    },
+    "The earbud finding connection timed out.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The earbud finding connection timed out."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık bulma bağlantısı zaman aşımına uğradı."
+          }
+        }
+      }
+    },
+    "The earbuds disconnected.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The earbuds disconnected."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıkların bağlantısı kesildi."
+          }
+        }
+      }
+    },
+    "These earbuds do not offer the finding service.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "These earbuds do not offer the finding service."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bu kulaklıklar bulma hizmetini desteklemiyor."
+          }
+        }
+      }
+    },
+    "Could not discover the earbud finding service.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not discover the earbud finding service."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık bulma hizmeti bulunamadı."
+          }
+        }
+      }
+    },
+    "The earbud finding service has no valid connection channel.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The earbud finding service has no valid connection channel."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık bulma hizmetinde geçerli bir bağlantı kanalı yok."
+          }
+        }
+      }
+    },
+    "Could not open the earbud finding connection.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not open the earbud finding connection."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık bulma bağlantısı kurulamadı."
+          }
+        }
+      }
+    },
+    "Could not send the earbud finding command.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not send the earbud finding command."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık bulma komutu gönderilemedi."
+          }
+        }
+      }
+    },
+    "The earbud finding connection closed.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The earbud finding connection closed."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık bulma bağlantısı kapandı."
+          }
+        }
+      }
+    },
+    "Connect your earbuds to find them nearby.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect your earbuds to find them nearby."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yakındaki kulaklıklarınızı bulmak için kulaklıklarınıza bağlanın."
+          }
+        }
+      }
+    },
+    "Playing a locating sound isn’t available for these earbuds yet.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Playing a locating sound isn’t available for these earbuds yet."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bu kulaklıklarda bulma sesi çalmak henüz desteklenmiyor."
+          }
+        }
+      }
+    },
+    "Finish the current headphone action first.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish the current headphone action first."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Önce mevcut kulaklık işlemini tamamlayın."
+          }
+        }
+      }
+    },
+    "The earbuds haven’t confirmed that the sound stopped. Keep them out of your ears.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The earbuds haven’t confirmed that the sound stopped. Keep them out of your ears."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıklar sesin durduğunu doğrulamadı. Kulaklıkları kulağınıza takmayın."
+          }
+        }
+      }
+    },
+    "Couldn’t check whether the earbuds are being worn. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t check whether the earbuds are being worn. Try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıkların takılı olup olmadığı kontrol edilemedi. Yeniden deneyin."
+          }
+        }
+      }
+    },
+    "Could not confirm the earbud finding status.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not confirm the earbud finding status."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık bulma durumu doğrulanamadı."
+          }
+        }
+      }
+    },
+    "Stop the locating sound before starting LDAC.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop the locating sound before starting LDAC."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC’ı başlatmadan önce bulma sesini durdurun."
+          }
+        }
+      }
+    },
+    "The sound gets louder and stops after 30 seconds.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The sound gets louder and stops after 30 seconds."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses giderek yükselir ve 30 saniye sonra durur."
+          }
+        }
+      }
+    },
+    "The sound is loud. Keep the earbuds away from your ears and anyone else’s while it plays.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The sound is loud. Keep the earbuds away from your ears and anyone else’s while it plays."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses seviyesi yüksek olacak. Çalarken kulaklıkları kendi kulaklarınızdan ve başkalarının kulaklarından uzak tutun."
+          }
+        }
+      }
+    },
+    "The earbud wear check hasn’t finished. Reconnect controls to try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The earbud wear check hasn’t finished. Reconnect controls to try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıkların takılı olup olmadığı henüz belirlenemedi. Yeniden denemek için denetim bağlantısını yeniden kurun."
+          }
+        }
+      }
+    },
+    "Left earbud detected in ear": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Left earbud detected in ear"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sol kulaklık kulağa takılı olarak algılandı"
+          }
+        }
+      }
+    },
+    "Right earbud detected in ear": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Right earbud detected in ear"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sağ kulaklık kulağa takılı olarak algılandı"
+          }
+        }
+      }
+    },
+    "Play Anyway": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play Anyway"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yine de Çal"
+          }
+        }
+      }
+    },
+    "A covered sensor can give a false reading. Make sure this earbud is out of everyone’s ears before playing the loud sound.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A covered sensor can give a false reading. Make sure this earbud is out of everyone’s ears before playing the loud sound."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sensörün üzeri kapalıysa yanlış algılama olabilir. Yüksek sesi çalmadan önce bu kulaklığın kimsenin kulağında olmadığından emin olun."
+          }
+        }
+      }
+    },
+    "If you’re wearing this earbud, take it out NOW!": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If you’re wearing this earbud, take it out NOW!"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bu kulaklık kulağınızdaysa DERHAL çıkarın!"
+          }
+        }
+      }
+    },
+    "Sound may still be playing": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sound may still be playing"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses hâlâ çalıyor olabilir"
+          }
+        }
+      }
+    },
+    "Are you ABSOLUTELY CERTAIN BEYOND ANY DOUBT that nobody is wearing the earbud right now? This action will be logged as authorized by %@.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Are you ABSOLUTELY CERTAIN BEYOND ANY DOUBT that nobody is wearing the earbud right now? This action will be logged as authorized by %@."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Şu anda bu kulaklığın kimsenin kulağında olmadığından EN UFAK BİR ŞÜPHEYE YER BIRAKMAYACAK KADAR EMİN MİSİNİZ? Bu işlem, %@ tarafından yetkilendirilmiş olarak kaydedilecek."
+          }
+        }
+      }
+    },
+    "Authorize playing a loud locating sound despite the in-ear warning.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authorize playing a loud locating sound despite the in-ear warning."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklığın takılı olduğu uyarısına rağmen yüksek sesli bulma sesinin çalınmasına izin verin."
+          }
+        }
+      }
+    },
+    "Couldn’t authorize playback. No sound was started.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t authorize playback. No sound was started."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses çalma izni alınamadı. Ses başlatılmadı."
+          }
+        }
+      }
+    },
+    "Authorization expired. Start again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authorization expired. Start again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yetkilendirmenin süresi doldu. Yeniden başlayın."
+          }
+        }
+      }
+    },
+    "Authorizing…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authorizing…"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yetkilendiriliyor…"
+          }
+        }
+      }
+    },
+    "Waiting for confirmation…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for confirmation…"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Onay bekleniyor…"
+          }
+        }
+      }
+    },
+    "I verify that nobody is wearing the left earbud right now.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I verify that nobody is wearing the left earbud right now."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Şu anda sol kulaklığın kimsenin kulağında olmadığını onaylıyorum."
+          }
+        }
+      }
+    },
+    "I verify that nobody is wearing the right earbud right now.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I verify that nobody is wearing the right earbud right now."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Şu anda sağ kulaklığın kimsenin kulağında olmadığını onaylıyorum."
+          }
+        }
+      }
+    },
+    "Couldn’t save the authorization record. No sound was started.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t save the authorization record. No sound was started."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yetkilendirme kaydı kaydedilemedi. Ses başlatılmadı."
+          }
+        }
+      }
+    },
+    "Saving authorization…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saving authorization…"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yetkilendirme kaydediliyor…"
+          }
+        }
+      }
+    },
+    "Acouplet can’t detect whether these earbuds are in your ears.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet can’t detect whether these earbuds are in your ears."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet, bu kulaklıkların kulağınızda olup olmadığını algılayamıyor."
+          }
+        }
+      }
+    },
+    "Waiting for headphone capabilities…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for headphone capabilities…"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık özellikleri bekleniyor…"
+          }
+        }
+      }
+    },
+    "The earbuds declined the locating-sound request.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The earbuds declined the locating-sound request."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıklar, bulma sesi çalma isteğini reddetti."
+          }
+        }
+      }
     }
   },
   "version": "1.1"

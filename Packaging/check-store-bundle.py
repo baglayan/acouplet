@@ -47,9 +47,11 @@ def check_bundle(artifact):
     if executable not in binaries:
         raise ValueError('Main executable is not a Mach-O binary')
     resources = app / 'Contents/Resources'
-    for name in ['LICENSE', 'THIRD-PARTY-NOTICES.md']:
-        if (resources / name).read_bytes() != (Path(__file__).parent.parent / name).read_bytes():
-            raise ValueError(f'Missing or stale bundled notice: {name}')
+    for name in ['LICENSE', 'THIRD-PARTY-NOTICES.md', 'Resources/PrivacyInfo.xcprivacy']:
+        source = Path(__file__).parent.parent / name
+        if (resources / source.name).read_bytes() != source.read_bytes():
+            raise ValueError(f'Missing or stale bundled resource: {source.name}')
+    plistlib.loads((resources / 'PrivacyInfo.xcprivacy').read_bytes())
     miniature_assets = set(runpy.run_path(str(Path(__file__).with_name('prepare-no-sony-artwork.py')))['mini_icons'])
     allowed_assets = miniature_assets | {'AppIcon', 'AppIcon_Assets/system-dark'}
     allowed_assets |= {'AppIcon_Assets/Gradient-' + str(index) for index in [1, 3, 4]}

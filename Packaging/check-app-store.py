@@ -20,6 +20,7 @@ def check(name, alteration=None, rejects=False, archive=False):
         (resources / 'Assets.car').write_bytes(b'assets')
         for notice in ['LICENSE', 'THIRD-PARTY-NOTICES.md']:
             shutil.copy2(packaging.parent / notice, resources / notice)
+        shutil.copy2(packaging.parent / 'Resources/PrivacyInfo.xcprivacy', resources / 'PrivacyInfo.xcprivacy')
         names = [*mini_icons, 'AppIcon', 'AppIcon/SoftParts', 'AppIcon_Assets/Color-1', 'ZZZZPackedAsset-1.0.1-gamut0']
         imports = b'/System/Library/Frameworks/Foundation.framework/Foundation'
         symbols = b'public_symbols'
@@ -64,6 +65,8 @@ check('unknown-asset', lambda artifact, app, names: names.append('FuturePhotogra
 check('missing-miniature', lambda artifact, app, names: names.remove('Earbuds'), rejects=True)
 check('raster-resource', lambda artifact, app, names: (app / 'Contents/Resources/photo.png').write_bytes(b'image'), rejects=True)
 check('stale-notices', lambda artifact, app, names: (app / 'Contents/Resources/THIRD-PARTY-NOTICES.md').write_text('old'), rejects=True)
+check('missing-privacy-manifest', lambda artifact, app, names: (app / 'Contents/Resources/PrivacyInfo.xcprivacy').unlink(), rejects=True)
+check('stale-privacy-manifest', lambda artifact, app, names: (app / 'Contents/Resources/PrivacyInfo.xcprivacy').write_bytes(plistlib.dumps({})), rejects=True)
 for name in ['Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'Sparkle.framework', 'Sparkle-LICENSE.txt', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletAudio', 'AcoupletLDACOutput.driver', 'Acouplet LDAC Output.pkg', 'LDAC-LICENSE.txt', 'LDAC-NOTICE.txt', 'libldacBT_enc.dylib', 'Install.command', 'Uninstall Service.command', 'Uninstall LDAC Output.command']:
     check('excluded-file-' + name, lambda artifact, app, names, name=name: (app / name).touch(), rejects=True)
 check('non-mach-main', lambda artifact, app, names: (app / 'Contents/MacOS/Acouplet').write_bytes(b'placeholder'), rejects=True)

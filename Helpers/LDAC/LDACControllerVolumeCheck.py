@@ -55,6 +55,10 @@ struct ConnectionTransition {
     var awaitingUser: Bool { phase == .awaitingUser }
 }
 struct Route { var uid: String? }
+struct EarbudFinder {
+    var isBusy: Bool
+    var mayBeRinging: Bool
+}
 @MainActor
 final class MacAudioRouteObserver {
     var route: Route? = Route(uid: "fixture-headphones")
@@ -84,6 +88,7 @@ final class SonyHeadphonesController: ObservableObject {
     var address = "02:00:00:00:00:01"
     var playback = Playback()
     var multipoint = Multipoint()
+    var earbudFinder: EarbudFinder?
     var isReady = true
     var isDeviceConnected = true
     var supportsConnectionMode = true
@@ -102,11 +107,12 @@ final class SonyHeadphonesController: ObservableObject {
     var refreshes = 0
     var volumeRefreshes = 0
     var queuedWrite: VolumeWrite?
+    var blocksPlaybackCommands = false
     var transmitted: [Int] = []
     var continuation: CheckedContinuation<Void, Error>?
     var hasCurrentMusicVolumeControl: Bool { isReady && capabilityFresh && statusFresh && volumeFresh && playback.volume != nil }
-    var hasFreshMusicVolumeReadback: Bool { hasCurrentMusicVolumeControl }
-    var canControlMusicVolume: Bool { hasCurrentMusicVolumeControl && queuedWrite == nil }
+    var hasFreshMusicVolumeReadback: Bool { hasCurrentMusicVolumeControl && canControlMusicVolume }
+    var canControlMusicVolume: Bool { hasCurrentMusicVolumeControl && !blocksPlaybackCommands && queuedWrite == nil }
     func hasCurrentMusicSourceContext(for address: String?) -> Bool { localSource }
     func setConnectionMode(_ mode: SonyConnectionMode) {
         guard mode != connectionMode, connectionTransition?.isFinished != false else { return }
@@ -119,7 +125,7 @@ final class SonyHeadphonesController: ObservableObject {
         connectionMode = mode
         connectionTransition = ConnectionTransition(phase: .confirmed)
     }
-    func canPerformConfirmedSettingChange(_ setting: Setting) -> Bool { isReady && queuedWrite == nil }
+    func canPerformConfirmedSettingChange(_ setting: Setting) -> Bool { isReady && !blocksPlaybackCommands && queuedWrite == nil }
     func refresh() {
         refreshes += 1
         guard isReady else { return }
@@ -253,6 +259,7 @@ final class Controller: ObservableObject {
     var outputID: UUID?
     var headphones: SonyHeadphonesController?
     let bundle = Bundle.main
+    let inspectDriver: (Bundle) -> LDACDriverInstaller.State = { LDACDriverInstaller.inspect(bundle: $0) }
     var driverState = LDACDriverInstaller.State.current
     var audioRoute: MacAudioRouteObserver? = MacAudioRouteObserver()
     var resumeOutputUID: String?
@@ -421,11 +428,31 @@ enum Check {
         modernDevice.transmitVolume()
         modernDevice.confirmVolume()
         try await waitUntil { modern.usable }
+        let transmitted = modernDevice.transmitted
+        let silences = modernOutput.silences
+        modernDevice.blocksPlaybackCommands = true
+        modern.pendingVolume = 7
+        modern.controlsChanged()
+        try await Task.sleep(for: .milliseconds(150))
+        precondition(modern.bindingIsCurrent && modern.usable && modernOutput.ready && !modern.isRecovering
+                     && modern.session === modernRaw && modernOutput.silences == silences,
+                     "A temporary command block discarded active LDAC ownership")
+        precondition(modern.pendingVolume == 7 && modernDevice.queuedWrite == nil && modernDevice.transmitted == transmitted,
+                     "A blocked Sony volume command was submitted")
+        modernDevice.blocksPlaybackCommands = false
+        modern.controlsChanged()
+        try await waitUntil { modernDevice.queuedWrite != nil }
+        modernDevice.transmitVolume()
+        modernDevice.confirmVolume()
+        try await waitUntil { modern.volumeTask == nil }
+        precondition(modern.usable && modernOutput.ready && !modern.isRecovering && modernDevice.playback.volume == 7,
+                     "Volume did not resume on the original LDAC session")
+        modernDevice.blocksPlaybackCommands = true
         modernDevice.localSource = false
         modern.controlsChanged()
         precondition(!modernOutput.ready && !modern.usable)
         try await stop(modern)
-        print("PASS existing v2 path: source ownership remains required and no legacy refresh is imposed")
+        print("PASS existing v2 path: temporary command blocks retain active audio and defer volume; unblocking resumes writes; real source loss still revokes ownership")
 
         let (resuming, returning, oldOutput, oldSession) = try await started(.v2)
         let originalPreference = UUID()

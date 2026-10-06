@@ -864,7 +864,7 @@ final class SonyPlaybackTests: XCTestCase {
     }
 
     @MainActor
-    func testNativeLDACVolumeContextSurvivesPendingWriteAndRejectsSourceOrCallLoss() {
+    func testNativeLDACVolumeContextSurvivesPendingWriteAndRejectsSourceOrCallLoss() throws {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
         XCTAssertFalse(controller.hasCurrentMusicVolumeControl)
@@ -876,6 +876,28 @@ final class SonyPlaybackTests: XCTestCase {
         XCTAssertTrue(controller.hasCurrentMusicVolumeControl)
         XCTAssertNotNil(controller.musicVolumeReadbackID)
         XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
+        XCTAssertTrue(controller.beginHeadGesturePractice())
+        let practice = try XCTUnwrap(controller.headGesturePracticeTransition?.id)
+        XCTAssertTrue(controller.isRunningHeadphoneTest)
+        XCTAssertTrue(controller.hasCurrentMusicVolumeControl)
+        XCTAssertFalse(controller.canControlMusicVolume)
+        XCTAssertFalse(controller.hasFreshMusicVolumeReadback)
+        XCTAssertFalse(controller.canPerformConfirmedSettingChange(.playbackVolume))
+        let writes = controller.simulatedTransmittedFrames
+        controller.setPlaybackVolume(19)
+        XCTAssertNil(controller.pendingChanges[.playbackVolume])
+        XCTAssertEqual(controller.simulatedTransmittedFrames, writes)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xA5, 1, 0, 1, 1]))
+        XCTAssertFalse(controller.hasCurrentMusicVolumeControl)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xA5, 1, 0, 1, 0]))
+        XCTAssertTrue(controller.hasCurrentMusicVolumeControl)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF3, 0x10, 0]))
+        acknowledgeSimulatedCommands(controller)
+        controller.cancelHeadGesturePractice(id: practice)
+        controller.dismissHeadGesturePractice(id: practice)
+        XCTAssertFalse(controller.isRunningHeadphoneTest)
+        XCTAssertTrue(controller.canControlMusicVolume)
+        XCTAssertTrue(controller.hasCurrentMusicVolumeControl)
         let readback = controller.musicVolumeReadbackID
         controller.setPlaybackVolume(20)
         XCTAssertFalse(controller.canControlMusicVolume)

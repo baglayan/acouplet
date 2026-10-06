@@ -71,6 +71,8 @@ final class SonyDeviceCoordinator: ObservableObject {
     private var observations: [String: AnyCancellable] = [:]
     private var fallbackObservation: AnyCancellable?
     private var updateScheduled = false
+    private var earbudFindingTerminationObserver: AnyCancellable?
+    private var earbudFindingTerminationSessions = Set<UUID>()
 
     var discoveryTimer: Timer?
     var discoveryGeneration: UInt64 = 0
@@ -93,6 +95,15 @@ final class SonyDeviceCoordinator: ObservableObject {
     }
 
     var hasMultipleConnectedDevices: Bool { connectedDevices.count > 1 }
+
+    var selectableDevices: [SonyConnectedDevice] {
+        retainedDevices.filter { device in
+            connectedAddresses.contains(device.address) || controllersByAddress[device.address]?.earbudFinder?.isBusy == true
+                || controllersByAddress[device.address]?.earbudFinder?.mayBeRinging == true
+        }
+    }
+
+    var hasOtherSelectableDevices: Bool { selectableDevices.contains { $0.address != selectedAddress } }
 
     init(fallbackController: SonyHeadphonesController,
          controllerFactory: @escaping (SonyConnectedDevice) -> SonyHeadphonesController) {
@@ -126,7 +137,7 @@ final class SonyDeviceCoordinator: ObservableObject {
     }
 
     func select(address: String) {
-        guard let normalized = SonyBLEIdentity.normalizedAddress(address), connectedAddresses.contains(normalized),
+        guard let normalized = SonyBLEIdentity.normalizedAddress(address), selectableDevices.contains(where: { $0.address == normalized }),
               selectedAddress != normalized else { return }
         selectedAddress = normalized
     }
@@ -135,6 +146,35 @@ final class SonyDeviceCoordinator: ObservableObject {
         guard let normalized = SonyBLEIdentity.normalizedAddress(address), controllersByAddress[normalized] != nil,
               selectedAddress != normalized else { return }
         selectedAddress = normalized
+    }
+
+    func prepareEarbudFindingForTermination(completion: @escaping () -> Void) -> Bool {
+        guard earbudFindingTerminationObserver == nil else { return true }
+        let finders = controllers.compactMap(\.earbudFinder).filter { finder in
+            guard let session = finder.session else { return false }
+            return (finder.isBusy || finder.mayBeRinging) && !earbudFindingTerminationSessions.contains(session.id)
+        }
+        guard !finders.isEmpty else { return false }
+        earbudFindingTerminationSessions.formUnion(finders.compactMap { $0.session?.id })
+        earbudFindingTerminationObserver = Publishers.MergeMany(finders.map { $0.$session.eraseToAnyPublisher() })
+            .receive(on: DispatchQueue.main)
+            .first { _ in finders.allSatisfy { !$0.isBusy } }
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.earbudFindingTerminationObserver = nil
+                completion()
+            }
+        for finder in finders {
+            if finder.session?.isRetryingStop == true { continue }
+            if finder.session?.phase == .unconfirmed, finder.mayBeRinging { finder.retryStop() }
+            else { finder.dismiss() }
+        }
+        return true
+    }
+
+    func resetEarbudFindingTermination() {
+        earbudFindingTerminationObserver = nil
+        earbudFindingTerminationSessions.removeAll()
     }
 
     func reconcileConnectedDevices(_ devices: [SonyConnectedDevice]) {
@@ -334,6 +374,7 @@ final class SonyDeviceCoordinator: ObservableObject {
 extension SonyHeadphonesController {
     var needsDeviceContext: Bool {
         earTipFitTransition != nil || headGesturePracticeTransition != nil || legacyOptimizerTransition != nil
+            || earbudFinder?.isBusy == true || earbudFinder?.mayBeRinging == true
             || connectionTransition.map { !$0.isFinished || $0.phase == .failed || $0.phase == .pairingRequired } == true
             || multipointTransition.map { !$0.isFinished || $0.phase == .failed } == true
             || sourceTransition?.isFinished == false || deviceActionTransition?.isFinished == false

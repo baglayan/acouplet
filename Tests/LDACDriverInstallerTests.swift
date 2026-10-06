@@ -19,6 +19,45 @@ final class LDACDriverInstallerTests: XCTestCase {
         XCTAssertEqual(LDACDriverInstaller.state(required: 2, installed: 2, loaded: 1), .restartRequired)
     }
 
+    func testRefreshDistinguishesInstallationFromRestart() {
+        var installed: Int? = 2
+        var loaded: Int? = 2
+        let controller = LDACController(inspectDriver: { _ in
+            LDACDriverInstaller.state(required: 3, installed: installed, loaded: loaded)
+        })
+        XCTAssertEqual(controller.driverState, .outdated)
+        XCTAssertTrue(controller.canStartOrInstallDriver)
+
+        installed = 3
+        controller.refreshDriverState()
+        XCTAssertEqual(controller.driverState, .restartRequired)
+        XCTAssertFalse(controller.canStartOrInstallDriver)
+
+        loaded = nil
+        controller.refreshDriverState()
+        XCTAssertEqual(controller.driverState, .restartRequired)
+        XCTAssertFalse(controller.canStartOrInstallDriver)
+
+        loaded = 3
+        controller.refreshDriverState()
+        XCTAssertEqual(controller.driverState, .current)
+        XCTAssertTrue(controller.canStartOrInstallDriver)
+
+        installed = nil
+        controller.refreshDriverState()
+        XCTAssertEqual(controller.driverState, .missing)
+        XCTAssertTrue(controller.canStartOrInstallDriver)
+    }
+
+    func testRefreshAfterCancelledInstallationStillRequiresUpdate() {
+        let controller = LDACController(inspectDriver: { _ in
+            LDACDriverInstaller.state(required: 3, installed: 2, loaded: 2)
+        })
+        controller.refreshDriverState()
+        XCTAssertEqual(controller.driverState, .outdated)
+        XCTAssertTrue(controller.canStartOrInstallDriver)
+    }
+
     func testUntrustedBundleCannotOpenAnInstaller() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }

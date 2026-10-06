@@ -188,7 +188,7 @@ struct SettingsView: View {
     private var headphoneControls: some View {
         Form {
             Section("Headphones") {
-                if devices.hasMultipleConnectedDevices {
+                if devices.hasOtherSelectableDevices {
                     ConnectedHeadphonePicker()
                 } else {
                     LabeledContent("Device") {
@@ -217,7 +217,6 @@ struct SettingsView: View {
                 LabeledContent("Mac audio output", value: audioOutputName)
                     .accessibilityIdentifier("audio.macOutput")
                 Link("Sound Settings…", destination: URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension")!)
-                    .tint(.primary)
                 if headphones.supportsConnectionMode || headphones.connectionTransition != nil {
                     ConnectionModeControl()
                         .disabled(headphones.isRunningHeadphoneTest || headphones.powerOffState != nil)
@@ -255,6 +254,9 @@ struct SettingsView: View {
             }
             if headphones.earTipFit.isSupported || headphones.earTipFitTransition != nil {
                 Section("Earbud Fit") { EarTipFitControl() }
+            }
+            if headphones.supportsEarbudFinding || headphones.earbudFinder?.isBusy == true || headphones.earbudFinder?.mayBeRinging == true {
+                Section("Find Earbuds") { FindEarbudsControl() }
             }
             if headphones.multipoint.supportsInventory || headphones.sourceTransition?.phase == .failed
                 || headphones.deviceActionTransition?.phase == .failed || headphones.systemFeatures.multipoint != nil || headphones.multipointTransition != nil {

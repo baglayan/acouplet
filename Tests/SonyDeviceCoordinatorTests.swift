@@ -527,6 +527,277 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.selectedAddress, secondAddress)
     }
 
+    @MainActor
+    func testUnconfirmedFindingRemainsSelectableAfterSwitchingAndDisconnecting() async throws {
+        for otherStaysConnected in [true, false] {
+            let coordinator = makeCoordinator()
+            let first = try device(firstAddress, name: "WF-1000XM5", model: .wfXM5)
+            let second = try device(secondAddress, name: "WH-1000XM6", model: .whXM6)
+            coordinator.reconcileConnectedDevices([first, second])
+            let owner = try XCTUnwrap(coordinator.controller(for: firstAddress))
+            let other = try XCTUnwrap(coordinator.controller(for: secondAddress))
+            owner.simulateDeviceConnection(named: first.name, simulatedAddress: firstAddress, galleryModel: .wfXM5)
+            let firmware = Array("6.1.0".utf8)
+            deliver([0x05, 2, UInt8(firmware.count)] + firmware, to: owner)
+            XCTAssertTrue(owner.beginEarbudFinder())
+            let finder = try XCTUnwrap(owner.earbudFinder)
+            defer {
+                finder.dismiss()
+                finder.simulateTransportFailure()
+                coordinator.controllers.forEach { $0.simulateControlLoss() }
+            }
+            finder.play(.left)
+            finder.simulateConnectionOpened()
+            let ring = try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30)?.message.encoded)
+            let stop = try XCTUnwrap(FastPairRingCommand.stop.message.encoded)
+            XCTAssertEqual(finder.simulatedSentMessages, [ring])
+            coordinator.select(address: secondAddress)
+            finder.simulateTransportFailure()
+            owner.simulateControlLoss(deviceConnected: false)
+            if !otherStaysConnected { other.simulateControlLoss(deviceConnected: false) }
+            coordinator.reconcilePairedDevices([first, second], connectedAddresses: otherStaysConnected ? [secondAddress] : [])
+            for _ in 0..<10 { await Task.yield() }
+            XCTAssertEqual(coordinator.selectedAddress, secondAddress)
+            XCTAssertEqual(coordinator.connectedDevices.map(\.address), otherStaysConnected ? [secondAddress] : [])
+            XCTAssertEqual(coordinator.selectableDevices.map(\.address), otherStaysConnected ? [firstAddress, secondAddress] : [firstAddress])
+            XCTAssertTrue(coordinator.hasOtherSelectableDevices)
+            XCTAssertEqual(finder.session?.phase, .unconfirmed)
+            XCTAssertTrue(finder.mayBeRinging)
+            XCTAssertEqual(finder.simulatedSentMessages, [ring])
+            coordinator.select(address: firstAddress)
+            XCTAssertTrue(coordinator.selectedController === owner)
+            XCTAssertTrue(owner.beginEarbudFinder())
+            XCTAssertTrue(owner.earbudFinder === finder)
+            XCTAssertNil(other.earbudFinder)
+            finder.retryStop()
+            finder.simulateConnectionOpened()
+            XCTAssertEqual(finder.simulatedSentMessages, [ring, stop])
+            finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded))
+            for _ in 0..<10 { await Task.yield() }
+            XCTAssertEqual(finder.session?.phase, .finished)
+            XCTAssertFalse(finder.mayBeRinging)
+            XCTAssertEqual(coordinator.selectableDevices.map(\.address), otherStaysConnected ? [secondAddress] : [])
+            XCTAssertFalse(coordinator.hasOtherSelectableDevices)
+            XCTAssertEqual(finder.simulatedSentMessages, [ring, stop])
+        }
+    }
+
+    @MainActor
+    func testTerminationWaitsForExistingStopRetryWithoutCancellingOrRepeatingIt() async throws {
+        let (coordinator, owner, finder) = try findingCoordinator()
+        defer { finishFinding(coordinator) }
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        let ring = try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30)?.message.encoded)
+        let stop = try XCTUnwrap(FastPairRingCommand.stop.message.encoded)
+        XCTAssertEqual(finder.simulatedSentMessages, [ring])
+        finder.simulateTransportFailure()
+        finder.retryStop()
+        var completions = 0
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { XCTFail("The active cleanup must retain its original completion.") })
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 0)
+        XCTAssertEqual(finder.session?.phase, .connecting)
+        XCTAssertEqual(finder.session?.isRetryingStop, true)
+        XCTAssertEqual(finder.simulatedSentMessages, [ring])
+        finder.simulateConnectionOpened()
+        XCTAssertEqual(finder.simulatedSentMessages, [ring, stop])
+        try acknowledgeFindingStop(finder)
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 1)
+        XCTAssertFalse(coordinator.prepareEarbudFindingForTermination { XCTFail("A completed session must not run cleanup again.") })
+        XCTAssertTrue(owner.beginEarbudFinder())
+        let next = try XCTUnwrap(owner.earbudFinder)
+        next.play(.right)
+        XCTAssertNotEqual(next.session?.id, finder.session?.id)
+        next.simulateConnectionOpened()
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
+        XCTAssertEqual(next.session?.phase, .stopping)
+        try acknowledgeFindingStop(next)
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 2)
+        XCTAssertEqual(finder.simulatedSentMessages, [ring, stop])
+    }
+
+    @MainActor
+    func testTerminationRetriesUnconfirmedStopOnceAndResetAllowsAnotherQuit() async throws {
+        let (coordinator, _, finder) = try findingCoordinator()
+        defer { finishFinding(coordinator) }
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        let ring = try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30)?.message.encoded)
+        let stop = try XCTUnwrap(FastPairRingCommand.stop.message.encoded)
+        finder.simulateTransportFailure()
+        var completions = 0
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
+        XCTAssertEqual(finder.session?.phase, .connecting)
+        finder.simulateConnectionOpened()
+        finder.simulateAcknowledgementTimeout()
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 1)
+        XCTAssertEqual(finder.session?.phase, .unconfirmed)
+        XCTAssertTrue(finder.mayBeRinging)
+        XCTAssertFalse(coordinator.prepareEarbudFindingForTermination { XCTFail("Failed cleanup must not retry indefinitely.") })
+        XCTAssertEqual(finder.simulatedSentMessages, [ring, stop])
+        coordinator.resetEarbudFindingTermination()
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
+        finder.simulateConnectionOpened()
+        try acknowledgeFindingStop(finder)
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 2)
+        XCTAssertFalse(finder.mayBeRinging)
+        XCTAssertEqual(finder.simulatedSentMessages, [ring, stop, stop])
+    }
+
+    @MainActor
+    func testTerminationDoesNotReconnectAfterItsOrdinaryStopTimesOut() async throws {
+        let (coordinator, _, finder) = try findingCoordinator()
+        defer { finishFinding(coordinator) }
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        var completions = 0
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
+        XCTAssertEqual(finder.session?.phase, .stopping)
+        finder.simulateAcknowledgementTimeout()
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 1)
+        XCTAssertEqual(finder.session?.phase, .unconfirmed)
+        XCTAssertEqual(finder.session?.isRetryingStop, false)
+        XCTAssertFalse(coordinator.prepareEarbudFindingForTermination { XCTFail("This session already attempted its shutdown Stop.") })
+        XCTAssertEqual(finder.simulatedSentMessages, [
+            try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30)?.message.encoded),
+            try XCTUnwrap(FastPairRingCommand.stop.message.encoded),
+        ])
+    }
+
+    @MainActor
+    func testTerminationCancelsAuthenticationAndRejectsItsLateSuccess() async throws {
+        let (coordinator, owner, finder) = try findingCoordinator()
+        defer { finishFinding(coordinator) }
+        owner.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x07, 0, 1, 0xF0, 0]))
+        acknowledgeFindingQueries(owner)
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeFindingQueries(owner)
+        owner.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0xF3, 0, 0]))
+        await receiveFindingUpdates()
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+        let sessionID = try XCTUnwrap(finder.session?.id)
+        finder.authenticateWearingOverride(sessionID: sessionID)
+        XCTAssertTrue(finder.isAuthenticating)
+        var completions = 0
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
+        XCTAssertFalse(finder.isAuthenticating)
+        finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 1)
+        XCTAssertEqual(finder.session?.phase, .finished)
+        XCTAssertNil(finder.wearingAuthorization)
+        XCTAssertTrue(finder.simulatedAuthorizationEvents.isEmpty)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
+    @MainActor
+    func testTerminationCancelsAnOpeningFinderBeforeAnySoundCanStart() async throws {
+        let (coordinator, _, finder) = try findingCoordinator()
+        defer { finishFinding(coordinator) }
+        finder.play(.left)
+        var completions = 0
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
+        finder.simulateConnectionOpened()
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 1)
+        XCTAssertEqual(finder.session?.phase, .finished)
+        XCTAssertFalse(finder.mayBeRinging)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
+    @MainActor
+    func testTerminationWaitsForEveryDeviceAndResetCancelsPendingCompletion() async throws {
+        let coordinator = makeCoordinator()
+        let first = try device(firstAddress, name: "WF-1000XM5", model: .wfXM5)
+        let second = try device(secondAddress, name: "WF-1000XM5", model: .wfXM5)
+        coordinator.reconcileConnectedDevices([first, second])
+        defer { finishFinding(coordinator) }
+        let left = try prepareFinder(try XCTUnwrap(coordinator.controller(for: firstAddress)))
+        let right = try prepareFinder(try XCTUnwrap(coordinator.controller(for: secondAddress)))
+        left.play(.left)
+        left.simulateConnectionOpened()
+        right.play(.right)
+        right.simulateConnectionOpened()
+        left.simulateTransportFailure()
+        var completions = 0
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
+        XCTAssertEqual(left.session?.phase, .connecting)
+        XCTAssertEqual(right.session?.phase, .stopping)
+        try acknowledgeFindingStop(right)
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 0)
+        left.simulateConnectionOpened()
+        try acknowledgeFindingStop(left)
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 1)
+        coordinator.resetEarbudFindingTermination()
+        let next = try prepareFinder(try XCTUnwrap(coordinator.controller(for: firstAddress)))
+        next.play(.left)
+        next.simulateConnectionOpened()
+        XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
+        coordinator.resetEarbudFindingTermination()
+        try acknowledgeFindingStop(next)
+        await receiveFindingUpdates()
+        XCTAssertEqual(completions, 1)
+    }
+
+    @MainActor
+    private func findingCoordinator() throws -> (SonyDeviceCoordinator, SonyHeadphonesController, EarbudFinderController) {
+        let coordinator = makeCoordinator()
+        coordinator.reconcileConnectedDevices([try device(firstAddress, name: "WF-1000XM5", model: .wfXM5)])
+        let owner = try XCTUnwrap(coordinator.controller(for: firstAddress))
+        return (coordinator, owner, try prepareFinder(owner))
+    }
+
+    @MainActor
+    private func prepareFinder(_ owner: SonyHeadphonesController) throws -> EarbudFinderController {
+        owner.simulateDeviceConnection(named: "WF-1000XM5", simulatedAddress: owner.address, galleryModel: .wfXM5)
+        let firmware = Array("6.1.0".utf8)
+        deliver([0x05, 2, UInt8(firmware.count)] + firmware, to: owner)
+        XCTAssertTrue(owner.beginEarbudFinder())
+        return try XCTUnwrap(owner.earbudFinder)
+    }
+
+    @MainActor
+    private func finishFinding(_ coordinator: SonyDeviceCoordinator) {
+        coordinator.resetEarbudFindingTermination()
+        for owner in coordinator.controllers {
+            owner.earbudFinder?.dismiss()
+            owner.earbudFinder?.simulateTransportFailure()
+            owner.simulateControlLoss()
+        }
+    }
+
+    @MainActor
+    private func acknowledgeFindingStop(_ finder: EarbudFinderController) throws {
+        finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded))
+    }
+
+    @MainActor
+    private func receiveFindingUpdates() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
+    @MainActor
+    private func acknowledgeFindingQueries(_ owner: SonyHeadphonesController) {
+        for _ in 0..<200 {
+            guard let frame = owner.simulatedPendingFrame else { return }
+            owner.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        }
+        XCTFail("The simulated command queue did not drain.")
+    }
+
     private func device(_ address: String, name: String, model: SonyDeviceModel) throws -> SonyConnectedDevice {
         try XCTUnwrap(SonyConnectedDevice(address: address, name: name, model: model))
     }

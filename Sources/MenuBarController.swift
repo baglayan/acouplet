@@ -107,7 +107,8 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         #else
         let hasPendingUpdate = false
         #endif
-        let isVisible = hasPendingUpdate || settings.keepMenuBarIconWhenDisconnected || headphones.showsMenuBarIcon
+        let keepsFinderVisible = devices.controllers.contains { $0.earbudFinder?.isBusy == true || $0.earbudFinder?.mayBeRinging == true }
+        let isVisible = hasPendingUpdate || settings.keepMenuBarIconWhenDisconnected || headphones.showsMenuBarIcon || keepsFinderVisible
             || (keepsLDACVisible && headphones.deviceModel != .unknown)
         if statusItem.isVisible != isVisible { statusItem.isVisible = isVisible }
         guard let button = statusItem.button else { return }
@@ -227,6 +228,9 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     }
 
     func popoverWillShow(_ notification: Notification) {
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        ldac.refreshDriverState()
+        #endif
         retriedControllers.removeAll()
         let shownAt = ProcessInfo.processInfo.systemUptime
         dismissalObservations.removeAll()
