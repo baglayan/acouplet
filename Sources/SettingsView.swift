@@ -2088,6 +2088,8 @@ struct MultipointSettingControl: View {
     @State private var showsAlert = false
 
     var body: some View {
+        let enabled = headphones.systemFeatures.multipoint?.enabled
+            ?? headphones.multipointTransition.flatMap { $0.isFinished ? nil : $0.originalEnabled }
         if compact || headphones.systemFeatures.multipoint != nil || headphones.multipointTransition != nil {
             VStack(alignment: .leading, spacing: 6) {
                 if compact {
@@ -2111,7 +2113,7 @@ struct MultipointSettingControl: View {
                             }
                         }
                         .frame(width: 16, height: 16)
-                        if let enabled = headphones.systemFeatures.multipoint?.enabled {
+                        if let enabled {
                             Toggle("Multipoint", isOn: Binding(get: { enabled }, set: headphones.setMultipointEnabled))
                                 .labelsHidden()
                                 .toggleStyle(.switch)
@@ -2120,7 +2122,7 @@ struct MultipointSettingControl: View {
                                 .accessibilityIdentifier("multipoint.enabled")
                         }
                     }
-                } else if let enabled = headphones.systemFeatures.multipoint?.enabled {
+                } else if let enabled {
                     Toggle("Multipoint", isOn: Binding(get: { enabled }, set: headphones.setMultipointEnabled))
                         .disabled(headphones.multipointUnavailableReason != nil)
                         .help(headphones.multipointUnavailableReason ?? "")
@@ -2132,9 +2134,10 @@ struct MultipointSettingControl: View {
                     if let failure = transition.failureMessage {
                         Text(failure).font(.caption)
                             .accessibilityIdentifier("multipoint.settingError")
-                        if headphones.canCheckMultipointChange {
+                        if transition.canRetryRecovery {
                             Button("Check Setting") { headphones.checkMultipointChange() }
                                 .controlSize(.small)
+                                .disabled(!headphones.canCheckMultipointChange)
                                 .accessibilityIdentifier("multipoint.checkSetting")
                         }
                     } else if transition.awaitingUser {
@@ -2172,6 +2175,9 @@ struct MultipointSettingControl: View {
     }
 
     private func alertMessage(_ alert: SonyConnectionAlert) -> String {
+        if alert.format == .fixed, alert.messageID == 0x70 {
+            return String(localized: "Audio may cut out when Sound Quality and multipoint are both enabled.")
+        }
         var message = String(localized: "Changing this setting may briefly disconnect the headphones. Reconnect them if needed.")
         if alert.format == .fixed, alert.messageID == 0x06 {
             message += String(localized: "\n\nThe headphones report that LDAC will be unavailable with this change.")

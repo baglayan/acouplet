@@ -992,6 +992,7 @@ struct HeadphoneConnectionView: View {
                 else { headphones.connect() }
             }
             .headphoneButtonStyle(prominent: true)
+            .disabled(headphones.multipointTransition?.isFinished == false)
             .accessibilityIdentifier("headphones.connect")
             .frame(maxWidth: .infinity, minHeight: 160)
         } else {
@@ -999,7 +1000,7 @@ struct HeadphoneConnectionView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(connectionTitle).font(.headline)
-                        if isSearching || isConnecting || isAutomaticallyReconnecting || headphones.isPoweringOff {
+                        if isSearching || isConnecting || isAutomaticallyReconnecting || isRecoveringMultipoint || headphones.isPoweringOff {
                             ProgressView().controlSize(.small)
                                 .accessibilityLabel(connectionTitle)
                         }
@@ -1017,7 +1018,7 @@ struct HeadphoneConnectionView: View {
                     }
                     .headphoneButtonStyle()
                     .tint(.primary)
-                    .disabled(isSearching || isConnecting || headphones.isPoweringOff)
+                    .disabled(isSearching || isConnecting || isRecoveringMultipoint || headphones.isPoweringOff)
                     .accessibilityIdentifier("headphones.connect")
                     Button("Bluetooth Settings…") {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
@@ -1033,6 +1034,8 @@ struct HeadphoneConnectionView: View {
 
     private var isSearching: Bool { headphones.linkState == .searching }
 
+    private var isRecoveringMultipoint: Bool { headphones.multipointTransition?.phase == .recovering }
+
     private var isConnecting: Bool {
         headphones.linkState == .opening || headphones.linkState == .handshaking
     }
@@ -1044,6 +1047,7 @@ struct HeadphoneConnectionView: View {
     private var connectionTitle: String {
         if headphones.headGesturePracticeTransition?.phase == .interrupted { return String(localized: "Head Gesture Practice Needs Attention") }
         if headphones.earTipFitTransition?.phase == .interrupted { return String(localized: "Fit Test Needs Attention") }
+        if isRecoveringMultipoint { return String(localized: "Reconnecting Controls…") }
         return switch headphones.powerOffState {
         case .sending: String(localized: "Sending Power Off…")
         case .acknowledged: String(localized: "Power Off Requested")
@@ -1069,6 +1073,7 @@ struct HeadphoneConnectionView: View {
                 : String(localized: "Turn the headphones on with their power button before reconnecting.")
             return String(localized: "\(outcome) Automatic reconnect is paused. \(turnOn)")
         }
+        if isRecoveringMultipoint { return String(localized: "Checking device connections…") }
         if isSearching { return headphones.statusText }
         if isAutomaticallyReconnecting { return String(localized: "Bluetooth is connected. Controls are reconnecting automatically.") }
         return isConnecting

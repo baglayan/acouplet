@@ -69,7 +69,7 @@ final class SonyConnectionAlertsTests: XCTestCase {
     }
 
     func testMultipointAlertsRecognizeOnlyTheirFormatsAndPreserveActionContracts() throws {
-        for prefix: [UInt8] in [[0x99, 0x00, 0x06], [0x99, 0x00, 0x07], [0x99, 0x06, 0x01, 0x02, 0x06, 0xA5]] {
+        for prefix: [UInt8] in [[0x99, 0x00, 0x06], [0x99, 0x00, 0x07], [0x99, 0x00, 0x70], [0x99, 0x06, 0x01, 0x02, 0x06, 0xA5]] {
             for actionType: UInt8 in [0x00, 0x01, 0x02, 0xFF] {
                 let alert = try XCTUnwrap(SonyConnectionAlert(payload: prefix + [actionType]))
                 XCTAssertTrue(alert.isMultipointChange)
@@ -85,7 +85,7 @@ final class SonyConnectionAlertsTests: XCTestCase {
             for length in 0..<payload.count { XCTAssertNil(SonyConnectionAlert(payload: Array(payload.prefix(length)))) }
             XCTAssertNil(SonyConnectionAlert(payload: payload + [0x00]))
         }
-        for payload: [UInt8] in [[0x99, 0x00, 0x01, 1], [0x99, 0x06, 0x06, 0, 1], [0x99, 0x06, 0x07, 0, 1]] {
+        for payload: [UInt8] in [[0x99, 0x00, 0x01, 1], [0x99, 0x06, 0x06, 0, 1], [0x99, 0x06, 0x07, 0, 1], [0x99, 0x06, 0x70, 0, 1]] {
             let alert = try XCTUnwrap(SonyConnectionAlert(payload: payload))
             XCTAssertFalse(alert.isMultipointChange)
             XCTAssertTrue(alert.availableActions.isEmpty)

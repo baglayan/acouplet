@@ -22,6 +22,8 @@ struct SonyMultipointTransition: Equatable, Sendable {
     private(set) var phase = Phase.queued
     private(set) var failureMessage: String?
     private var requestTransmitted = false
+    private var requestAcknowledged = false
+    private var confirmationReply: [UInt8]?
     private var cancellationRequested = false
 
     init?(enabled: Bool, model: SonySystemFeatures, session: UInt64, requestID: UUID = UUID()) {
@@ -79,11 +81,40 @@ struct SonyMultipointTransition: Equatable, Sendable {
         case .queued:
             requestTransmitted = true
             phase = .awaitingResponse
-        case .replyQueued(_, let action): phase = action == .negative ? .cancelled : .queuedReadback
+        case .replyQueued(_, let action):
+            if action == .negative {
+                phase = .cancelled
+            } else {
+                confirmationReply = payload
+                requestAcknowledged = false
+                phase = .awaitingResponse
+            }
         case .queuedReadback: phase = .verifying
         default: return false
         }
         return true
+    }
+
+    @discardableResult
+    mutating func commandAcknowledged(_ payload: [UInt8], session: UInt64) -> Bool {
+        guard session == self.session, requestTransmitted, !isFinished, payload == (confirmationReply ?? requestPayload) else { return false }
+        requestAcknowledged = true
+        return true
+    }
+
+    var diagnosticPhase: String {
+        switch phase {
+        case .queued: "queued"
+        case .awaitingResponse: "awaitingResponse"
+        case .awaitingUser: "awaitingUser"
+        case .replyQueued: "replyQueued"
+        case .queuedReadback: "queuedReadback"
+        case .recovering: "recovering"
+        case .verifying: "verifying"
+        case .complete: "complete"
+        case .cancelled: "cancelled"
+        case .failed: "failed"
+        }
     }
 
     @discardableResult
@@ -105,7 +136,7 @@ struct SonyMultipointTransition: Equatable, Sendable {
     @discardableResult
     mutating func acknowledge(_ alert: SonyConnectionAlert) -> Bool {
         guard phase == .awaitingUser(alert), alert.actionType == .confirmationOnly else { return false }
-        phase = .queuedReadback
+        phase = .awaitingResponse
         return true
     }
 
@@ -165,6 +196,10 @@ struct SonyMultipointTransition: Equatable, Sendable {
     @discardableResult
     mutating func timeout() -> Bool {
         guard phase == .awaitingResponse || phase == .verifying else { return false }
+        if phase == .awaitingResponse, requestAcknowledged {
+            phase = .queuedReadback
+            return true
+        }
         fail(String(localized: "The headphones did not confirm the multipoint change in time."))
         return true
     }

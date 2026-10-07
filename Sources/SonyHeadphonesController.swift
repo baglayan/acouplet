@@ -694,7 +694,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var unconfirmedEqualizerRequestID: UUID?
     private var acknowledgmentTimeout: DispatchWorkItem?
     private var transmissionID: UUID?
-    @Published private var commandQueue = SonyCommandQueue()
+    private var commandQueue = SonyCommandQueue() {
+        willSet {
+            if (commandQueue.pending == nil) != (newValue.pending == nil) {
+                objectWillChange.send()
+            }
+        }
+    }
     private var settingTimeouts: [Setting: DispatchWorkItem] = [:]
     private var settingRefreshes: [Setting: DispatchWorkItem] = [:]
     private var settingRequests: [Setting: UUID] = [:]
@@ -873,7 +879,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if multipointTransition?.phase == .recovering {
             finishMultipointRecovery(String(localized: "Controls could not reconnect to check the multipoint setting."))
         } else {
-            multipointTransition?.timeout()
+            if multipointTransition?.timeout() == true { advanceMultipointTransition() }
         }
     }
 
@@ -2509,7 +2515,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 if transition.phase == .recovering {
                     self.finishMultipointRecovery(String(localized: "Controls could not reconnect to check the multipoint setting."))
                 } else {
-                    self.multipointTransition?.timeout()
+                    if self.multipointTransition?.timeout() == true { self.advanceMultipointTransition() }
                 }
             }
         }
@@ -2519,7 +2525,16 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     private func beginMultipointConfirmation(_ frame: SonyFrame) {
         guard frame.type == 0x0C, systemReads[frame.payload] == nil else { return }
+        if frame.payload.first == 0x98, multipointTransition?.expectedPayload == frame.payload {
+            Self.logger.notice("Multipoint alert reply TX; session=\(self.controlSession) format=\(frame.payload[1]) message=\(frame.payload[2]) action=\(frame.payload[3])")
+        }
         let advanced = multipointTransition?.commandTransmitted(frame.payload, model: systemFeatures, session: controlSession) == true
+        if multipointTransition?.isFinished == false, frame.payload.count >= 2,
+           [0xD8, 0xD6].contains(frame.payload[0]), frame.payload[1] == systemFeatures.multipointSlot {
+            let setting = frame.payload[0] == 0xD8
+            let enabled = setting ? frame.payload.last == 0 : multipointTransition?.targetEnabled == true
+            Self.logger.notice("Multipoint TX; session=\(self.controlSession) setter=\(setting) slot=\(frame.payload[1]) target_enabled=\(enabled) phase=\(self.multipointTransition?.diagnosticPhase ?? "none", privacy: .public)")
+        }
         if frame.payload.count == 2, frame.payload[0] == 0xD6,
            frame.payload[1] == systemFeatures.multipointSlot {
             multipointQueuedReadSlot = nil
@@ -2533,8 +2548,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if frame.payload == multipointTransition?.requestPayload {
                 reply = [0x99, 0x00, 0x07, 0x01]
             } else if frame.payload == [0x98, 0x00, 0x07, 0x01], let target = multipointTransition?.targetEnabled {
-                simulatedMultipointEnabled = target
-                return
+                if target {
+                    reply = [0x99, 0x00, 0x70, 0x01]
+                } else {
+                    simulatedMultipointEnabled = false
+                    reply = [0xD9, slot, 0, 1]
+                }
+            } else if frame.payload == [0x98, 0x00, 0x70, 0x01], multipointTransition?.targetEnabled == true {
+                simulatedMultipointEnabled = true
+                reply = [0xD9, slot, 0, 0]
             } else if frame.payload == [0xD6, slot] {
                 reply = [0xD7, slot, 0, simulatedMultipointEnabled ? 0 : 1]
             } else { return }
@@ -2548,6 +2570,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func receiveMultipointSetting(_ payload: [UInt8]) {
+        if multipointTransition?.isFinished == false, payload.count >= 2,
+           [0xD7, 0xD9].contains(payload[0]), payload[1] == systemFeatures.multipointSlot {
+            let read = multipointReadbacks.first { $0.slot == payload[1] }
+            let owned = payload[0] == 0xD7 && read?.request != nil && read?.request == multipointTransition?.requestID
+            let enabled = systemFeatures.multipoint?.enabled.map { $0 ? 1 : 0 } ?? -1
+            Self.logger.notice("Multipoint RX; session=\(self.controlSession) notification=\(payload[0] == 0xD9) slot=\(payload[1]) enabled=\(enabled) owned=\(owned) phase=\(self.multipointTransition?.diagnosticPhase ?? "none", privacy: .public)")
+        }
         if payload.first == 0xD1, isReady, multipointTransition?.phase == .recovering,
            systemFeatures.multipointSlot != nil {
             guard matchesMultipointConnection else {
@@ -2597,13 +2626,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 self.retrySecondsRemaining = nil
                 if connection.usesBLE, let hash = connection.hash {
                     self.openBluetoothLE(hash: hash, model: connection.model, identifier: connection.peripheralID)
-                } else if let target = connection.device, target.isPaired(), target.isConnected(),
+                } else if let target = connection.device, target.isPaired(),
                           Self.normalizedAddress(target.addressString ?? "") == Self.normalizedAddress(connection.address) {
                     self.device = target
                     self.address = connection.address
                     self.deviceName = target.name ?? self.deviceName
-                    self.isDeviceConnected = true
-                    self.openSonyLink()
+                    self.isDeviceConnected = target.isConnected()
+                    self.openClassicConnection(target, recovering: true)
                 } else {
                     self.finishMultipointRecovery(String(localized: "Reconnect the selected headphones in Bluetooth settings to check this change."))
                 }
@@ -5113,6 +5142,21 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                       sent == commandQueue.pending else { continue }
                 let acknowledgment = commandQueue.handleAcknowledgment(sequence: frame.sequence)
                 guard acknowledgment.accepted else { continue }
+                if multipointTransition?.isFinished == false, sent.type == 0x0C,
+                   sent.payload.count >= 2, [0xD8, 0xD6].contains(sent.payload[0]),
+                   sent.payload[1] == systemFeatures.multipointSlot {
+                    let setter = sent.payload[0] == 0xD8
+                    let owned = multipointTransition?.commandAcknowledged(sent.payload, session: session) == true
+                    if owned, multipointTransition?.phase == .awaitingResponse { updateMultipointTimeout() }
+                    let enabled = setter ? sent.payload.last == 0 : multipointTransition?.targetEnabled == true
+                    Self.logger.notice("Multipoint ACK; session=\(self.controlSession) setter=\(setter) slot=\(sent.payload[1]) target_enabled=\(enabled) setter_owned=\(owned) phase=\(self.multipointTransition?.diagnosticPhase ?? "none", privacy: .public)")
+                }
+                if sent.type == 0x0C, sent.payload.first == 0x98,
+                   multipointTransition?.commandAcknowledged(sent.payload, session: session) == true,
+                   multipointTransition?.phase == .awaitingResponse {
+                    Self.logger.notice("Multipoint alert reply ACK; session=\(self.controlSession) message=\(sent.payload[2]) action=\(sent.payload[3])")
+                    updateMultipointTimeout()
+                }
                 if connectionTransition?.isFinished == false {
                     let payload = sent.payload.map { String(format: "%02X", $0) }.joined(separator: " ")
                     Self.logger.notice("Connection change ACK; type=\(sent.type, format: .hex) sentSequence=\(sent.sequence) ackSequence=\(frame.sequence) session=\(session) payload=\(payload, privacy: .private)")
@@ -5451,6 +5495,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             return
         }
         if let alert = SonyConnectionAlert(payload: payload) {
+            if alert.isMultipointChange || multipointTransition?.isFinished == false {
+                Self.logger.notice("Multipoint alert; session=\(self.controlSession) format=\(alert.format.rawValue) message=\(alert.messageID) action=\(String(describing: alert.actionType), privacy: .public) phase=\(self.multipointTransition?.diagnosticPhase ?? "none", privacy: .public)")
+            }
             lastConnectionAlert = alert
             lastSyncDate = Date()
             if multipointTransition?.receiveAlert(alert, session: controlSession) == true {
@@ -6529,6 +6576,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         default:
             return false
         }
+        Self.logger.notice("Multipoint control directive; session=\(self.controlSession) code=\(payload[1]) phase=\(self.multipointTransition?.diagnosticPhase ?? "none", privacy: .public)")
         guard multipointTransition?.phase != .queued else { return true }
         if multipointTransition?.isFinished == true,
            multipointTransition?.recheckAfterDirective(session: controlSession) != true { return true }

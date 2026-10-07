@@ -2278,6 +2278,60 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testMultipointSettingRequiresConfirmationAndSupportsBothDirections() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        panel.buttons["menu.settings"].click()
+        let window = app.windows["com_apple_SwiftUI_Settings_window"]
+        selectSettingsPane("headphones", in: window)
+        let multipoint = window.descendants(matching: .any).matching(identifier: "multipoint.enabled").firstMatch
+        XCTAssertTrue(multipoint.waitForExistence(timeout: 3))
+        for _ in 0..<5 where !multipoint.isHittable {
+            window.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -180)
+        }
+        XCTAssertEqual(multipoint.value as? Int, 1)
+        multipoint.click()
+        let cancel = window.sheets.buttons["Cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3))
+        cancel.click()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == 1 AND isEnabled == true"), object: multipoint
+        )], timeout: 4), .completed)
+        multipoint.click()
+        let proceed = window.sheets.buttons["Continue"]
+        XCTAssertTrue(proceed.waitForExistence(timeout: 3))
+        proceed.click()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == 0 AND isEnabled == true"), object: multipoint
+        )], timeout: 4), .completed)
+        XCTAssertFalse(window.staticTexts["multipoint.settingError"].exists)
+
+        for cancelWarning in [true, false] {
+            multipoint.click()
+            XCTAssertTrue(proceed.waitForExistence(timeout: 3))
+            proceed.click()
+            let warning = window.sheets.staticTexts["Audio may cut out when Sound Quality and multipoint are both enabled."]
+            XCTAssertTrue(warning.waitForExistence(timeout: 3))
+            XCTAssertEqual(multipoint.value as? Int, 0)
+            if cancelWarning {
+                XCTAssertTrue(cancel.waitForExistence(timeout: 3))
+                cancel.click()
+            } else {
+                XCTAssertTrue(proceed.waitForExistence(timeout: 3))
+                proceed.click()
+            }
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %d AND isEnabled == true", cancelWarning ? 0 : 1), object: multipoint
+            )], timeout: 4), .completed)
+            XCTAssertFalse(window.staticTexts["multipoint.settingError"].exists)
+        }
+    }
+
+    @MainActor
     func testMultipointSourceSelectionAndKeepingUseConfirmedState() throws {
         for appearance in ["light", "dark"] {
             let app = XCUIApplication()

@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import CoreBluetooth
 import AppKit
 import XCTest
@@ -13,6 +14,42 @@ final class SonyProtocolTests: XCTestCase {
 
     func testReconnectBackoffCapsAtThirtySeconds() {
         XCTAssertEqual((0...6).map(ReconnectBackoff.delay), [2, 4, 8, 15, 30, 30, 30])
+    }
+
+    @MainActor
+    func testCommandQueuePublishesOnlyBusyAvailabilityChanges() throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        controller.defersSimulatedWrites = true
+        defer { controller.simulateControlLoss() }
+        var availabilityBeforeChanges: [Bool] = []
+        let observation = controller.objectWillChange.sink {
+            availabilityBeforeChanges.append(controller.canPowerOff)
+        }
+        defer { observation.cancel() }
+        XCTAssertTrue(controller.canPowerOff)
+
+        controller.refreshEqualizer()
+        XCTAssertEqual(availabilityBeforeChanges, [true])
+        XCTAssertFalse(controller.canPowerOff)
+        XCTAssertTrue(controller.refreshMusicVolume())
+        XCTAssertEqual(availabilityBeforeChanges, [true])
+
+        for _ in 0..<2 {
+            controller.completeSimulatedWrite()
+            availabilityBeforeChanges.removeAll()
+            let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+            XCTAssertTrue(availabilityBeforeChanges.isEmpty)
+            XCTAssertFalse(controller.canPowerOff)
+        }
+        controller.completeSimulatedWrite()
+        availabilityBeforeChanges.removeAll()
+        let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        XCTAssertEqual(availabilityBeforeChanges, [false])
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertTrue(controller.canPowerOff)
     }
 
     func testFrameRoundTripIncludingEscapedBytes() {

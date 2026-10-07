@@ -2,6 +2,50 @@ import XCTest
 @testable import Acouplet
 
 final class SonyMultipointTransitionTests: XCTestCase {
+    func testFallbackRequiresMatchingSetterAcknowledgmentAndRunsOnlyOnce() throws {
+        for enabled in [false, true] {
+            let state = model(enabled: !enabled)
+            var transition = try XCTUnwrap(SonyMultipointTransition(enabled: enabled, model: state, session: 1))
+            XCTAssertFalse(transition.commandAcknowledged(transition.requestPayload, session: 1))
+            transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+            XCTAssertFalse(transition.commandAcknowledged(transition.requestPayload, session: 2))
+            XCTAssertFalse(transition.commandAcknowledged([0xD6, 0xD2], session: 1))
+            var unacknowledged = transition
+            XCTAssertTrue(unacknowledged.timeout())
+            XCTAssertEqual(unacknowledged.phase, .failed)
+            XCTAssertTrue(transition.commandAcknowledged(transition.requestPayload, session: 1))
+            XCTAssertEqual(transition.phase, .awaitingResponse)
+            XCTAssertTrue(transition.timeout())
+            XCTAssertEqual(transition.phase, .queuedReadback)
+            XCTAssertFalse(transition.timeout())
+            XCTAssertTrue(transition.commandTransmitted([0xD6, 0xD2], model: state, session: 1))
+            XCTAssertTrue(transition.timeout())
+            XCTAssertEqual(transition.phase, .failed)
+            XCTAssertNil(transition.expectedPayload)
+        }
+    }
+
+    func testPositiveReplyMustBeAcknowledgedBeforeFallbackCanRead() throws {
+        let state = model()
+        var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+        transition.commandAcknowledged(transition.requestPayload, session: 1)
+        let alert = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 7, 1]))
+        transition.receiveAlert(alert, session: 1)
+        let reply = try XCTUnwrap(transition.respond(to: alert, action: .positive))
+        transition.commandTransmitted(reply, model: state, session: 1)
+        XCTAssertEqual(transition.phase, .awaitingResponse)
+        XCTAssertNil(transition.expectedPayload)
+        XCTAssertFalse(transition.commandAcknowledged(transition.requestPayload, session: 1))
+        var missingAcknowledgment = transition
+        missingAcknowledgment.timeout()
+        XCTAssertEqual(missingAcknowledgment.phase, .failed)
+        XCTAssertTrue(transition.commandAcknowledged(reply, session: 1))
+        XCTAssertEqual(transition.phase, .awaitingResponse)
+        transition.timeout()
+        XCTAssertEqual(transition.phase, .queuedReadback)
+    }
+
     func testOnlyKnownAvailableDifferentValuesCanQueueTheIdentifiedSlot() throws {
         XCTAssertNil(SonyMultipointTransition(enabled: true, model: SonySystemFeatures(), session: 1))
         XCTAssertNil(SonyMultipointTransition(enabled: true, model: model(enabled: nil), session: 1))
@@ -36,7 +80,7 @@ final class SonyMultipointTransitionTests: XCTestCase {
 
     func testKnownMultipointAlertsRequireTransmissionAndPreserveTheirReplyContracts() throws {
         let state = model()
-        for prefix: [UInt8] in [[0x99, 0, 6], [0x99, 0, 7], [0x99, 6, 1, 1, 6]] {
+        for prefix: [UInt8] in [[0x99, 0, 6], [0x99, 0, 7], [0x99, 0, 0x70], [0x99, 6, 1, 1, 6]] {
             for actionType: UInt8 in [0, 1, 2] {
                 var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
                 let alert = try XCTUnwrap(SonyConnectionAlert(payload: prefix + [actionType]))
@@ -63,6 +107,9 @@ final class SonyMultipointTransitionTests: XCTestCase {
                     XCTAssertFalse(transition.commandTransmitted(Array(reply.dropLast()) + [0], model: state, session: 1))
                     XCTAssertTrue(transition.commandTransmitted(reply, model: state, session: 1))
                 }
+                XCTAssertEqual(transition.phase, .awaitingResponse)
+                XCTAssertNil(transition.expectedPayload)
+                XCTAssertTrue(transition.requestReadback(model: state, session: 1))
                 XCTAssertEqual(transition.phase, .queuedReadback)
                 XCTAssertFalse(transition.timeout())
                 XCTAssertEqual(transition.expectedPayload, [0xD6, 0xD2])
@@ -132,6 +179,7 @@ final class SonyMultipointTransitionTests: XCTestCase {
         let reply = try XCTUnwrap(transition.respond(to: alert, action: .positive))
         transition.commandTransmitted(reply, model: state, session: 1)
         XCTAssertFalse(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true))
+        transition.requestReadback(model: state, session: 1)
         transition.commandTransmitted([0xD6, 0xD2], model: state, session: 1)
         XCTAssertFalse(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: false))
         XCTAssertTrue(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true))
@@ -315,6 +363,35 @@ final class SonyMultipointTransitionTests: XCTestCase {
             XCTAssertTrue(transition.receiveReadback([0xD7, 0xD4, 0, phase == .cancelled ? 1 : 0], model: discovered, session: 3, readbackOwned: true))
             XCTAssertEqual(transition.phase, phase == .cancelled ? .cancelled : .complete)
         }
+    }
+
+    func testSecondMultipointCautionRequiresItsOwnReplyAcknowledgment() throws {
+        let state = model()
+        var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+        transition.commandAcknowledged(transition.requestPayload, session: 1)
+        let first = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 7, 1]))
+        let second = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 0x70, 1]))
+        XCTAssertTrue(transition.receiveAlert(first, session: 1))
+        let firstReply = try XCTUnwrap(transition.respond(to: first, action: .positive))
+        transition.commandTransmitted(firstReply, model: state, session: 1)
+        transition.commandAcknowledged(firstReply, session: 1)
+        XCTAssertTrue(transition.receiveAlert(second, session: 1))
+        XCTAssertFalse(transition.timeout())
+        XCTAssertNil(transition.respond(to: first, action: .positive))
+        let secondReply = try XCTUnwrap(transition.respond(to: second, action: .positive))
+        XCTAssertEqual(secondReply, [0x98, 0, 0x70, 1])
+        transition.commandTransmitted(secondReply, model: state, session: 1)
+        XCTAssertFalse(transition.commandAcknowledged(firstReply, session: 1))
+        XCTAssertFalse(transition.commandAcknowledged(secondReply, session: 2))
+        var missingAcknowledgment = transition
+        missingAcknowledgment.timeout()
+        XCTAssertEqual(missingAcknowledgment.phase, .failed)
+        XCTAssertTrue(transition.commandAcknowledged(secondReply, session: 1))
+        XCTAssertEqual(transition.phase, .awaitingResponse)
+        XCTAssertNil(transition.expectedPayload)
+        transition.timeout()
+        XCTAssertEqual(transition.expectedPayload, [0xD6, 0xD2])
     }
 
     private func model(enabled: Bool? = false, slot: UInt8 = 0xD2, available: Bool? = true) -> SonySystemFeatures {

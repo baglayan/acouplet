@@ -1,6 +1,23 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Audio may cut out when Sound Quality and multipoint are both enabled.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio may cut out when Sound Quality and multipoint are both enabled."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses Kalitesi ve çoklu bağlantı birlikte açıkken ses kesilebilir."
+          }
+        }
+      }
+    },
     "All set": {
       "extractionState": "manual",
       "localizations": {

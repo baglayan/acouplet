@@ -61,6 +61,8 @@ final class SonySourceControllerTests: XCTestCase {
         deliver(inventory(command: 0x39, selected: 2), to: controller)
         XCTAssertEqual(changes.map(\.name), ["Phone"])
         controller.simulateMultipointTimeout()
+        acknowledgeAll(controller)
+        deliver([0xD7, 0xD2, 0, 0], type: 0x0C, to: controller)
         XCTAssertTrue(controller.canCheckMultipointChange)
         let session = controller.notificationSession
         controller.checkMultipointChange()

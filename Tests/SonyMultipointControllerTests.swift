@@ -1,4 +1,5 @@
 import XCTest
+import IOBluetooth
 @testable import Acouplet
 
 final class SonyMultipointControllerTests: XCTestCase {
@@ -38,6 +39,9 @@ final class SonyMultipointControllerTests: XCTestCase {
         XCTAssertEqual(controller.multipointTransition?.alert, alert)
         controller.respondToMultipointAlert(alert, action: .positive)
         acknowledgeAll(controller)
+        XCTAssertEqual(controller.multipointTransition?.phase, .awaitingResponse)
+        deliver([0xD9, 0xD2, 0, 1], to: controller)
+        acknowledgeAll(controller)
         XCTAssertEqual(controller.multipointTransition?.phase, .verifying)
         deliver([0xD7, 0xD2, 0, 1], to: controller)
         XCTAssertEqual(controller.multipointTransition?.phase, .verifying)
@@ -63,6 +67,10 @@ final class SonyMultipointControllerTests: XCTestCase {
                 XCTAssertEqual(controller.systemFeatures.multipoint?.enabled, true)
                 XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == [0x98, 6, 1, 0] })
             } else {
+                XCTAssertEqual(controller.multipointTransition?.phase, .awaitingResponse)
+                XCTAssertNil(controller.simulatedPendingFrame)
+                deliver([0xD9, 0xD2, 0, 1], to: controller)
+                acknowledgeAll(controller)
                 XCTAssertEqual(controller.multipointTransition?.phase, .verifying)
                 if actionType == 0 {
                     XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0x98 })
@@ -220,6 +228,216 @@ final class SonyMultipointControllerTests: XCTestCase {
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type != 1 }, writes)
         XCTAssertNotNil(controller.lastErrorMessage)
         controller.simulateControlLoss()
+    }
+
+    @MainActor
+    func testAcknowledgedSetterWithoutNotificationUsesOneOwnedFallbackRead() {
+        for enabled in [false, true] {
+            for matches in [false, true] {
+                let controller = preparedController()
+                deliver([0xD9, 0xD2, 0, enabled ? 1 : 0], to: controller)
+                controller.setMultipointEnabled(enabled)
+                acknowledgeAll(controller)
+                XCTAssertEqual(controller.multipointTransition?.phase, .awaitingResponse)
+                controller.simulateMultipointTimeout()
+                XCTAssertEqual(controller.multipointTransition?.phase, .verifying)
+                XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xD6, 0xD2])
+                XCTAssertTrue(controller.simulatedMultipointTimeoutPending)
+                acknowledgeAll(controller)
+                let reported = matches ? enabled : !enabled
+                deliver([0xD7, 0xD2, 0, reported ? 0 : 1], to: controller)
+                XCTAssertEqual(controller.multipointTransition?.phase, matches ? .complete : .failed)
+                controller.simulateMultipointTimeout()
+                XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
+                XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xD6, 0xD2] }.count, 1)
+                XCTAssertTrue(controller.isReady)
+                controller.simulateControlLoss()
+            }
+        }
+    }
+
+    @MainActor
+    func testMissingSetterAcknowledgmentCannotStartFallbackRead() {
+        let controller = preparedController()
+        controller.setMultipointEnabled(false)
+        controller.simulateMultipointTimeout()
+        XCTAssertEqual(controller.multipointTransition?.phase, .failed)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xD6, 0xD2] })
+        controller.simulateControlLoss()
+    }
+
+    @MainActor
+    func testLateAlertRetiresFallbackReadOwnershipAndVerificationTimeoutDoesNotPoll() throws {
+        let controller = preparedController()
+        controller.setMultipointEnabled(false)
+        acknowledgeAll(controller)
+        controller.simulateMultipointTimeout()
+        acknowledgeAll(controller)
+        deliver([0x99, 0, 7, 1], to: controller)
+        let alert = try XCTUnwrap(controller.multipointTransition?.alert)
+        controller.respondToMultipointAlert(alert, action: .positive)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.multipointTransition?.phase, .awaitingResponse)
+        deliver([0xD9, 0xD2, 0, 1], to: controller)
+        acknowledgeAll(controller)
+        deliver([0xD7, 0xD2, 0, 1], to: controller)
+        XCTAssertEqual(controller.multipointTransition?.phase, .verifying)
+        controller.simulateMultipointTimeout()
+        XCTAssertEqual(controller.multipointTransition?.phase, .failed)
+        controller.simulateMultipointTimeout()
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xD6, 0xD2] }.count, 2)
+        controller.simulateControlLoss()
+    }
+
+    @MainActor
+    func testPositiveReplyWaitsForChangeOrOneAcknowledgedFallbackWithoutImmediateRead() throws {
+        for enabled in [false, true] {
+            for acknowledged in [false, true] {
+                let controller = preparedController()
+                deliver([0xD9, 0xD2, 0, enabled ? 1 : 0], to: controller)
+                controller.setMultipointEnabled(enabled)
+                acknowledgeAll(controller)
+                deliver([0x99, 0, 7, 1], to: controller)
+                let alert = try XCTUnwrap(controller.multipointTransition?.alert)
+                controller.respondToMultipointAlert(alert, action: .positive)
+                XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x98, 0, 7, 1])
+                XCTAssertEqual(controller.multipointTransition?.phase, .awaitingResponse)
+                XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xD6, 0xD2] })
+                if acknowledged {
+                    acknowledgeAll(controller)
+                    XCTAssertNil(controller.simulatedPendingFrame)
+                    XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xD6, 0xD2] })
+                }
+                controller.simulateMultipointTimeout()
+                if acknowledged {
+                    XCTAssertEqual(controller.multipointTransition?.phase, .verifying)
+                    acknowledgeAll(controller)
+                    deliver([0xD7, 0xD2, 0, enabled ? 0 : 1], to: controller)
+                    XCTAssertEqual(controller.multipointTransition?.phase, .complete)
+                    XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xD6, 0xD2] }.count, 1)
+                } else {
+                    XCTAssertEqual(controller.multipointTransition?.phase, .failed)
+                    XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xD6, 0xD2] })
+                }
+                XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
+                controller.simulateControlLoss()
+            }
+        }
+    }
+
+    @MainActor
+    func testEnablingMultipointHandlesSecondLDACCautionBeforeRecoveryOrCancellation() throws {
+        for action: SonyConnectionAlertAction in [.positive, .negative] {
+            let controller = preparedController()
+            defer { controller.simulateControlLoss() }
+            deliver([0xD9, 0xD2, 0, 1], to: controller)
+            controller.setMultipointEnabled(true)
+            acknowledgeAll(controller)
+            deliver([0x99, 0, 7, 1], to: controller)
+            let first = try XCTUnwrap(controller.multipointTransition?.alert)
+            controller.respondToMultipointAlert(first, action: .positive)
+            acknowledgeAll(controller)
+            deliver([0x99, 0, 0x70, 1], to: controller)
+            let second = try XCTUnwrap(controller.multipointTransition?.alert)
+            XCTAssertEqual(second.messageID, 0x70)
+            XCTAssertFalse(controller.simulatedMultipointTimeoutPending)
+            controller.simulateMultipointTimeout()
+            XCTAssertEqual(controller.multipointTransition?.alert, second)
+            controller.respondToMultipointAlert(first, action: .positive)
+            XCTAssertEqual(controller.multipointTransition?.alert, second)
+            XCTAssertNil(controller.simulatedPendingFrame)
+            controller.respondToMultipointAlert(second, action: action)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x98, 0, 0x70, action.rawValue])
+            acknowledgeAll(controller)
+            XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xD6 })
+            XCTAssertNil(controller.multipointTransition?.alert)
+            XCTAssertEqual(controller.systemFeatures.multipoint?.enabled, false)
+            if action == .positive {
+                XCTAssertEqual(controller.multipointTransition?.phase, .awaitingResponse)
+                controller.simulateControlLoss()
+                XCTAssertEqual(controller.multipointTransition?.phase, .recovering)
+                recover(controller, hash: "ABCDEF12", slot: 0xD2)
+                XCTAssertEqual(controller.multipointTransition?.phase, .verifying)
+                deliver([0xD7, 0xD2, 0, 0], to: controller)
+                XCTAssertEqual(controller.multipointTransition?.phase, .complete)
+                XCTAssertEqual(controller.systemFeatures.multipoint?.enabled, true)
+            } else {
+                XCTAssertEqual(controller.multipointTransition?.phase, .cancelled)
+                XCTAssertFalse(controller.simulatedMultipointTimeoutPending)
+                XCTAssertTrue(controller.isReady)
+            }
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x98, 0, 7, 1] }.count, 1)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x98, 0, 0x70, action.rawValue] }.count, 1)
+        }
+    }
+
+    @MainActor
+    func testMultipointRecoveryWaitsForClassicConnectionWhenBluetoothIsDown() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        deliver([0xD9, 0xD2, 0, 1], to: controller)
+        controller.setMultipointEnabled(true)
+        acknowledgeAll(controller)
+        deliver([0x99, 0, 0x70, 1], to: controller)
+        let alert = try XCTUnwrap(controller.multipointTransition?.alert)
+        controller.respondToMultipointAlert(alert, action: .positive)
+        acknowledgeAll(controller)
+        controller.simulateControlLoss(deviceConnected: false)
+        XCTAssertEqual(controller.multipointTransition?.phase, .recovering)
+        XCTAssertFalse(controller.isDeviceConnected)
+        let complete = try XCTUnwrap(controller.simulateClassicConnection(recovering: true))
+        XCTAssertEqual(controller.linkState, .opening)
+        XCTAssertNil(controller.simulateClassicConnection(recovering: true))
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertFalse(controller.isReady)
+        complete(kIOReturnSuccess, true)
+        XCTAssertTrue(controller.isDeviceConnected)
+        XCTAssertEqual(controller.multipointTransition?.phase, .recovering)
+        recover(controller, hash: "ABCDEF12", slot: 0xD2)
+        XCTAssertEqual(controller.multipointTransition?.phase, .verifying)
+        deliver([0xD7, 0xD2, 0, 0], to: controller)
+        XCTAssertEqual(controller.multipointTransition?.phase, .complete)
+        XCTAssertEqual(controller.systemFeatures.multipoint?.enabled, true)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
+    }
+
+    @MainActor
+    func testFailedClassicConnectionKeepsMultipointRecoveryWithoutReplayingSetter() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        controller.setMultipointEnabled(false)
+        acknowledgeAll(controller)
+        controller.simulateControlLoss(deviceConnected: false)
+        let complete = try XCTUnwrap(controller.simulateClassicConnection(recovering: true))
+        complete(kIOReturnError, false)
+        XCTAssertEqual(controller.multipointTransition?.phase, .recovering)
+        XCTAssertFalse(controller.isDeviceConnected)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertTrue(controller.simulatedMultipointTimeoutPending)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
+    }
+
+    @MainActor
+    func testClassicCompletionCannotReviveTimedOutMultipointRecovery() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        controller.setMultipointEnabled(false)
+        acknowledgeAll(controller)
+        controller.simulateControlLoss(deviceConnected: false)
+        let complete = try XCTUnwrap(controller.simulateClassicConnection(recovering: true))
+        controller.simulateMultipointTimeout()
+        XCTAssertEqual(controller.multipointTransition?.phase, .failed)
+        let session = controller.simulatedControlSession
+        complete(kIOReturnSuccess, true)
+        XCTAssertEqual(controller.multipointTransition?.phase, .failed)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertFalse(controller.isDeviceConnected)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
     }
 
     @MainActor
