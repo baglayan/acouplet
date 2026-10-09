@@ -254,7 +254,7 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
         archive.parent.mkdir()
         archive.write_text('previous archive')
         environment = {key: value for key, value in os.environ.items()
-                       if key not in ('CODE_SIGN_IDENTITY', 'DEVELOPMENT_TEAM', 'CODE_SIGN_STYLE', 'SONY_PANE_DEVICES', 'ACOUPLET_MARKETING_VERSION', 'ACOUPLET_BUILD_NUMBER', 'ACOUPLET_NO_SONY_ARTWORK', 'ACOUPLET_SONY_ARTWORK_DIR')}
+                       if key not in ('CODE_SIGN_IDENTITY', 'ACOUPLET_INSTALLER_SIGNING_IDENTITY', 'DEVELOPMENT_TEAM', 'CODE_SIGN_STYLE', 'SONY_PANE_DEVICES', 'ACOUPLET_MARKETING_VERSION', 'ACOUPLET_BUILD_NUMBER', 'ACOUPLET_NO_SONY_ARTWORK', 'ACOUPLET_SONY_ARTWORK_DIR')}
         environment.update(signing, ACOUPLET_PACKAGE_CHECK_ROOT=str(root), ACOUPLET_PACKAGE_CHECK_MODE=mode)
         if panes:
             manifest = root / 'devices.json'
