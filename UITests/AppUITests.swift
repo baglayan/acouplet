@@ -297,6 +297,70 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testAppLanguagePickerKeepsNativeLanguageNamesAndShowsRestartHint() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for (language, systemLabel) in [("en", "System Default"), ("tr", "Sistem Saptanmışı")] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "-AppleLanguages", "(\(language))"]
+            app.launch()
+            app.typeKey(",", modifierFlags: .command)
+            let window = app.windows["com_apple_SwiftUI_Settings_window"]
+            XCTAssertTrue(window.waitForExistence(timeout: 5))
+            let generalTab = window.toolbars.buttons[language == "tr" ? "Genel" : "General"]
+            XCTAssertTrue(generalTab.waitForExistence(timeout: 3))
+            generalTab.click()
+            let picker = window.popUpButtons["settings.appLanguage"]
+            XCTAssertTrue(picker.waitForExistence(timeout: 3))
+            XCTAssertEqual(picker.value as? String, systemLabel)
+            XCTAssertFalse(window.staticTexts["settings.appLanguageRestart"].exists)
+            picker.click()
+            app.menuItems["Türkçe"].click()
+            XCTAssertEqual(picker.value as? String, "Türkçe")
+            XCTAssertTrue(window.staticTexts["settings.appLanguageRestart"].waitForExistence(timeout: 3))
+            picker.click()
+            app.menuItems["English"].click()
+            XCTAssertEqual(picker.value as? String, "English")
+            picker.click()
+            app.menuItems[systemLabel].click()
+            XCTAssertFalse(window.staticTexts["settings.appLanguageRestart"].exists)
+            app.terminate()
+        }
+    }
+
+    @MainActor
+    func testMultipointPopoverFollowsAccentPreference() throws {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for (appearance, systemAccent) in [("light", true), ("light", false), ("dark", true), ("dark", false)] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--\(appearance)-appearance", "-AppleAccentColor", "0",
+                                   "-preferences.useSystemAccentColor", systemAccent ? "YES" : "NO", "-AppleLanguages", "(en)"]
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            panel.buttons["multipoint.open"].click()
+            let manager = app.descendants(matching: .any).matching(identifier: "multipoint.popover").firstMatch
+            let toggle = manager.descendants(matching: .any).matching(identifier: "multipoint.enabled").firstMatch
+            XCTAssertTrue(toggle.waitForExistence(timeout: 3))
+            XCTAssertEqual(toggle.value as? Int, 1)
+            let screenshot = toggle.screenshot()
+            captureGalleryScreenshot(screenshot, named: "Multipoint switch — \(systemAccent ? "system red" : "app gold")")
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(data: screenshot.pngRepresentation))
+            var redPixels = 0
+            var yellowPixels = 0
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    let color = try XCTUnwrap(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+                    if color.redComponent > color.blueComponent + 0.2 && color.redComponent > color.greenComponent + 0.2 { redPixels += 1 }
+                    if color.redComponent > color.blueComponent + 0.2 && color.greenComponent > color.blueComponent + 0.2 && abs(color.redComponent - color.greenComponent) < 0.25 { yellowPixels += 1 }
+                }
+            }
+            XCTAssertGreaterThan(systemAccent ? redPixels : yellowPixels, 20)
+            XCTAssertGreaterThan(systemAccent ? redPixels : yellowPixels, systemAccent ? yellowPixels : redPixels)
+            app.terminate()
+        }
+    }
+
+    @MainActor
     func testGeneralShowsVersionAtBottom() {
         let app = XCUIApplication()
         defer { app.terminate() }
@@ -319,6 +383,9 @@ final class AppUITests: XCTestCase {
         for label in labels {
             let text = window.staticTexts[label]
             XCTAssertTrue(text.exists, label)
+            for _ in 0..<5 where text.frame.maxY >= version.frame.minY {
+                window.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -100)
+            }
             XCTAssertTrue(window.frame.contains(text.frame), "General clips \(label): \(text.frame)")
             XCTAssertLessThan(text.frame.maxY, version.frame.minY)
         }
@@ -761,7 +828,7 @@ final class AppUITests: XCTestCase {
             let settings = app.windows["com_apple_SwiftUI_Settings_window"]
             XCTAssertTrue(settings.waitForExistence(timeout: 3))
             selectSettingsPane("general", in: settings)
-            XCTAssertFalse(settings.descendants(matching: .any)["settings.systemAccent"].exists)
+            XCTAssertTrue(settings.descendants(matching: .any)["settings.systemAccent"].exists)
             for pane in ["general", "headphones", "advanced"] {
                 selectSettingsPane(pane, in: settings)
                 contrastFailures += try auditContrast(settings, in: app, named: "Settings \(pane) — \(variant)")
@@ -1911,7 +1978,7 @@ final class AppUITests: XCTestCase {
         let settingsWindow = app.windows["com_apple_SwiftUI_Settings_window"]
         XCTAssertTrue(settingsWindow.waitForExistence(timeout: 5))
         XCTAssertEqual(settingsWindow.title, "General")
-        XCTAssertFalse(settingsWindow.descendants(matching: .any)["settings.systemAccent"].exists)
+        XCTAssertTrue(settingsWindow.descendants(matching: .any)["settings.systemAccent"].exists)
         selectSettingsPane("headphones", in: settingsWindow)
         selectSettingsPane("advanced", in: settingsWindow)
         settingsWindow.buttons[XCUIIdentifierCloseWindow].click()

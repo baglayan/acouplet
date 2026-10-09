@@ -135,7 +135,7 @@ final class AppEnvironment {
             if CommandLine.arguments.contains("--bluetooth-permission-pending") {
                 let headphones = SonyHeadphonesController(startAutomatically: false, displayOnly: true)
                 headphones.reportBluetoothAuthorization(.notDetermined)
-                return AppEnvironment(settings: SettingsStore(defaults: defaults), headphones: headphones,
+                return AppEnvironment(settings: SettingsStore(defaults: defaults, preferencesDomain: suiteName), headphones: headphones,
                                       audioRoute: MacAudioRouteObserver(startAutomatically: false))
             }
             let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true, simulatedReady: !CommandLine.arguments.contains("--disconnected"))
@@ -182,10 +182,10 @@ final class AppEnvironment {
                     SonyConnectedDevice(address: headphones.address, name: headphones.deviceName, model: .wfXM5)!,
                     SonyConnectedDevice(address: "02:00:00:00:00:02", name: "WH-1000XM5", model: .whXM5)!,
                 ])
-                return AppEnvironment(settings: SettingsStore(defaults: defaults), devices: devices,
+                return AppEnvironment(settings: SettingsStore(defaults: defaults, preferencesDomain: suiteName), devices: devices,
                                       audioRoute: MacAudioRouteObserver(startAutomatically: false))
             }
-            return AppEnvironment(settings: SettingsStore(defaults: defaults), headphones: headphones,
+            return AppEnvironment(settings: SettingsStore(defaults: defaults, preferencesDomain: suiteName), headphones: headphones,
                                   audioRoute: MacAudioRouteObserver(startAutomatically: false))
         }
         if ProcessInfo.processInfo.environment["ACOUPLET_TESTING"] == "1" || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {

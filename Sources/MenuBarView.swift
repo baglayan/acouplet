@@ -108,7 +108,6 @@ struct MenuBarView: View {
         .font(.body)
         .controlSize(.regular)
         .foregroundStyle(Color.primary)
-        .tint(.accentColor)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("headphones.dashboard")
         .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: showsConnectOnly)
@@ -124,6 +123,8 @@ struct MenuBarView: View {
         } message: { _ in
             Text("Audio will stop on all connected devices. You’ll need to turn the headphones on again before reconnecting.")
         }
+        .accentColor(settings.tintColor)
+        .tint(settings.tintColor)
     }
 
     private var noiseControlMode: NoiseControlMode? { presentedMode ?? headphones.noiseControlMode }
@@ -216,7 +217,7 @@ struct MenuBarView: View {
                 .accessibilityIdentifier("multipoint.open")
                 .help("Manage Devices")
                 .background {
-                    MultipointPopover(isPresented: $showsMultipoint, headphones: headphones, maximumHeight: min(availableHeight, 480))
+                    MultipointPopover(isPresented: $showsMultipoint, headphones: headphones, settings: settings, maximumHeight: min(availableHeight, 480))
                         .accessibilityHidden(true)
                 }
             }
@@ -298,7 +299,7 @@ struct MenuBarView: View {
                 ))
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .tint(Color(nsColor: .controlAccentColor))
+                .tint(.accentColor)
                 .disabled(!ldacIsEnabled && (!ldac.canEnable(forAddress: headphones.address) || !ldac.canStartOrInstallDriver))
                 .accessibilityValue(ldacStatusText)
                 .accessibilityIdentifier("audio.ldac")
@@ -545,7 +546,7 @@ struct MenuBarView: View {
                         Toggle("Focus on Voice", isOn: Binding(get: { headphones.focusOnVoice }, set: headphones.setFocusOnVoice))
                             .labelsHidden()
                             .toggleStyle(.switch)
-                            .tint(Color(nsColor: .controlAccentColor))
+                            .tint(.accentColor)
                     }
                 }
             }
@@ -891,7 +892,7 @@ struct HeadphoneConnectionView: View {
                         } else if headphones.isBluetoothAccessDenied {
                             Text("Allow Acouplet to use Bluetooth in [System Settings](x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth).")
                                 .foregroundStyle(.secondary)
-                                .tint(Color(nsColor: .controlAccentColor))
+                                .tint(.accentColor)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.leading, 26)
                         } else if !isLoading {
@@ -902,13 +903,13 @@ struct HeadphoneConnectionView: View {
                                     .padding(.leading, 26)
                                     .accessibilityIdentifier("headphones.connectionFailure")
                                 Link("Bluetooth Settings…", destination: URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
-                                    .foregroundStyle(Color(nsColor: .controlAccentColor))
+                                    .foregroundStyle(Color.accentColor)
                                     .padding(.leading, 26)
                                     .accessibilityIdentifier("headphones.bluetoothSettings")
                             } else {
                                 Text("If this continues, disconnect and reconnect the headphones in [Bluetooth Settings](x-apple.systempreferences:com.apple.BluetoothSettings).")
                                     .foregroundStyle(.secondary)
-                                    .tint(Color(nsColor: .controlAccentColor))
+                                    .tint(.accentColor)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .padding(.leading, 26)
                                     .accessibilityIdentifier("headphones.bluetoothSettings")
@@ -1199,6 +1200,7 @@ struct DeviceIcon: View {
 
 private struct MultipointPopoverContent: View {
     @ObservedObject var headphones: SonyHeadphonesController
+    @ObservedObject var settings: SettingsStore
     let maximumHeight: CGFloat
     let onSizeChange: (CGSize) -> Void
 
@@ -1216,7 +1218,7 @@ private struct MultipointPopoverContent: View {
                 }
                 .buttonStyle(.borderless)
                 .tint(nil)
-                .foregroundStyle(Color(nsColor: .controlAccentColor))
+                .foregroundStyle(Color.accentColor)
                 .accessibilityIdentifier("multipoint.bluetoothSettings")
             }
             .padding(14)
@@ -1230,7 +1232,8 @@ private struct MultipointPopoverContent: View {
         .environmentObject(headphones)
         .controlSize(.regular)
         .foregroundStyle(Color.primary)
-        .tint(.accentColor)
+        .accentColor(settings.tintColor)
+        .tint(settings.tintColor)
         .accessibilityIdentifier("multipoint.popover")
         .onGeometryChange(for: CGSize.self) { $0.size } action: { onSizeChange($0) }
     }
@@ -1239,6 +1242,7 @@ private struct MultipointPopoverContent: View {
 private struct MultipointPopover: NSViewRepresentable {
     @Binding var isPresented: Bool
     let headphones: SonyHeadphonesController
+    let settings: SettingsStore
     let maximumHeight: CGFloat
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -1288,7 +1292,7 @@ private struct MultipointPopover: NSViewRepresentable {
             self.owner = owner
             self.anchor = anchor
             if owner.isPresented {
-                let content = MultipointPopoverContent(headphones: owner.headphones, maximumHeight: owner.maximumHeight) { [weak self] size in
+                let content = MultipointPopoverContent(headphones: owner.headphones, settings: owner.settings, maximumHeight: owner.maximumHeight) { [weak self] size in
                     self?.measuredContentSize = size
                     self?.schedulePresentation()
                 }

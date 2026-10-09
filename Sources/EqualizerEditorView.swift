@@ -97,7 +97,8 @@ struct EqualizerEditorView: View {
         }
         .formStyle(.grouped)
         .disabled(headphones.multipointTransition?.isFinished == false || headphones.deviceActionTransition?.isFinished == false)
-        .tint(.accentColor)
+        .accentColor(settings.tintColor)
+        .tint(settings.tintColor)
         .transaction { $0.animation = nil }
         .frame(width: editorWidth, height: 620)
         .windowResizeAnchorIfAvailable(.topLeading)
@@ -227,7 +228,7 @@ struct EqualizerEditorView: View {
         VStack(spacing: 8) {
             Text(title).font(.caption).foregroundStyle(.primary)
             EqualizerFader(value: value, title: title, range: settings.customEqualizerDraft.levelRange,
-                           color: .controlAccentColor)
+                           color: settings.controlAccentColor)
                 .frame(width: 28, height: 180)
             Text(Int(value.wrappedValue).formatted(.number.sign(strategy: .always())))
                 .monospacedDigit()

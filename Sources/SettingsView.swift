@@ -3,6 +3,19 @@ import CoreAudio
 import ServiceManagement
 import SwiftUI
 
+extension SettingsStore {
+    var controlAccentColor: NSColor {
+        if useSystemAccentColor { return .controlAccentColor }
+        return NSColor(name: nil) { appearance in
+            if appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
+                return NSColor(srgbRed: 170.0 / 255, green: 137.0 / 255, blue: 64.0 / 255, alpha: 1)
+            }
+            return NSColor(srgbRed: 140.0 / 255, green: 107.0 / 255, blue: 10.0 / 255, alpha: 1)
+        }
+    }
+    var tintColor: Color { Color(nsColor: controlAccentColor) }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var headphones: SonyHeadphonesController
@@ -36,10 +49,12 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .tint(.accentColor)
+        .accentColor(settings.tintColor)
+        .tint(settings.tintColor)
         .accessibilityIdentifier("settings.form")
         .onAppear {
             settings.refreshLaunchStatus()
+            settings.refreshAppLanguage()
             #if DEBUG
             if SettingsLifecycleProbe.isEnabled { SettingsLifecycleProbe.appearances += 1 }
             #endif
@@ -63,6 +78,7 @@ struct SettingsView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 settings.refreshLaunchStatus()
+                settings.refreshAppLanguage()
             }
             else { headphones.invalidateSoundPressureReading() }
         }
@@ -88,6 +104,25 @@ struct SettingsView: View {
 
     private var general: some View {
         Form {
+            Section {
+                Picker("App language", selection: Binding(
+                    get: { settings.appLanguage },
+                    set: { settings.setAppLanguage($0) }
+                )) {
+                    ForEach(AppLanguage.allCases, id: \.self) { language in
+                        Text(verbatim: language.displayName).tag(language)
+                    }
+                }
+                .accessibilityIdentifier("settings.appLanguage")
+                if settings.appLanguageNeedsRestart {
+                    Text("Quit and reopen Acouplet to apply the language change.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("settings.appLanguageRestart")
+                }
+                Toggle("Use system accent color", isOn: $settings.useSystemAccentColor)
+                    .accessibilityIdentifier("settings.systemAccent")
+            }
             Section("Menu Bar") {
                 Toggle("Keep icon visible when disconnected", isOn: $settings.keepMenuBarIconWhenDisconnected)
                     .accessibilityIdentifier("menuBar.keepIcon")
@@ -101,7 +136,7 @@ struct SettingsView: View {
                     }
                     Button("Login Items…") { SMAppService.openSystemSettingsLoginItems() }
                         .buttonStyle(.borderless)
-                        .foregroundStyle(Color(nsColor: .controlAccentColor))
+                        .foregroundStyle(Color.accentColor)
                 } else {
                     Toggle(
                         "Launch at login",
@@ -260,7 +295,7 @@ struct SettingsView: View {
                 LabeledContent("Mac audio output", value: audioOutputName)
                     .accessibilityIdentifier("audio.macOutput")
                 Link("Sound Settings…", destination: URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension")!)
-                    .foregroundStyle(Color(nsColor: .controlAccentColor))
+                    .foregroundStyle(Color.accentColor)
                 if headphones.supportsConnectionMode || headphones.connectionTransition != nil {
                     ConnectionModeControl()
                         .disabled(headphones.isRunningHeadphoneTest || headphones.powerOffState != nil)
@@ -1365,7 +1400,7 @@ private struct ConnectionModeControl: View {
                     Button("Bluetooth Settings…") {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
                     }
-                    .foregroundStyle(Color(nsColor: .controlAccentColor))
+                    .foregroundStyle(Color.accentColor)
                     Button("Check Connection") { headphones.connect() }
                         .accessibilityIdentifier("audio.checkPairedConnection")
                 }

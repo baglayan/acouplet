@@ -4,6 +4,95 @@ import XCTest
 
 final class SettingsStoreTests: XCTestCase {
     @MainActor
+    func testAppLanguageUsesOnlyItsOwnDomainAndRestoresSystemDefault() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let inheritedName = suiteName + ".inherited"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let inherited = try XCTUnwrap(UserDefaults(suiteName: inheritedName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            inherited.removePersistentDomain(forName: inheritedName)
+        }
+        inherited.set(["tr"], forKey: "AppleLanguages")
+        defaults.addSuite(named: inheritedName)
+        let inheritedLanguages = defaults.stringArray(forKey: "AppleLanguages")
+        XCTAssertNotNil(inheritedLanguages)
+        let settings = SettingsStore(defaults: defaults, preferencesDomain: suiteName)
+        XCTAssertEqual(settings.appLanguage, .system)
+        XCTAssertFalse(settings.appLanguageNeedsRestart)
+        XCTAssertNil(defaults.persistentDomain(forName: suiteName)?["AppleLanguages"])
+
+        for language in [AppLanguage.english, .turkish] {
+            settings.setAppLanguage(language)
+            XCTAssertEqual(defaults.persistentDomain(forName: suiteName)?["AppleLanguages"] as? [String], [language.rawValue])
+            XCTAssertTrue(settings.appLanguageNeedsRestart)
+            let reopened = SettingsStore(defaults: defaults, preferencesDomain: suiteName)
+            XCTAssertEqual(reopened.appLanguage, language)
+            XCTAssertFalse(reopened.appLanguageNeedsRestart)
+        }
+
+        settings.setAppLanguage(.system)
+        XCTAssertFalse(settings.appLanguageNeedsRestart)
+        XCTAssertNil(defaults.persistentDomain(forName: suiteName)?["AppleLanguages"])
+        XCTAssertEqual(defaults.stringArray(forKey: "AppleLanguages"), inheritedLanguages)
+        XCTAssertEqual(inherited.persistentDomain(forName: inheritedName)?["AppleLanguages"] as? [String], ["tr"])
+    }
+
+    @MainActor
+    func testAppLanguagePreservesRegionalOverridesAndRefreshesExternalChanges() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(["tr-TR", "en-GB"], forKey: "AppleLanguages")
+        let settings = SettingsStore(defaults: defaults, preferencesDomain: suiteName)
+        XCTAssertEqual(settings.appLanguage, .turkish)
+        XCTAssertEqual(defaults.persistentDomain(forName: suiteName)?["AppleLanguages"] as? [String], ["tr-TR", "en-GB"])
+        XCTAssertFalse(settings.appLanguageNeedsRestart)
+
+        defaults.set(["en-GB"], forKey: "AppleLanguages")
+        settings.refreshAppLanguage()
+        XCTAssertEqual(settings.appLanguage, .english)
+        XCTAssertTrue(settings.appLanguageNeedsRestart)
+        XCTAssertEqual(defaults.persistentDomain(forName: suiteName)?["AppleLanguages"] as? [String], ["en-GB"])
+        settings.setAppLanguage(.turkish)
+        XCTAssertFalse(settings.appLanguageNeedsRestart)
+
+        defaults.removeObject(forKey: "AppleLanguages")
+        settings.refreshAppLanguage()
+        XCTAssertEqual(settings.appLanguage, .system)
+        XCTAssertTrue(settings.appLanguageNeedsRestart)
+    }
+
+    @MainActor
+    func testAppLanguageHandlesInvalidPreferencesWithoutRewritingThem() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("tr", forKey: "AppleLanguages")
+        let original = defaults.persistentDomain(forName: suiteName) as NSDictionary?
+        let settings = SettingsStore(defaults: defaults, preferencesDomain: suiteName)
+        XCTAssertEqual(settings.appLanguage, .system)
+        XCTAssertEqual(defaults.persistentDomain(forName: suiteName) as NSDictionary?, original)
+        XCTAssertEqual(AppLanguage(preferredLanguages: []), .system)
+        XCTAssertEqual(AppLanguage(preferredLanguages: ["fr", "tr-TR"]), .turkish)
+        XCTAssertEqual(AppLanguage(preferredLanguages: ["fr"]), .english)
+    }
+
+    @MainActor
+    func testSystemAccentDefaultsOnAndExplicitChoicePersists() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = SettingsStore(defaults: defaults, preferencesDomain: suiteName)
+        XCTAssertTrue(settings.useSystemAccentColor)
+        XCTAssertNil(defaults.object(forKey: "preferences.useSystemAccentColor"))
+        settings.useSystemAccentColor = false
+        XCTAssertFalse(SettingsStore(defaults: defaults, preferencesDomain: suiteName).useSystemAccentColor)
+        settings.useSystemAccentColor = true
+        XCTAssertTrue(SettingsStore(defaults: defaults, preferencesDomain: suiteName).useSystemAccentColor)
+    }
+
+    @MainActor
     func testLegacyPreferencesMigrateOnceWithoutReplacingCurrentValuesOrUpdatePolicy() throws {
         let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

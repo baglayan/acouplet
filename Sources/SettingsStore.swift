@@ -8,9 +8,37 @@ struct SavedEqualizerProfile: Codable, Equatable, Identifiable, Sendable {
     var settings: EqualizerSettings
 }
 
+enum AppLanguage: String, CaseIterable, Sendable {
+    case system
+    case english = "en"
+    case turkish = "tr"
+
+    init(preferredLanguages: [String]?) {
+        guard let preferredLanguages, !preferredLanguages.isEmpty else {
+            self = .system
+            return
+        }
+        self = Bundle.preferredLocalizations(from: ["en", "tr"], forPreferences: preferredLanguages).first == "tr"
+            ? .turkish : .english
+    }
+
+    var displayName: String {
+        switch self {
+        case .system: String(localized: "System Default")
+        case .english: "English"
+        case .turkish: "Türkçe"
+        }
+    }
+}
+
 @MainActor
 final class SettingsStore: ObservableObject {
     @Published var selectedSettingsPane = "general"
+    @Published private(set) var appLanguage: AppLanguage
+    var appLanguageNeedsRestart: Bool { appLanguage != languageAtLaunch }
+    @Published var useSystemAccentColor: Bool {
+        didSet { defaults.set(useSystemAccentColor, forKey: Keys.useSystemAccentColor) }
+    }
     @Published var reconnectAutomatically: Bool {
         didSet { defaults.set(reconnectAutomatically, forKey: Keys.reconnectAutomatically) }
     }
@@ -67,10 +95,20 @@ final class SettingsStore: ObservableObject {
     private var isLoadingEqualizerDraft = false
 
     private let managesLaunchService: Bool
+    private let preferencesDomain: String?
+    private let languageAtLaunch: AppLanguage
 
-    init(defaults: UserDefaults, managesLaunchService: Bool = false) {
+    init(defaults: UserDefaults, managesLaunchService: Bool = false, preferencesDomain: String? = Bundle.main.bundleIdentifier) {
         self.defaults = defaults
         self.managesLaunchService = managesLaunchService
+        self.preferencesDomain = preferencesDomain
+        let languages = preferencesDomain.flatMap { defaults.persistentDomain(forName: $0)?[Keys.appleLanguages] as? [String] }
+        let language = AppLanguage(preferredLanguages: languages)
+        appLanguage = language
+        languageAtLaunch = language
+        useSystemAccentColor = defaults.object(forKey: Keys.useSystemAccentColor) == nil
+            ? true
+            : defaults.bool(forKey: Keys.useSystemAccentColor)
         keepMenuBarIconWhenDisconnected = defaults.bool(forKey: Keys.keepMenuBarIconWhenDisconnected)
         showBatteryInMenuBar = defaults.bool(forKey: Keys.showBatteryInMenuBar)
         lowBatteryNotificationsEnabled = defaults.bool(forKey: Keys.lowBatteryNotificationsEnabled)
@@ -90,6 +128,20 @@ final class SettingsStore: ObservableObject {
         equalizerDraftsByDevice = Self.decode([String: EqualizerSettings].self, from: defaults.data(forKey: Keys.equalizerDraftsByDevice)) ?? [:]
         equalizerProfiles = Self.decode([SavedEqualizerProfile].self, from: defaults.data(forKey: Keys.equalizerProfiles)) ?? []
         refreshLaunchStatus()
+    }
+
+    func setAppLanguage(_ language: AppLanguage) {
+        appLanguage = language
+        if language == .system {
+            defaults.removeObject(forKey: Keys.appleLanguages)
+        } else {
+            defaults.set([language.rawValue], forKey: Keys.appleLanguages)
+        }
+    }
+
+    func refreshAppLanguage() {
+        let languages = preferencesDomain.flatMap { defaults.persistentDomain(forName: $0)?[Keys.appleLanguages] as? [String] }
+        appLanguage = AppLanguage(preferredLanguages: languages)
     }
 
     static func migrateLegacyPreferences(from legacy: [String: Any], to defaults: UserDefaults, bundleIdentifier: String?) {
@@ -198,6 +250,8 @@ final class SettingsStore: ObservableObject {
     }
 
     private enum Keys {
+        static let appleLanguages = "AppleLanguages"
+        static let useSystemAccentColor = "preferences.useSystemAccentColor"
         static let keepMenuBarIconWhenDisconnected = "preferences.keepMenuBarIconWhenDisconnected"
         static let showBatteryInMenuBar = "preferences.showBatteryInMenuBar"
         static let lowBatteryNotificationsEnabled = "preferences.lowBatteryNotificationsEnabled"

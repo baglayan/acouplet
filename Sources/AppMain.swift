@@ -44,6 +44,7 @@ struct AcoupletApp: App {
         #endif
         Window("About Acouplet", id: "about") {
             AppAboutView()
+                .environmentObject(appDelegate.environment.settings)
                 #if ACOUPLET_SPARKLE
                 .environmentObject(appDelegate.environment.updater)
                 #endif
@@ -53,11 +54,13 @@ struct AcoupletApp: App {
         .windowResizability(.contentSize)
         Window("License", id: "license") {
             AppLegalView(paths: ["Resources/LICENSE"])
+                .environmentObject(appDelegate.environment.settings)
         }
         .defaultLaunchBehavior(.suppressed)
         .defaultSize(width: 600, height: 480)
         Window("Third-Party Notices", id: "third-party-notices") {
             AppLegalView(paths: thirdPartyNotices, markdown: true)
+                .environmentObject(appDelegate.environment.settings)
         }
         .defaultLaunchBehavior(.suppressed)
         .defaultSize(width: 600, height: 480)
@@ -95,6 +98,7 @@ struct AcoupletApp: App {
 }
 
 private struct AppAboutView: View {
+    @EnvironmentObject private var settings: SettingsStore
     @Environment(\.openWindow) private var openWindow
     #if ACOUPLET_SPARKLE
     @EnvironmentObject private var updater: AppUpdater
@@ -138,10 +142,13 @@ private struct AppAboutView: View {
         }
         .frame(width: 284)
         .padding(20)
+        .accentColor(settings.tintColor)
+        .tint(settings.tintColor)
     }
 }
 
 private struct AppLegalView: View {
+    @EnvironmentObject private var settings: SettingsStore
     private let contents: Result<AttributedString, Error>
 
     init(paths: [String], markdown: Bool = false) {
@@ -180,6 +187,8 @@ private struct AppLegalView: View {
                     .accessibilityIdentifier("legal.contents")
             }
             .frame(minWidth: 360, minHeight: 240)
+            .accentColor(settings.tintColor)
+            .tint(settings.tintColor)
         case .failure(let error):
             ContentUnavailableView("Document Could Not Be Opened", systemImage: "doc.text",
                                    description: Text(error.localizedDescription))
