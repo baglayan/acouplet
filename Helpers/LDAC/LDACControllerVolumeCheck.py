@@ -13,11 +13,11 @@ output_source = (root / "Sources/LDACNativeOutput.swift").read_text()
 
 def member(name):
     match = re.search(r"^    (?:private )?(?:func|var) " + name + r"\b", source, re.MULTILINE)
-    end = re.search(r"^    (?:private )?(?:func|var|struct) ", source[match.end():], re.MULTILINE)
+    end = re.search(r"^    (?:(?:private )?(?:func|var|struct) |#(?:if|endif)\b)", source[match.end():], re.MULTILINE)
     return re.sub(r"^    private ", "    ", source[match.start():match.end() + end.start()], flags=re.MULTILINE)
 
 
-volume = output_source[output_source.index("struct LDACNativeVolume:"):output_source.index("\n@MainActor\nfinal class LDACNativeOutput")]
+volume = output_source[output_source.index("struct LDACNativeVolume:"):output_source.index("\nstruct LDACRouteRecovery")]
 fixture = r'''
 import Foundation
 import Combine
@@ -40,7 +40,7 @@ struct LDACPriorityCleanupError: Error {}
 enum SonyBLEIdentity { static func normalizedAddress(_ address: String) -> String? { address.uppercased() } }
 struct IOBluetoothDevice {
     init?(addressString: String) {}
-    func isConnected() -> Bool { true }
+    func isClassicConnected() -> Bool { true }
 }
 struct IOBluetoothHostController {
     static func `default`() -> Self? { Self() }
@@ -195,20 +195,26 @@ final class LDACNativeOutput {
     var preparations = 0
     var silences = 0
     var configurations = 0
+    var recoveryPreparations = 0
+    var restores: [Bool] = []
+    var restoreError: String?
     init(id: UUID, address: String, changed: @escaping (Result<LDACNativeVolume, Error>) -> Void) {}
     func claim(model: String, targetAddress: String, sampleRate: Int) async throws {}
-    func priorityControl() throws -> LDACPriorityControl { LDACPriorityControl() }
-    func configure(volume: Int, range: ClosedRange<Int>, preservingUserChange: Bool = false) throws {
+    func priorityControl() async throws {}
+    func configure(volume: Int, range: ClosedRange<Int>, preservingUserChange: Bool = false) async throws {
         configurations += 1
         if !preservingUserChange { _ = controls.update(volume: volume, range: range) }
     }
-    func validateForRecovery() throws {}
-    func prepareForReconnect() throws -> LDACPriorityControl { LDACPriorityControl() }
-    func selectForHandoff() throws { selected = true }
-    func finishPreparation() throws { ready = true; preparations += 1 }
+    func validateForRecovery() async throws {}
+    func prepareForReconnect() async throws { recoveryPreparations += 1 }
+    func selectForHandoff() async throws { selected = true }
+    func finishPreparation() async throws { ready = true; preparations += 1 }
     func silence() { ready = false; silences += 1 }
-    func restoreAndRelease(targetDisconnected: Bool = false) async -> String? { ready = false; selected = false; return nil }
+    func restoreAndRelease(targetDisconnected: Bool = false) async -> String? { restores.append(targetDisconnected); ready = false; selected = false; return restoreError }
 }
+
+typealias LDACOwnerOutput = LDACNativeOutput
+typealias LDACOwnerSession = LDACNativeSession
 
 @MainActor
 final class LDACNativeSession {
@@ -224,6 +230,7 @@ final class LDACNativeSession {
     let receive: (Event) -> Void
     var gains: [Double]
     var stops = 0
+    var audioRestorations: [Bool] = []
     var handoffs = 0
     init(id: UUID, address: String, helpers: Helpers, gain: Double, outputDeviceUID: String,
          priority: LDACPriorityControl?, configuration: LDACConfiguration, recoveryAttempt: Bool,
@@ -234,11 +241,17 @@ final class LDACNativeSession {
         self.receive = receive
         gains = [gain]
     }
+    convenience init(id: UUID, output: LDACNativeOutput, configuration: LDACConfiguration,
+                     recoveryAttempt: Bool, restoringOnly: Bool, receive: @escaping (Event) -> Void) {
+        self.init(id: id, address: "02:00:00:00:00:01", helpers: Helpers(), gain: 0,
+                  outputDeviceUID: LDACNativeOutput.uid, priority: nil, configuration: configuration,
+                  recoveryAttempt: recoveryAttempt, restoringOnly: restoringOnly, receive: receive)
+    }
     func start() {}
     func emit(_ event: Event) { receive(event) }
     func allowHandoff() { handoffs += 1 }
     func updateGain(_ gain: Double) { gains.append(gain) }
-    func stop(restoreAudio: Bool) { stops += 1 }
+    func stop(restoreAudio: Bool) { stops += 1; audioRestorations.append(restoreAudio) }
     func recoverConnection(reason: String) {}
     func verifyConnectionLoss(reason: String) {}
 }
@@ -247,7 +260,6 @@ final class LDACNativeSession {
 final class Controller: ObservableObject {
     var state = LDACState.off
     var targetAddress: String?
-    var actualOutputGain = 0.0
     var isSessionRunning = false
     var isRecovering = false
     var audioCaptureAccess = LDACAudioCaptureAccess.unchecked
@@ -260,10 +272,12 @@ final class Controller: ObservableObject {
     var headphones: SonyHeadphonesController?
     let bundle = Bundle.main
     let inspectDriver: (Bundle) -> LDACDriverInstaller.State = { LDACDriverInstaller.inspect(bundle: $0) }
+    var isClassicConnected: (String) -> Bool = { _ in true }
     var driverState = LDACDriverInstaller.State.current
     var audioRoute: MacAudioRouteObserver? = MacAudioRouteObserver()
     var resumeOutputUID: String?
     var suspensionRequested = false
+    var pendingConnectionModes: [String: UUID] = [:]
     var deferredConnectionModes: [String: UUID] = [:]
     var preferenceRestoreTasks: [String: Task<Void, Never>] = [:]
     var connectionModeRestoreID: UUID?
@@ -276,6 +290,8 @@ final class Controller: ObservableObject {
     var cleanupTask: Task<Void, Never>?
     var recoveryTask: Task<Void, Never>?
     var recoveryAttempt = 0
+    var recoveryPaused = false
+    var recoveryResumeContext: (controller: ObjectIdentifier, observedConnected: Bool, observedDisconnect: Bool)?
     var restoreAudioOnStop = true
     var stableSince: Date?
     var pendingVolume: Int?
@@ -296,7 +312,7 @@ final class Controller: ObservableObject {
     struct ControlError: LocalizedError {
         let message: String
         var errorDescription: String? { message }
-        init(_ message: String) { self.message = message }
+        init(_ message: String, userFacing: String? = nil) { self.message = userFacing ?? message }
     }
 }
 
@@ -338,6 +354,7 @@ enum Check {
         precondition(controller.hasMusicVolumeForHandoff && !controller.hasOwnedMusicContext,
                      "Legacy raw ownership admitted before active")
         session.emit(.handoffReady)
+        try await waitUntil { session.handoffs == 1 }
         precondition(output.selected && !output.ready && session.handoffs == 1)
         precondition(headphones.queuedWrite == nil && session.gains == [0])
         session.emit(.connecting)
@@ -370,13 +387,18 @@ enum Check {
         precondition(!output.ready && !controller.usable && controller.transportFormat == nil && controller.controlSession == nil)
         precondition(!controller.hasOwnedMusicContext && session.gains.last == 0)
         let refreshes = headphones.volumeRefreshes
-        session.emit(.finished(.init(message: nil, canRetry: true, targetDisconnected: true)))
+        controller.isClassicConnected = { _ in false }
+        session.emit(.finished(.init(message: nil, canRetry: true, targetDisconnected: true, waitForReconnect: false)))
         try await waitUntil { controller.session != nil && controller.session !== session }
         let recovered = controller.session!
+        precondition(output.restores.isEmpty && controller.requestedAddress == headphones.address,
+                     "Deliberate disconnect with usable controls was mistaken for unavailable headphones")
+        controller.isClassicConnected = { _ in true }
         let renewedID = controller.sessionID
         session.emit(.active(LDACFormat(value: 99)))
         precondition(controller.sessionID == renewedID && controller.transportFormat == nil)
         recovered.emit(.handoffReady)
+        try await waitUntil { recovered.handoffs == 1 }
         precondition(!output.ready)
         recovered.emit(.active(LDACFormat()))
         try await waitUntil { headphones.volumeRefreshes == refreshes + 1 }
@@ -402,6 +424,7 @@ enum Check {
         for changed in ["range", "control-session", "target", "stop"] {
             let (bound, device, endpoint, raw) = try await started()
             raw.emit(.handoffReady)
+            try await waitUntil { raw.handoffs == 1 }
             raw.emit(.active(LDACFormat()))
             try await waitUntil { device.volumeRefreshes == 1 }
             device.receiveStatus()
@@ -410,8 +433,20 @@ enum Check {
             if changed == "range" { device.playback.musicVolumeRange = 0...20 }
             else if changed == "control-session" { device.notificationSession += 1 }
             else if changed == "stop" { bound.stop(reason: "fixture queued stop") }
-            else { bound.devices?.controllers[device.address] = SonyHeadphonesController() }
+            else {
+                let returning = SonyHeadphonesController()
+                returning.isDeviceConnected = false
+                returning.isReady = false
+                bound.devices?.controllers[device.address] = returning
+            }
             bound.controlsChanged()
+            if changed == "target" {
+                precondition(bound.requestedAddress == device.address && bound.suspensionRequested)
+                precondition(bound.state == .stopping && raw.audioRestorations == [false])
+                raw.emit(.finished(.init(message: nil, targetDisconnected: true)))
+                try await waitUntil { !bound.isSessionRunning }
+                precondition(bound.requestedAddress == device.address && bound.state == .waitingForDevice)
+            }
             device.transmitVolume()
             precondition(device.transmitted.isEmpty && !endpoint.ready && !bound.usable,
                          "Changed \(changed) retained queued legacy volume ownership")
@@ -422,6 +457,7 @@ enum Check {
         let (modern, modernDevice, modernOutput, modernRaw) = try await started(.v2)
         precondition(modern.hasOwnedMusicContext)
         modernRaw.emit(.handoffReady)
+        try await waitUntil { modernRaw.handoffs == 1 }
         modernRaw.emit(.active(LDACFormat()))
         try await waitUntil { modernDevice.queuedWrite != nil }
         precondition(modernDevice.volumeRefreshes == 0 && !modernOutput.ready)
@@ -453,6 +489,46 @@ enum Check {
         precondition(!modernOutput.ready && !modern.usable)
         try await stop(modern)
         print("PASS existing v2 path: temporary command blocks retain active audio and defer volume; unblocking resumes writes; real source loss still revokes ownership")
+
+        for (controlsConnected, cleanupFails) in [(false, false), (true, false), (false, true)] {
+            let (cased, casedDevice, casedOutput, casedRaw) = try await started(.v2)
+            casedRaw.emit(.handoffReady)
+            try await waitUntil { casedOutput.selected }
+            casedDevice.isReady = false
+            casedDevice.isDeviceConnected = controlsConnected
+            cased.isClassicConnected = { _ in false }
+            if cleanupFails { casedOutput.restoreError = "Fixture lease release failed" }
+            casedRaw.emit(.connectionLost("Controls lost before deliberate recovery disconnect"))
+            casedRaw.emit(.finished(.init(message: nil, canRetry: true, targetDisconnected: true, waitForReconnect: false)))
+            precondition(cased.session == nil && cased.recoveryTask != nil)
+            try await waitUntil { !cased.isSessionRunning }
+            precondition(cased.session == nil && cased.recoveryTask == nil && cased.nativeOutput == nil)
+            precondition(casedOutput.recoveryPreparations == 1 && casedOutput.restores == [true] && !casedOutput.selected,
+                         "Unavailable controls after deliberate disconnect retained the virtual output")
+            precondition(casedDevice.connectionRequests.isEmpty,
+                         "Unavailable headphones launched ordinary Bluetooth restoration")
+            if cleanupFails {
+                precondition(cased.state == .failed("Fixture lease release failed") && cased.requestedAddress == nil,
+                             "A real output cleanup failure was hidden")
+            } else {
+                precondition(cased.state == .waitingForDevice && cased.requestedAddress == casedDevice.address,
+                             "Safe disconnect discarded LDAC intent")
+                for _ in 0..<100 { cased.resumeIfReady() }
+                precondition(cased.session == nil && cased.recoveryTask == nil)
+                cased.audioRoute?.route = Route(uid: "fixture-speakers")
+                casedDevice.isReady = true
+                casedDevice.isDeviceConnected = true
+                cased.isClassicConnected = { _ in true }
+                cased.resumeIfReady()
+                precondition(cased.session == nil && cased.audioRoute?.route?.uid == "fixture-speakers",
+                             "Device return replaced the user's subsequently selected output")
+                cased.audioRoute?.route = Route(uid: "fixture-headphones")
+                cased.resumeIfReady()
+                try await waitUntil { cased.session != nil }
+                try await stop(cased)
+            }
+        }
+        print("PASS actual incident sequence: controls unavailable, safe deliberate disconnect without waitForReconnect, retry exits by releasing output and preserving intent; cleanup errors remain explicit and external route guards hold")
 
         let (resuming, returning, oldOutput, oldSession) = try await started(.v2)
         let originalPreference = UUID()
@@ -507,6 +583,7 @@ enum Check {
         sourceDevice.localSource = false
         otherSource.controlsChanged()
         precondition(otherSource.requestedAddress == sourceDevice.address && sourceRaw.stops == 1)
+        precondition(sourceRaw.audioRestorations == [true], "Phone playback left ordinary Mac Bluetooth audio disconnected")
         sourceRaw.emit(.finished(.init(message: nil)))
         try await waitUntil { otherSource.state == .waitingForDevice }
         for _ in 0..<10 { otherSource.resumeIfReady() }
@@ -517,14 +594,76 @@ enum Check {
         try await waitUntil { otherSource.session != nil }
         try await stop(otherSource)
         print("PASS actual completion routing: manual Off never reconnects absent headphones; another multipoint source holds resume until the Mac is confirmed")
+        for initiallyConnected in [false, true] {
+            let (bounded, recoveringDevice, _, originalRaw) = try await started(.v2)
+            var previous = originalRaw
+            for _ in 0..<2 {
+                previous.emit(.connectionLost("Fixture control loss"))
+                previous.emit(.finished(.init(message: nil, canRetry: true)))
+                try await waitUntil { bounded.session != nil && bounded.session !== previous }
+                previous = bounded.session!
+                precondition(!previous.restoringOnly, "Recovery restored audio before using its bounded attempts")
+            }
+            previous.emit(.finished(.init(message: nil, canRetry: true)))
+            let exhaustedRestore = bounded.session
+            precondition(exhaustedRestore?.restoringOnly == true, "Exhausted recovery did not restore ordinary audio")
+            recoveringDevice.isDeviceConnected = initiallyConnected
+            bounded.isClassicConnected = { _ in initiallyConnected }
+            recoveringDevice.isReady = false
+            recoveringDevice.notificationSession += 1
+            exhaustedRestore?.emit(.finished(.init(message: nil)))
+            try await waitUntil { bounded.state == .waitingForDevice }
+            for _ in 0..<100 { bounded.resumeIfReady() }
+            precondition(bounded.session == nil && bounded.requestedAddress == recoveringDevice.address,
+                         "Unchanged controls restarted exhausted recovery or lost remembered LDAC intent")
+            recoveringDevice.isDeviceConnected = true
+            bounded.isClassicConnected = { _ in true }
+            bounded.resumeIfReady()
+            for _ in 0..<3 {
+                recoveringDevice.isDeviceConnected = false
+                recoveringDevice.isReady = false
+                recoveringDevice.notificationSession += 1
+                bounded.resumeIfReady()
+                recoveringDevice.isDeviceConnected = true
+                recoveringDevice.isReady = true
+                bounded.resumeIfReady()
+                precondition(bounded.session == nil && bounded.state == .waitingForDevice
+                             && bounded.recoveryAttempt == 2 && bounded.recoveryPaused,
+                             "Cleanup or automatic control reconnect renewed exhausted recovery")
+            }
+            recoveringDevice.isDeviceConnected = false
+            bounded.isClassicConnected = { _ in false }
+            recoveringDevice.isReady = false
+            bounded.resumeIfReady()
+            precondition(bounded.session == nil, "A disconnected device restarted exhausted recovery")
+            recoveringDevice.isDeviceConnected = true
+            bounded.isClassicConnected = { _ in true }
+            bounded.resumeIfReady()
+            precondition(bounded.session == nil, "Device return bypassed control readiness")
+            recoveringDevice.isReady = true
+            recoveringDevice.localSource = false
+            bounded.resumeIfReady()
+            precondition(bounded.session == nil, "Device return bypassed source ownership")
+            recoveringDevice.localSource = true
+            bounded.audioRoute?.route = Route(uid: "fixture-speakers")
+            bounded.resumeIfReady()
+            precondition(bounded.session == nil, "Device return bypassed the selected Mac output")
+            bounded.audioRoute?.route = Route(uid: "fixture-headphones")
+            bounded.resumeIfReady()
+            try await waitUntil { bounded.session != nil }
+            precondition(bounded.recoveryAttempt == 0 && !bounded.recoveryPaused,
+                         "An observed device disconnect and return did not renew bounded recovery")
+            try await stop(bounded)
+        }
+        print("PASS actual recovery loop: two retries, restore-only completion, induced control reconnect remains paused, and a later device disconnect/return resumes with source/output guards")
         print("PASS scope: production controller methods and volume mapping; fake transport, confirmations, observations and native output; no hardware or installation")
     }
 }
 '''
-names = ["deviceUnavailableReason", "refreshDriverState", "start", "launch", "hasMusicVolumeForHandoff", "hasOwnedMusicContext",
+names = ["needsStopBeforeTermination", "nextRecoveryDelay", "canResumeRecovery", "deviceUnavailableReason", "refreshDriverState", "start", "launch", "hasMusicVolumeForHandoff", "hasOwnedMusicContext",
          "hasOtherMusicSource", "bindingIsCurrent", "musicControlStatus", "waitForControls", "controlsChanged",
          "sendPendingVolume", "setOutputGain", "fail", "beginRecovery", "scheduleRecovery", "stop", "stopSession",
-         "suspend", "resumeIfReady", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode",
+         "suspend", "resumeIfReady", "reconcileConnectionPreferences", "forgetConnectionPreference", "scheduleConnectionPreferenceRestoration", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode",
          "restoreConnectionPreference", "finish", "completeStop"]
 fixture = fixture.replace("precondition(", "check(")
 fixture = fixture.replace("__VOLUME__", volume).replace("__METHODS__", "\n".join(member(name) for name in names))

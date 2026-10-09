@@ -394,6 +394,122 @@ final class SonyMultipointTransitionTests: XCTestCase {
         XCTAssertEqual(transition.expectedPayload, [0xD6, 0xD2])
     }
 
+    func testCombinedConfirmationQueuesOneWarningReplyAndStillRequiresOwnedReadback() throws {
+        let state = model()
+        var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+        let first = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 7, 1]))
+        let warning = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 0x70, 1]))
+        transition.receiveAlert(first, session: 1)
+        let firstReply = try XCTUnwrap(transition.respond(to: first, action: .positive, confirmsSoundQualityWarning: true))
+        transition.commandTransmitted(firstReply, model: state, session: 1)
+        transition.commandAcknowledged(firstReply, session: 1)
+        XCTAssertTrue(transition.receiveAlert(warning, session: 1))
+        XCTAssertEqual(transition.phase, .replyQueued(warning, .positive))
+        XCTAssertNil(transition.alert)
+        XCTAssertEqual(transition.expectedPayload, [0x98, 0, 0x70, 1])
+        XCTAssertFalse(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true))
+        let reply = try XCTUnwrap(transition.expectedPayload)
+        XCTAssertTrue(transition.commandTransmitted(reply, model: state, session: 1))
+        XCTAssertFalse(transition.commandAcknowledged(firstReply, session: 1))
+        var missingAcknowledgment = transition
+        missingAcknowledgment.timeout()
+        XCTAssertEqual(missingAcknowledgment.phase, .failed)
+        XCTAssertTrue(transition.commandAcknowledged(reply, session: 1))
+        var repeated = transition
+        XCTAssertTrue(repeated.receiveAlert(warning, session: 1))
+        XCTAssertEqual(repeated.alert, warning)
+        XCTAssertNil(repeated.expectedPayload)
+        XCTAssertTrue(transition.timeout())
+        XCTAssertTrue(transition.commandTransmitted([0xD6, 0xD2], model: state, session: 1))
+        XCTAssertFalse(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1))
+        XCTAssertTrue(transition.receiveReadback([0xD7, 0xD2, 0, 0], model: state, session: 1, readbackOwned: true))
+        XCTAssertEqual(transition.phase, .complete)
+    }
+
+    func testCombinedConfirmationRequiresInitialEnableReconnectAlertAndPositiveChoice() throws {
+        let warning = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 0x70, 1]))
+        for enabled in [false, true] {
+            let state = model(enabled: !enabled)
+            for payload: [UInt8] in [[0x99, 0, 6, 1], [0x99, 0, 7, 1], [0x99, 0, 7, 2], [0x99, 6, 1, 0, 1]] {
+                for action: SonyConnectionAlertAction in [.negative, .positive] {
+                    let first = try XCTUnwrap(SonyConnectionAlert(payload: payload))
+                    var transition = try XCTUnwrap(SonyMultipointTransition(enabled: enabled, model: state, session: 1))
+                    transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+                    transition.receiveAlert(first, session: 1)
+                    guard let reply = transition.respond(to: first, action: action, confirmsSoundQualityWarning: true) else { continue }
+                    transition.commandTransmitted(reply, model: state, session: 1)
+                    if action == .negative {
+                        XCTAssertEqual(transition.phase, .cancelled)
+                        XCTAssertFalse(transition.receiveAlert(warning, session: 1))
+                    } else {
+                        XCTAssertTrue(transition.receiveAlert(warning, session: 1))
+                        if enabled && payload == [0x99, 0, 7, 1] {
+                            XCTAssertEqual(transition.phase, .replyQueued(warning, .positive))
+                        } else {
+                            XCTAssertEqual(transition.alert, warning)
+                            XCTAssertNil(transition.expectedPayload)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testCombinedConfirmationDoesNotCoverDifferentWarningOrActionType() throws {
+        let state = model()
+        let first = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 7, 1]))
+        let warning = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 0x70, 1]))
+        for payload: [UInt8] in [[0x99, 0, 6, 1], [0x99, 0, 7, 1], [0x99, 0, 0x70, 0], [0x99, 0, 0x70, 2], [0x99, 0, 0x70, 0xFF], [0x99, 6, 1, 0, 1]] {
+            var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+            transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+            transition.receiveAlert(first, session: 1)
+            let reply = try XCTUnwrap(transition.respond(to: first, action: .positive, confirmsSoundQualityWarning: true))
+            transition.commandTransmitted(reply, model: state, session: 1)
+            let other = try XCTUnwrap(SonyConnectionAlert(payload: payload))
+            if case .unknown = other.actionType {
+                XCTAssertFalse(transition.receiveAlert(other, session: 1))
+            } else {
+                XCTAssertTrue(transition.receiveAlert(other, session: 1))
+                XCTAssertEqual(transition.alert, other)
+                XCTAssertNil(transition.expectedPayload)
+                if other.actionType == .confirmationOnly {
+                    transition.acknowledge(other)
+                } else {
+                    let reply = try XCTUnwrap(transition.respond(to: other, action: .positive, confirmsSoundQualityWarning: true))
+                    transition.commandTransmitted(reply, model: state, session: 1)
+                }
+            }
+            XCTAssertTrue(transition.receiveAlert(warning, session: 1))
+            XCTAssertEqual(transition.alert, warning)
+            XCTAssertNil(transition.expectedPayload)
+        }
+    }
+
+    func testCombinedConfirmationCannotCarryAcrossControlSessionOrNewRequest() throws {
+        let state = model()
+        let first = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 7, 1]))
+        let warning = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 0x70, 1]))
+        var transition = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 1))
+        transition.commandTransmitted(transition.requestPayload, model: state, session: 1)
+        transition.receiveAlert(first, session: 1)
+        let reply = try XCTUnwrap(transition.respond(to: first, action: .positive, confirmsSoundQualityWarning: true))
+        transition.commandTransmitted(reply, model: state, session: 1)
+        XCTAssertFalse(transition.receiveAlert(warning, session: 2))
+        transition.controlLost(session: 1)
+        transition.controlReady(model: state, session: 2)
+        XCTAssertFalse(transition.receiveAlert(warning, session: 1))
+        XCTAssertTrue(transition.receiveAlert(warning, session: 2))
+        XCTAssertEqual(transition.alert, warning)
+        XCTAssertNil(transition.expectedPayload)
+        var newRequest = try XCTUnwrap(SonyMultipointTransition(enabled: true, model: state, session: 2))
+        XCTAssertFalse(newRequest.receiveAlert(warning, session: 2))
+        newRequest.commandTransmitted(newRequest.requestPayload, model: state, session: 2)
+        XCTAssertTrue(newRequest.receiveAlert(warning, session: 2))
+        XCTAssertEqual(newRequest.alert, warning)
+        XCTAssertNil(newRequest.expectedPayload)
+    }
+
     private func model(enabled: Bool? = false, slot: UInt8 = 0xD2, available: Bool? = true) -> SonySystemFeatures {
         var model = SonySystemFeatures(supportedFunctions: [slot])
         let title = Array("MULTIPOINT_SETTING".utf8)

@@ -83,7 +83,6 @@ struct SonyEarTipFit: Equatable, Sendable {
     static let statusQueryPayload: [UInt8] = [0xF2, 0x06]
     static let operationQueryPayload: [UInt8] = [0xF6, 0x06]
     static let selectionQueryPayload: [UInt8] = [0xF6, 0x07]
-    static let resultQueryPayload: [UInt8] = [0xFA, 0x06]
     static let enterModePayload: [UInt8] = [0xF4, 0x06, 0x01, 0x01]
     static let exitModePayload: [UInt8] = [0xF4, 0x06, 0x00, 0x01]
 

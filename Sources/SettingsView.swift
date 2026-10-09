@@ -10,6 +10,9 @@ struct SettingsView: View {
     @EnvironmentObject private var audioRoute: MacAudioRouteObserver
     #if !ACOUPLET_PUBLIC_APIS_ONLY
     @EnvironmentObject private var ldac: LDACController
+    @State private var showsDriverRemovalConfirmation = false
+    @State private var isOpeningDriverRemoval = false
+    @State private var driverRemovalError: String?
     #endif
     #if ACOUPLET_SPARKLE
     @EnvironmentObject private var updater: AppUpdater
@@ -97,7 +100,8 @@ struct SettingsView: View {
                         Text(settings.backgroundServiceStatus == .enabled ? String(localized: "Allowed") : String(localized: "Not enabled")).foregroundStyle(.primary)
                     }
                     Button("Login Items…") { SMAppService.openSystemSettingsLoginItems() }
-                        .tint(.primary)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color(nsColor: .controlAccentColor))
                 } else {
                     Toggle(
                         "Launch at login",
@@ -107,10 +111,14 @@ struct SettingsView: View {
                         )
                     )
                 }
-                if let error = settings.launchAtLoginError {
+                if let error = settings.backgroundServiceMigrationError ?? settings.launchAtLoginError {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.primary)
+                    if settings.backgroundServiceMigrationError != nil {
+                        Button("Retry") { settings.retryBackgroundServiceMigration?() }
+                            .buttonStyle(.borderless)
+                    }
                 }
             }
             Section("Keyboard") {
@@ -155,6 +163,32 @@ struct SettingsView: View {
                    ldac.audioCaptureAccess == .permissionRequired {
                     LDACPermissionGuidance()
                 }
+                if hasInstalledLDACDriver {
+                    Button("Remove LDAC Audio Driver…") { showsDriverRemovalConfirmation = true }
+                        .disabled(ldac.needsStopBeforeTermination || ldac.isOpeningDriverInstaller || isOpeningDriverRemoval
+                                  || settings.backgroundServiceMigrationError != nil)
+                        .alert("Remove LDAC Audio Driver?", isPresented: $showsDriverRemovalConfirmation) {
+                            Button("Cancel", role: .cancel) {}
+                            Button("Continue") {
+                                isOpeningDriverRemoval = true
+                                driverRemovalError = nil
+                                Task {
+                                    do {
+                                        try await LDACDriverInstaller.openUninstaller()
+                                        NSApp.terminate(nil)
+                                    } catch {
+                                        driverRemovalError = error.localizedDescription
+                                    }
+                                    isOpeningDriverRemoval = false
+                                }
+                            }
+                        } message: {
+                            Text("Acouplet will quit and open the removal installer. Restart your Mac after removing the driver.")
+                        }
+                    if let driverRemovalError {
+                        Text(driverRemovalError).font(.caption).foregroundStyle(.primary)
+                    }
+                }
             }
             #endif
             #if ACOUPLET_SPARKLE
@@ -185,6 +219,15 @@ struct SettingsView: View {
         }
     }
 
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    private var hasInstalledLDACDriver: Bool {
+        switch ldac.driverState {
+        case .current, .outdated, .restartRequired: true
+        case .missing, .unavailable: false
+        }
+    }
+    #endif
+
     private var headphoneControls: some View {
         Form {
             Section("Headphones") {
@@ -211,7 +254,7 @@ struct SettingsView: View {
                     }
                     #endif
                 }
-                if !headphones.isReady || headphones.powerOffState != nil || headphones.headphoneTestNeedsRecovery { HeadphoneConnectionView() }
+                HeadphoneConnectionView()
             }
             Section("Sound") {
                 LabeledContent("Mac audio output", value: audioOutputName)
@@ -222,6 +265,24 @@ struct SettingsView: View {
                     ConnectionModeControl()
                         .disabled(headphones.isRunningHeadphoneTest || headphones.powerOffState != nil)
                 }
+                #if !ACOUPLET_PUBLIC_APIS_ONLY
+                if ldac.hasPendingConnectionPreferenceRestoration(forAddress: headphones.address) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Restore the previous Stable Connection preference?")
+                            .font(.caption)
+                        HStack {
+                            Button("Restore Stable Connection") {
+                                ldac.restorePendingConnectionPreference(forAddress: headphones.address)
+                            }
+                            .disabled(!ldac.canRestoreConnectionPreference(forAddress: headphones.address))
+                            Button("Keep Current Preference") {
+                                ldac.keepConnectionPreference(forAddress: headphones.address)
+                            }
+                            .disabled(ldac.needsStopBeforeTermination)
+                        }
+                    }
+                }
+                #endif
                 if headphones.audioFeatures.supportsCodecStatus {
                     LabeledContent("Headphone codec") {
                         Text(headphones.audioFeatures.codec?.title ?? String(localized: "Unknown")).foregroundStyle(.primary)
@@ -257,12 +318,10 @@ struct SettingsView: View {
                 Section("Earbud Fit") { EarTipFitControl() }
             }
             FindEarbudsControl()
-            if headphones.multipoint.supportsInventory || headphones.sourceTransition?.phase == .failed
-                || headphones.deviceActionTransition?.phase == .failed || headphones.systemFeatures.multipoint != nil || headphones.multipointTransition != nil {
+            if MultipointControls.isVisible(for: headphones.multipoint) || MultipointSettingControl.enabled(for: headphones) != nil {
                 Section("Devices") {
                     MultipointSettingControl()
-                    if headphones.multipoint.supportsInventory || headphones.sourceTransition?.phase == .failed
-                        || headphones.deviceActionTransition?.phase == .failed {
+                    if MultipointControls.isVisible(for: headphones.multipoint) {
                         MultipointControls()
                     }
                 }
@@ -307,7 +366,7 @@ struct SettingsView: View {
                         ForEach(keys.filter { !headphones.deviceModel.isEarbuds || $0.key > 0x01 }, id: \.key) { key in
                             TouchAssignmentControl(key: key)
                         }
-                    } else {
+                    } else if headphones.settingErrors[.touchCustomActions] == nil && headphones.settingErrors[.touchAssignments] == nil {
                         Text("Reading touch controls…").foregroundStyle(.primary)
                     }
                     if headphones.pendingChanges[.touchAssignments] != nil || headphones.pendingChanges[.touchCustomActions] != nil {
@@ -673,7 +732,7 @@ private struct HeadGesturePracticeSheet: View {
                                          userInfo: [.announcement: matchingGestureCount == 3 ? String(localized: "All set") : String(localized: "\(gesture.title) detected"), .priority: NSAccessibilityPriorityLevel.medium.rawValue])
                 }
             }
-            .onDisappear { headphones.cancelHeadGesturePractice(id: transitionID) }
+            .onDisappear { headphones.cancelHeadGesturePractice(id: transitionID, dismissWhenFinished: true) }
         }
     }
 }
@@ -901,7 +960,7 @@ private struct EarTipFitSheet: View {
                     dismiss()
                 }
             }
-            .onDisappear { headphones.cancelEarTipFit(id: transitionID) }
+            .onDisappear { headphones.cancelEarTipFit(id: transitionID, dismissWhenFinished: true) }
         }
     }
 
@@ -1455,7 +1514,7 @@ struct LegacySoundEffectControl: View {
                     set: { if let preset = $0 { headphones.setLegacySoundEffect(kind, preset: preset) } }
                 )) {
                     if !effect.selectablePresets.contains(where: { $0.id == effect.presetID }) {
-                        Text(effect.selectedTitle ?? String(localized: "Loading…"))
+                        Text(effect.selectedTitle ?? (headphones.settingErrors[setting] == nil ? String(localized: "Loading…") : String(localized: "Unknown")))
                             .tag(effect.presetID).disabled(true)
                     }
                     ForEach(effect.selectablePresets) { preset in
@@ -1495,7 +1554,7 @@ struct DSEEControl: View {
                     set: { if let mode = $0 { headphones.setDSEE(mode) } }
                 )) {
                     if headphones.dseeMode?.sonyValue == nil {
-                        Text(headphones.dseeMode == nil ? String(localized: "Loading…") : String(localized: "Unknown"))
+                        Text(headphones.dseeMode == nil && headphones.settingErrors[.dsee] == nil ? String(localized: "Loading…") : String(localized: "Unknown"))
                             .tag(headphones.dseeMode)
                     }
                     ForEach(SonyDSEEMode.allCases) { mode in
@@ -1830,13 +1889,7 @@ struct MultipointControls: View {
     var body: some View {
         let state = headphones.multipoint
         VStack(alignment: .leading, spacing: 10) {
-            if state.inventory == nil {
-                if headphones.sourceTransition?.failureMessage == nil, headphones.deviceActionTransition?.failureMessage == nil {
-                    Text("No device information received.")
-                }
-            } else if state.devices.isEmpty {
-                Text("No saved devices.")
-            } else {
+            if !state.devices.isEmpty {
                 deviceGroup("Connected", devices: state.devices.filter(\.isConnected))
                 if state.devices.contains(where: \.isConnected), state.devices.contains(where: { !$0.isConnected }) {
                     Divider()
@@ -1844,7 +1897,7 @@ struct MultipointControls: View {
                 deviceGroup("Saved", devices: state.devices.filter { !$0.isConnected })
             }
             if state.supportsSourceControl, let keeping = state.keeping {
-                Divider()
+                if !state.devices.isEmpty { Divider() }
                 Toggle(isOn: Binding(get: { keeping }, set: headphones.setSourceKeeping)) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Keep current audio source")
@@ -1882,6 +1935,10 @@ struct MultipointControls: View {
                     .accessibilityIdentifier("multipoint.refresh")
             }
         }
+    }
+
+    static func isVisible(for state: SonyMultipoint) -> Bool {
+        !state.devices.isEmpty || (state.supportsSourceControl && state.keeping != nil)
     }
 
     @ViewBuilder
@@ -2086,33 +2143,25 @@ struct MultipointSettingControl: View {
     @EnvironmentObject private var headphones: SonyHeadphonesController
     @State private var presentedAlert: SonyConnectionAlert?
     @State private var showsAlert = false
+    @State private var presentedSoundQualityWarning = false
 
     var body: some View {
-        let enabled = headphones.systemFeatures.multipoint?.enabled
-            ?? headphones.multipointTransition.flatMap { $0.isFinished ? nil : $0.originalEnabled }
-        if compact || headphones.systemFeatures.multipoint != nil || headphones.multipointTransition != nil {
+        let enabled = Self.enabled(for: headphones)
+        if compact || enabled != nil {
             VStack(alignment: .leading, spacing: 6) {
                 if compact {
                     HStack(spacing: 12) {
                         Text("Multipoint").font(.headline).fontWeight(.semibold)
                         Spacer()
-                        Group {
-                            if headphones.multipointTransition?.isFinished == false, headphones.multipointTransition?.awaitingUser == false {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .accessibilityLabel(headphones.multipointTransition?.phase == .recovering ? String(localized: "Reconnecting controls…") : String(localized: "Checking device connections…"))
-                            } else {
-                                Button { headphones.refreshDevices() } label: { Image(systemName: "arrow.clockwise") }
-                                    .buttonStyle(.borderless)
-                                    .tint(nil)
-                                    .foregroundStyle(.secondary)
-                                    .disabled(!headphones.canRefreshDevices)
-                                    .accessibilityLabel("Refresh Devices")
-                                    .accessibilityIdentifier("multipoint.refresh")
-                                    .help("Refresh Devices")
-                            }
-                        }
-                        .frame(width: 16, height: 16)
+                        Button { headphones.refreshDevices() } label: { Image(systemName: "arrow.clockwise") }
+                            .buttonStyle(.borderless)
+                            .tint(nil)
+                            .foregroundStyle(.secondary)
+                            .disabled(!headphones.canRefreshDevices)
+                            .accessibilityLabel("Refresh Devices")
+                            .accessibilityIdentifier("multipoint.refresh")
+                            .help("Refresh Devices")
+                            .frame(width: 16, height: 16)
                         if let enabled {
                             Toggle("Multipoint", isOn: Binding(get: { enabled }, set: headphones.setMultipointEnabled))
                                 .labelsHidden()
@@ -2127,31 +2176,39 @@ struct MultipointSettingControl: View {
                         .disabled(headphones.multipointUnavailableReason != nil)
                         .help(headphones.multipointUnavailableReason ?? "")
                         .accessibilityIdentifier("multipoint.enabled")
-                } else {
-                    LabeledContent("Multipoint", value: String(localized: "Not reported"))
                 }
                 if let transition = headphones.multipointTransition {
                     if let failure = transition.failureMessage {
-                        Text(failure).font(.caption)
-                            .accessibilityIdentifier("multipoint.settingError")
-                        if transition.canRetryRecovery {
-                            Button("Check Setting") { headphones.checkMultipointChange() }
-                                .controlSize(.small)
-                                .disabled(!headphones.canCheckMultipointChange)
-                                .accessibilityIdentifier("multipoint.checkSetting")
+                        HStack(spacing: 10) {
+                            ConnectionStatusIndicator()
+                            Text(failure).fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("multipoint.settingError")
+                            Spacer(minLength: 0)
+                            if transition.canRetryRecovery {
+                                Button("Retry") { headphones.checkMultipointChange() }
+                                    .controlSize(.small)
+                                    .disabled(!headphones.canCheckMultipointChange)
+                                    .accessibilityIdentifier("multipoint.checkSetting")
+                            }
                         }
-                    } else if transition.awaitingUser {
-                        Button("Review Change…") { showsAlert = true }
-                            .controlSize(.small)
-                            .accessibilityIdentifier("multipoint.reviewChange")
-                    } else if !compact, !transition.isFinished {
-                        ProgressView(transition.phase == .recovering ? String(localized: "Reconnecting controls…") : String(localized: "Checking device connections…"))
-                            .controlSize(.small)
+                    } else if !transition.isFinished && !transition.awaitingUser {
+                        HStack(spacing: 10) {
+                            ConnectionStatusIndicator(isLoading: true)
+                            Text(transition.phase == .recovering ? String(localized: "Reconnecting controls…") : String(localized: "Checking device connections…"))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("multipoint.settingProgress")
                     }
                 }
             }
             .onChange(of: headphones.multipointTransition?.alert, initial: true) { _, alert in
+                guard !compact else { return }
                 presentedAlert = alert
+                presentedSoundQualityWarning = alert?.format == .fixed && alert?.messageID == 0x07
+                    && alert?.actionType == .positiveNegative && headphones.multipointTransition?.targetEnabled == true
+                    && headphones.connectionMode == .soundQuality
                 showsAlert = alert != nil
             }
             .alert(alertTitle, isPresented: $showsAlert, presenting: presentedAlert) { alert in
@@ -2159,7 +2216,9 @@ struct MultipointSettingControl: View {
                     Button("Cancel", role: .cancel) { headphones.respondToMultipointAlert(alert, action: .negative) }
                 }
                 if alert.availableActions.contains(.positive) {
-                    Button("Continue") { headphones.respondToMultipointAlert(alert, action: .positive) }
+                    Button("Continue") {
+                        headphones.respondToMultipointAlert(alert, action: .positive, confirmsSoundQualityWarning: presentedSoundQualityWarning)
+                    }
                 } else if alert.actionType == .confirmationOnly {
                     Button("OK") { headphones.respondToMultipointAlert(alert, action: nil) }
                 }
@@ -2169,7 +2228,13 @@ struct MultipointSettingControl: View {
         }
     }
 
+    static func enabled(for headphones: SonyHeadphonesController) -> Bool? {
+        headphones.systemFeatures.multipoint?.enabled
+            ?? headphones.multipointTransition.flatMap { $0.isFinished ? nil : $0.originalEnabled }
+    }
+
     private var alertTitle: String {
+        if presentedAlert?.format == .fixed, presentedAlert?.messageID == 0x70 { return String(localized: "Audio may cut out") }
         guard presentedAlert?.actionType == .positiveNegative else { return String(localized: "Device Connection Change") }
         return headphones.multipointTransition?.targetEnabled == true ? String(localized: "Enable multipoint?") : String(localized: "Use one device at a time?")
     }
@@ -2179,6 +2244,9 @@ struct MultipointSettingControl: View {
             return String(localized: "Audio may cut out when Sound Quality and multipoint are both enabled.")
         }
         var message = String(localized: "Changing this setting may briefly disconnect the headphones. Reconnect them if needed.")
+        if presentedSoundQualityWarning {
+            message += "\n\n" + String(localized: "Audio may cut out when Sound Quality and multipoint are both enabled.")
+        }
         if alert.format == .fixed, alert.messageID == 0x06 {
             message += String(localized: "\n\nThe headphones report that LDAC will be unavailable with this change.")
         }

@@ -227,7 +227,7 @@ final class SonyPreferencePaneTests: XCTestCase {
     }
 
     private func deliver(_ payload: [UInt8], to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload)
     }
 
 }

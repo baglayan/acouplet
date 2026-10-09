@@ -62,6 +62,40 @@ final class SettingsStoreTests: XCTestCase {
     }
 
     #if !ACOUPLET_PUBLIC_APIS_ONLY
+    func testLegacyBackgroundServiceMigrationReplacesUnconditionalAndConditionalPolicies() throws {
+        for keepAlive: Any in [true, ["SuccessfulExit": false]] {
+            let old: [String: Any] = ["Label": LegacyBackgroundService.label,
+                                     "ProgramArguments": [LegacyBackgroundService.executablePath, "--background-service"],
+                                     "KeepAlive": keepAlive, "StandardErrorPath": "/tmp/acouplet-fixture.log",
+                                     "EnvironmentVariables": ["EXISTING_SETTING": "retained"]]
+            let data = try PropertyListSerialization.data(fromPropertyList: old, format: .xml, options: 0)
+            let migrated = try LegacyBackgroundService.configuration(from: data,
+                                                                     executablePath: LegacyBackgroundService.executablePath)
+            XCTAssertEqual(migrated["KeepAlive"] as? [String: Bool], ["SuccessfulExit": false])
+            XCTAssertEqual(migrated["EnvironmentVariables"] as? [String: String],
+                           [LegacyBackgroundService.policyKey: LegacyBackgroundService.policy, "EXISTING_SETTING": "retained"])
+            XCTAssertEqual(migrated["StandardErrorPath"] as? String, "/tmp/acouplet-fixture.log")
+            XCTAssertEqual(migrated["ProgramArguments"] as? [String],
+                           [LegacyBackgroundService.executablePath, "--background-service"])
+        }
+    }
+
+    func testLegacyBackgroundServiceMigrationRejectsUnrelatedOrOverriddenExecutables() throws {
+        let valid: [String: Any] = ["Label": LegacyBackgroundService.label,
+                                   "ProgramArguments": [LegacyBackgroundService.executablePath, "--background-service"]]
+        for (key, value): (String, Any) in [("Label", "example.unrelated"),
+                                           ("ProgramArguments", ["/bin/sh", "--background-service"]),
+                                           ("ProgramArguments", [LegacyBackgroundService.executablePath, "--background-service", "--extra"]),
+                                           ("Program", "/bin/sh"),
+                                           ("EnvironmentVariables", ["INVALID": 1])] {
+            var invalid = valid
+            invalid[key] = value
+            let data = try PropertyListSerialization.data(fromPropertyList: invalid, format: .xml, options: 0)
+            XCTAssertThrowsError(try LegacyBackgroundService.configuration(from: data,
+                                                                           executablePath: LegacyBackgroundService.executablePath))
+        }
+    }
+
     @MainActor
     func testLDACMatrixPreferencesRoundTripAndRejectInvalidFormats() throws {
         let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
@@ -102,12 +136,17 @@ final class SettingsStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testLaunchAtLoginDefaultAppliesOnceAndRespectsExplicitOptOut() throws {
+    func testLaunchAtLoginDefaultMatchesDistributionAndRespectsExplicitChoice() throws {
         let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let settings = SettingsStore(defaults: defaults)
         settings.enableLaunchAtLoginByDefault()
+        #if ACOUPLET_PUBLIC_APIS_ONLY
+        XCTAssertFalse(settings.launchAtLogin)
+        XCTAssertNil(defaults.object(forKey: "preferences.launchAtLoginDefaultApplied"))
+        settings.setLaunchAtLogin(true)
+        #endif
         XCTAssertTrue(settings.launchAtLogin)
         settings.setLaunchAtLogin(false)
         settings.enableLaunchAtLoginByDefault()
@@ -120,6 +159,35 @@ final class SettingsStoreTests: XCTestCase {
         optedOut.setLaunchAtLogin(false)
         optedOut.enableLaunchAtLoginByDefault()
         XCTAssertFalse(optedOut.launchAtLogin)
+    }
+
+    @MainActor
+    func testLaunchAtLoginDefaultPreservesPriorInstallationAndFreshDistributionDefault() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: "migration.legacyPreferences")
+        XCTAssertNil(defaults.object(forKey: "preferences.launchAtLoginDefaultApplied"))
+
+        SettingsStore.migrateLegacyPreferences(from: [:], to: defaults, bundleIdentifier: "dev.baglayan.Acouplet")
+        let upgraded = SettingsStore(defaults: defaults)
+        upgraded.enableLaunchAtLoginByDefault()
+        XCTAssertFalse(upgraded.launchAtLogin)
+        XCTAssertFalse(upgraded.experimentalLDACEnabled)
+        let restored = SettingsStore(defaults: defaults)
+        restored.enableLaunchAtLoginByDefault()
+        XCTAssertFalse(restored.launchAtLogin)
+
+        defaults.removePersistentDomain(forName: suiteName)
+        SettingsStore.migrateLegacyPreferences(from: [:], to: defaults, bundleIdentifier: "dev.baglayan.Acouplet")
+        let fresh = SettingsStore(defaults: defaults)
+        fresh.enableLaunchAtLoginByDefault()
+        #if ACOUPLET_PUBLIC_APIS_ONLY
+        XCTAssertFalse(fresh.launchAtLogin)
+        #else
+        XCTAssertTrue(fresh.launchAtLogin)
+        #endif
+        XCTAssertFalse(fresh.experimentalLDACEnabled)
     }
 
     @MainActor
@@ -165,6 +233,26 @@ final class SettingsStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testAutomaticPresetNamesReuseUnusedNumbersWithoutReplacingExistingProfiles() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = SettingsStore(defaults: defaults)
+        let first = settings.saveEqualizerProfile(named: "")
+        let second = settings.saveEqualizerProfile(named: "")
+        let third = settings.saveEqualizerProfile(named: "")
+        settings.deleteEqualizerProfile(id: second.id)
+        XCTAssertEqual(settings.equalizerProfileName(for: "  "), second.name)
+        let replacement = settings.saveEqualizerProfile(named: "  ")
+        XCTAssertEqual(replacement.name, second.name)
+        XCTAssertNotEqual(replacement.id, second.id)
+        XCTAssertEqual(settings.equalizerProfiles, [first, third, replacement])
+        let fourthName = String(localized: "My EQ \(4)")
+        settings.saveEqualizerProfile(named: fourthName.lowercased())
+        XCTAssertEqual(settings.equalizerProfileName(for: ""), String(localized: "My EQ \(5)"))
+    }
+
+    @MainActor
     func testRestoredEqualizerNormalizesBandCountAndLevels() {
         let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -202,6 +290,75 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(restored.customEqualizerDraft, secondDraft)
         restored.selectEqualizerDevice(address: first, defaultDraft: .flat)
         XCTAssertEqual(restored.customEqualizerDraft, firstDraft)
+    }
+
+    @MainActor
+    func testNewEqualizerDraftWaitsForReadbackAcrossSelectionsAndRelaunches() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let first = "02:00:00:00:00:01"
+        let second = "02:00:00:00:00:02"
+        let curve = EqualizerSettings(clearBass: 4, bands: [1, 2, 3, 4, 5])
+        let settings = SettingsStore(defaults: defaults)
+        settings.selectEqualizerDevice(address: first, defaultDraft: nil)
+        settings.selectEqualizerDevice(address: second, defaultDraft: nil)
+        settings.selectEqualizerDevice(address: first, defaultDraft: nil)
+        XCTAssertEqual(settings.customEqualizerDraft, .flat)
+        XCTAssertNil(defaults.data(forKey: "preferences.equalizerDraftsByDevice"))
+        let restored = SettingsStore(defaults: defaults)
+        restored.selectEqualizerDevice(address: first, defaultDraft: nil)
+        restored.selectEqualizerDevice(address: first, defaultDraft: curve)
+        XCTAssertEqual(restored.customEqualizerDraft, curve)
+        restored.selectEqualizerDevice(address: first, defaultDraft: .flat)
+        XCTAssertEqual(restored.customEqualizerDraft, curve)
+        let relaunched = SettingsStore(defaults: defaults)
+        relaunched.selectEqualizerDevice(address: first, defaultDraft: .flat)
+        XCTAssertEqual(relaunched.customEqualizerDraft, curve)
+    }
+
+    @MainActor
+    func testEditingProvisionalEqualizerDraftPreservesItWhenReadbackArrives() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let address = "02:00:00:00:00:01"
+        let incoming = EqualizerSettings(layout: SonyEqualizerBand.tenBand, levelSteps: 13,
+                                         values: Array(repeating: 2, count: 10))
+        for edited in [EqualizerSettings.flat, EqualizerSettings(clearBass: 4, bands: [1, 2, 3, 4, 5])] {
+            defaults.removePersistentDomain(forName: suiteName)
+            let settings = SettingsStore(defaults: defaults)
+            settings.selectEqualizerDevice(address: address, defaultDraft: nil)
+            settings.customEqualizerDraft = edited
+            settings.selectEqualizerDevice(address: address, defaultDraft: incoming)
+            XCTAssertEqual(settings.customEqualizerDraft, edited)
+            let restored = SettingsStore(defaults: defaults)
+            restored.selectEqualizerDevice(address: address, defaultDraft: incoming)
+            XCTAssertEqual(restored.customEqualizerDraft, edited)
+        }
+    }
+
+    @MainActor
+    func testEnvironmentSeedsOnlyTheFirstReceivedEqualizerCurveForTheSelectedDevice() throws {
+        let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        defer { controller.simulateControlLoss() }
+        let environment = AppEnvironment(settings: SettingsStore(defaults: defaults), headphones: controller,
+                                         audioRoute: MacAudioRouteObserver(startAutomatically: false))
+        XCTAssertNil(controller.equalizer.settings)
+        XCTAssertNil(defaults.data(forKey: "preferences.equalizerDraftsByDevice"))
+        let curve = EqualizerSettings(clearBass: 4, bands: [1, 2, 3, 4, 5])
+        controller.simulateProtocolMessage([0x59] + curve.sonySetPayload.dropFirst())
+        XCTAssertEqual(controller.equalizer.settings, curve)
+        XCTAssertEqual(environment.settings.customEqualizerDraft, curve)
+        environment.settings.customEqualizerDraft = .flat
+        let changedCurve = EqualizerSettings(clearBass: -2, bands: [0, -1, -2, -3, -4])
+        controller.simulateProtocolMessage([0x59] + changedCurve.sonySetPayload.dropFirst())
+        XCTAssertEqual(controller.equalizer.settings, changedCurve)
+        XCTAssertEqual(environment.settings.customEqualizerDraft, .flat)
     }
 
     @MainActor

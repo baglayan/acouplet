@@ -178,7 +178,7 @@ struct SonyConnectionTransition: Equatable, Sendable {
 
     @discardableResult
     mutating func controlLost(session: UInt64) -> Bool {
-        guard session == self.session, phase != .cancelled, phase != .failed, phase != .pairingRequired else { return false }
+        guard session == self.session, !isFinished, phase != .pairingRequired else { return false }
         phase = phase == .queued ? .failed : .recovering
         awaitingReadback = false
         return true

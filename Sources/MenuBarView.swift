@@ -46,7 +46,7 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var availableHeight = (NSScreen.main?.visibleFrame.height ?? 720) - 16
+    @State private var availableHeight: CGFloat
     @State private var presentedMode: NoiseControlMode?
     @State private var powerOffTarget: PowerOffTarget?
     @State private var showsPowerOffConfirmation = false
@@ -56,6 +56,12 @@ struct MenuBarView: View {
         let controller: SonyHeadphonesController
         let session: UInt64
         let name: String
+    }
+
+    init(showSettings: @escaping () -> Void, closeMenu: (() -> Void)? = nil, initialScreenHeight: CGFloat? = nil) {
+        self.showSettings = showSettings
+        self.closeMenu = closeMenu
+        _availableHeight = State(initialValue: (initialScreenHeight ?? NSScreen.main?.visibleFrame.height ?? 720) - 16)
     }
 
     var body: some View {
@@ -151,6 +157,10 @@ struct MenuBarView: View {
         let controlsDisabled = (headphones.isRunningHeadphoneTest && !headphones.headphoneTestNeedsRecovery)
             || headphones.multipointTransition?.isFinished == false || headphones.deviceActionTransition?.isFinished == false
         return VStack(alignment: .leading, spacing: 16) {
+            if !showsLDACSession {
+                HeadphoneConnectionView(connectOnly: showsConnectOnly)
+                    .disabled(controlsDisabled)
+            }
             Group {
                 if showsHeadphoneControls {
                     if headphones.isRunningHeadphoneTest {
@@ -161,15 +171,11 @@ struct MenuBarView: View {
                         presets
                         modeDetails
                     }
-                } else if !showsLDACSession {
-                    HeadphoneConnectionView(connectOnly: showsConnectOnly)
                 }
             }
             .disabled(controlsDisabled)
-            if (showsHeadphoneControls && headphones.multipoint.devices.filter(\.isConnected).count > 1)
-                || headphones.multipointTransition?.isFinished == false || headphones.sourceTransition?.isFinished == false
-                || headphones.deviceActionTransition?.isFinished == false || headphones.sourceTransition?.phase == .failed
-                || headphones.deviceActionTransition?.phase == .failed {
+            if showsHeadphoneControls, headphones.multipoint.supportsSourceControl,
+               headphones.multipoint.devices.filter(\.isConnected).count > 1 {
                 multipointControl
             }
             if showsHeadphoneControls {
@@ -418,6 +424,10 @@ struct MenuBarView: View {
     private func battery(_ title: String, value: BatteryReading?, connected: Bool? = nil) -> some View {
         let reading = connected == false ? nil : value
         let color = DeviceIcon.batteryColor(for: reading).map { Color(nsColor: $0) } ?? .green
+        let description = reading.map {
+            title == "Case" ? String(localized: "\($0.level) percent, \($0.chargingState.title), last reported")
+                : String(localized: "\($0.level) percent\($0.isCharging ? String(localized: ", charging") : "")")
+        }
         return VStack(spacing: 6) {
             Gauge(value: Double(reading?.level ?? 0), in: 0...100) {}
                 .gaugeStyle(.accessoryCircularCapacity)
@@ -452,10 +462,16 @@ struct MenuBarView: View {
                     .monospacedDigit()
             }
             .foregroundStyle(reading == nil ? Color.secondary : Color.primary)
+            if title == "Case", reading != nil {
+                Text("Last reported")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .help("Case percentage and charging show the last report received from the headphones.")
+            }
         }
         .frame(width: 68)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(String(localized: "\(batteryTitle(title)), \(reading.map { String(localized: "\($0.level) percent\($0.isCharging ? String(localized: ", charging") : "")") } ?? (connected == false ? String(localized: "Disconnected") : String(localized: "Not reported")))"))
+        .accessibilityLabel(String(localized: "\(batteryTitle(title)), \(description ?? (connected == false ? String(localized: "Disconnected") : String(localized: "Not reported")))"))
         .accessibilityIdentifier("battery.\(title.lowercased())")
     }
 
@@ -692,27 +708,25 @@ struct LDACDriverGuidance: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let reason = ldac.deviceUnavailableReason(forAddress: headphones.address) {
-                Text(reason)
-            } else {
-                switch ldac.driverState {
-                case .missing, .outdated:
-                    Text(ldac.driverState == .missing
-                         ? String(localized: "LDAC needs an audio driver. Install it, then restart your Mac.")
-                         : String(localized: "An LDAC audio driver update is required. Install it, then restart your Mac."))
-                    Button(ldac.driverState == .missing ? String(localized: "Install Audio Driver…") : String(localized: "Update Audio Driver…")) {
-                        ldac.installDriver(forAddress: headphones.address)
-                    }
-                    .disabled(ldac.isOpeningDriverInstaller)
-                    .buttonStyle(.bordered)
-                    .tint(.primary)
-                    .accessibilityIdentifier("audio.installDriver")
-                case .restartRequired:
-                    Text("The LDAC audio driver is installed. Restart your Mac to activate it.")
-                case .unavailable(let message):
-                    Text(message)
-                case .current:
-                    EmptyView()
+            switch ldac.driverState {
+            case .missing, .outdated:
+                Text(ldac.driverState == .missing
+                     ? String(localized: "LDAC needs an audio driver. Install it, then restart your Mac.")
+                     : String(localized: "An LDAC audio driver update is required. Install it, then restart your Mac."))
+                Button(ldac.driverState == .missing ? String(localized: "Install Audio Driver…") : String(localized: "Update Audio Driver…")) {
+                    ldac.installDriver(forAddress: headphones.address)
+                }
+                .disabled(ldac.isOpeningDriverInstaller || ldac.deviceUnavailableReason(forAddress: headphones.address) != nil)
+                .buttonStyle(.bordered)
+                .tint(.primary)
+                .accessibilityIdentifier("audio.installDriver")
+            case .restartRequired:
+                Text("The LDAC audio driver is installed. Restart your Mac to activate it.")
+            case .unavailable(let message):
+                Text(message)
+            case .current:
+                if let reason = ldac.deviceUnavailableReason(forAddress: headphones.address) {
+                    Text(reason)
                 }
             }
             if let error = ldac.driverInstallationError { Text(error) }
@@ -817,168 +831,26 @@ struct ConnectedHeadphonePicker: View {
     }
 }
 
-#if !ACOUPLET_PUBLIC_APIS_ONLY
-private struct HeadphonePlaybackControls: View {
-    @EnvironmentObject private var headphones: SonyHeadphonesController
-    @EnvironmentObject private var systemPlayback: SystemPlayback
-    @State private var volumeDraft: Double?
-    @State private var editingVolume = false
-    @State private var controlsMac = false
+struct ConnectionStatusIndicator: View {
+    var isLoading = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let playback = headphones.playback
-        let isCall = playback.musicCallStatus == 1
-        let volume = isCall ? playback.callVolume : playback.volume
-        let range = isCall ? playback.callVolumeRange : playback.musicVolumeRange
-        let setting: SonyHeadphonesController.Setting = isCall ? .callVolume : .playbackVolume
-        let canAdjustVolume = isCall ? headphones.canControlCallVolume : headphones.canControlMusicVolume
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(isCall ? String(localized: "Call Volume") : String(localized: "Playback")).font(.headline)
-                Spacer()
-                if !isCall {
-                    Picker("Playback Source", selection: $controlsMac) {
-                        Text("Headphones").tag(false)
-                        Text("This Mac").tag(true)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                    .tint(.primary)
-                    .accessibilityIdentifier("playback.source")
-                    .help("Headphones controls their connected audio source. This Mac controls the current macOS media player.")
-                }
-                if headphones.pendingPlaybackCommand != nil || headphones.pendingChanges[setting] != nil {
-                    ProgressView().controlSize(.mini)
-                        .accessibilityLabel(headphones.pendingPlaybackCommand != nil ? String(localized: "Sending playback command") : String(localized: "Updating volume"))
-                }
-            }
-            if !isCall {
-                if controlsMac {
-                    HStack(spacing: 28) {
-                        systemPlaybackButton(String(localized: "Previous Track"), symbol: "backward.fill", command: .previous)
-                        systemPlaybackButton(String(localized: "Play or Pause"), symbol: "playpause.fill", command: .togglePlayPause)
-                        systemPlaybackButton(String(localized: "Next Track"), symbol: "forward.fill", command: .next)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                    .disabled(!systemPlayback.isAvailable)
-                    if let error = systemPlayback.error {
-                        Text(error).font(.caption)
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(playback.track?.title ?? String(localized: "No track information"))
-                            .font(.headline)
-                            .lineLimit(1)
-                            .help(playback.track?.title ?? String(localized: "Track information is reported by the headphones’ current audio source."))
-                        if let artist = playback.track?.artist {
-                            Text(artist).foregroundStyle(.secondary).lineLimit(1)
-                                .help([artist, playback.track?.album].compactMap { $0 }.joined(separator: " · "))
-                        }
-                    }
-                    .accessibilityIdentifier("playback.track")
-                    HStack(spacing: 28) {
-                        playbackButton(String(localized: "Previous Track"), symbol: "backward.fill", command: .previous)
-                        playbackButton(playback.state == .playing ? String(localized: "Pause") : String(localized: "Play"),
-                                       symbol: playback.state == .playing ? "pause.fill" : "play.fill",
-                                       command: playback.state == .playing ? .pause : .play)
-                        playbackButton(String(localized: "Next Track"), symbol: "forward.fill", command: .next)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                    .disabled(!headphones.canControlPlayback)
-                }
-            }
-            if let volume, let range, range.upperBound > range.lowerBound {
-                if controlsMac, !isCall {
-                    Text("Headphone Volume").font(.caption).foregroundStyle(.secondary)
-                }
-                HStack(spacing: 8) {
-                    Image(systemName: "speaker.fill").accessibilityHidden(true)
-                    Slider(value: Binding(
-                        get: { volumeDraft ?? Double(volume) },
-                        set: { volumeDraft = $0 }
-                    ), in: Double(range.lowerBound)...Double(range.upperBound), step: 1, onEditingChanged: { editing in
-                        editingVolume = editing
-                        if !editing, let volumeDraft { setVolume(Int(volumeDraft), forCall: isCall) }
-                    })
-                    .accessibilityLabel(isCall ? String(localized: "Headphone call volume") : String(localized: "Headphone music volume"))
-                    .accessibilityValue("\(Int((volumeDraft ?? Double(volume)) / Double(range.upperBound) * 100)) percent")
-                    .accessibilityIdentifier(isCall ? "playback.callVolume" : "playback.volume")
-                    .disabled(!canAdjustVolume)
-                    Image(systemName: "speaker.wave.3.fill").accessibilityHidden(true)
-                }
-                .tint(.primary)
-            } else if playback.isSupported {
-                LabeledContent(isCall ? String(localized: "Call volume") : String(localized: "Headphone volume"), value: volume != nil && range?.upperBound == 0 ? String(localized: "Fixed") : String(localized: "Not reported"))
-                    .font(.caption)
-            }
-            if let error = headphones.playbackReadError ?? headphones.settingErrors[setting] {
-                Text(error).font(.caption)
-            } else if !controlsMac, !(isCall ? headphones.canControlCallVolume : headphones.canControlPlayback || canAdjustVolume),
-                      headphones.pendingPlaybackCommand == nil, headphones.pendingChanges[setting] == nil {
-                Text(isCall ? String(localized: "Call volume is currently unavailable.") : String(localized: "Playback controls are currently unavailable.")).font(.caption)
+        Group {
+            if isLoading {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(Color.orange)
+                    .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
+                    .symbolEffectsRemoved(reduceMotion)
+                    .transition(.symbolEffect(.appear))
             }
         }
-        .onChange(of: canAdjustVolume) { _, available in
-            if !available {
-                editingVolume = false
-                volumeDraft = nil
-            }
-        }
-        .onChange(of: volume) { _, _ in
-            if !editingVolume { volumeDraft = nil }
-        }
-        .onChange(of: range) { _, _ in
-            editingVolume = false
-            volumeDraft = nil
-        }
-        .onChange(of: headphones.pendingChanges[setting]) { _, pending in
-            if pending == nil, !editingVolume { volumeDraft = nil }
-        }
-        .onChange(of: volumeDraft) { _, value in
-            if !editingVolume, let value { setVolume(Int(value), forCall: isCall) }
-        }
-    }
-
-    private func setVolume(_ value: Int, forCall: Bool) {
-        if forCall { headphones.setCallVolume(value) }
-        else { headphones.setPlaybackVolume(value) }
-    }
-
-    private func playbackButton(_ title: String, symbol: String, command: SonyPlaybackCommand) -> some View {
-        Button { headphones.controlPlayback(command) } label: {
-            Image(systemName: symbol)
-                .font(.system(size: command == .play || command == .pause ? 24 : 20, weight: .semibold))
-                .frame(width: 40, height: 36)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .tint(.secondary)
-        .foregroundStyle(.secondary)
-        .accessibilityLabel(title)
-        .help(title)
-        .accessibilityIdentifier("playback.command.\(command.rawValue)")
-    }
-
-    private func systemPlaybackButton(_ title: String, symbol: String, command: SystemPlayback.Command) -> some View {
-        Button { systemPlayback.send(command) } label: {
-            Image(systemName: symbol)
-                .font(.system(size: command == .togglePlayPause ? 24 : 20, weight: .semibold))
-                .frame(width: 40, height: 36)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .tint(.secondary)
-        .foregroundStyle(.secondary)
-        .accessibilityLabel(title)
-        .help(title)
-        .accessibilityIdentifier("playback.system.\(command.rawValue)")
+        .frame(width: 16, height: 16)
+        .accessibilityHidden(true)
     }
 }
-
-#endif
 
 struct HeadphoneConnectionView: View {
     var connectOnly = false
@@ -986,50 +858,76 @@ struct HeadphoneConnectionView: View {
     @EnvironmentObject private var devices: SonyDeviceCoordinator
 
     var body: some View {
-        if connectOnly {
-            Button("Connect") {
-                if headphones.address.isEmpty { devices.refreshDiscovery() }
-                else { headphones.connect() }
-            }
-            .headphoneButtonStyle(prominent: true)
-            .disabled(headphones.multipointTransition?.isFinished == false)
-            .accessibilityIdentifier("headphones.connect")
-            .frame(maxWidth: .infinity, minHeight: 160)
-        } else {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text(connectionTitle).font(.headline)
-                        if isSearching || isConnecting || isAutomaticallyReconnecting || isRecoveringMultipoint || headphones.isPoweringOff {
-                            ProgressView().controlSize(.small)
-                                .accessibilityLabel(connectionTitle)
+        Group {
+            if !headphones.isReady || headphones.powerOffState != nil || headphones.headphoneTestNeedsRecovery {
+                if connectOnly {
+                    Button("Connect", action: connect)
+                        .headphoneButtonStyle(prominent: true)
+                        .disabled(headphones.multipointTransition?.isFinished == false)
+                        .accessibilityIdentifier("headphones.connect")
+                        .frame(maxWidth: .infinity, minHeight: 160)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 10) {
+                            HStack(spacing: 10) {
+                                ConnectionStatusIndicator(isLoading: isLoading)
+                                Text(connectionTitle).font(.headline)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("headphones.connectionStatus")
+                            Spacer(minLength: 0)
+                            if !isLoading && !headphones.isBluetoothAccessDenied {
+                                Button(hasConnectionFailure ? String(localized: "Retry") : String(localized: "Connect"), action: connect)
+                                    .headphoneButtonStyle()
+                                    .accessibilityIdentifier("headphones.connect")
+                            }
+                        }
+                        if isSearching || headphones.powerOffState != nil || headphones.headphoneTestNeedsRecovery {
+                            Text(connectionDescription)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.leading, 26)
+                        } else if headphones.isBluetoothAccessDenied {
+                            Text("Allow Acouplet to use Bluetooth in [System Settings](x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth).")
+                                .foregroundStyle(.secondary)
+                                .tint(Color(nsColor: .controlAccentColor))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.leading, 26)
+                        } else if !isLoading {
+                            if let message = connectionFailureMessage {
+                                Text(message)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.leading, 26)
+                                    .accessibilityIdentifier("headphones.connectionFailure")
+                                Link("Bluetooth Settings…", destination: URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
+                                    .foregroundStyle(Color(nsColor: .controlAccentColor))
+                                    .padding(.leading, 26)
+                                    .accessibilityIdentifier("headphones.bluetoothSettings")
+                            } else {
+                                Text("If this continues, disconnect and reconnect the headphones in [Bluetooth Settings](x-apple.systempreferences:com.apple.BluetoothSettings).")
+                                    .foregroundStyle(.secondary)
+                                    .tint(Color(nsColor: .controlAccentColor))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.leading, 26)
+                                    .accessibilityIdentifier("headphones.bluetoothSettings")
+                            }
                         }
                     }
-                    Text(connectionDescription)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("headphones.connectionStatus")
-                HStack(spacing: 12) {
-                    Button(headphones.powerOffState != nil || headphones.headphoneTestNeedsRecovery || headphones.isDeviceConnected ? String(localized: "Reconnect Controls") : String(localized: "Connect")) {
-                        if headphones.address.isEmpty { devices.refreshDiscovery() }
-                        else { headphones.connect() }
-                    }
-                    .headphoneButtonStyle()
-                    .tint(.primary)
-                    .disabled(isSearching || isConnecting || isRecoveringMultipoint || headphones.isPoweringOff)
-                    .accessibilityIdentifier("headphones.connect")
-                    Button("Bluetooth Settings…") {
-                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
-                    }
-                    .buttonStyle(.link)
-                    .foregroundStyle(Color(nsColor: .controlAccentColor))
-                    .accessibilityIdentifier("headphones.bluetoothSettings")
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func connect() {
+        if headphones.address.isEmpty { devices.refreshDiscovery() }
+        else { headphones.connect() }
+    }
+
+    private var isLoading: Bool {
+        isSearching || isConnecting || isRecoveringMultipoint || headphones.isPoweringOff
     }
 
     private var isSearching: Bool { headphones.linkState == .searching }
@@ -1040,26 +938,36 @@ struct HeadphoneConnectionView: View {
         headphones.linkState == .opening || headphones.linkState == .handshaking
     }
 
-    private var isAutomaticallyReconnecting: Bool {
-        headphones.isDeviceConnected && headphones.retrySecondsRemaining != nil
+    private var hasConnectionFailure: Bool {
+        if case .failed = headphones.linkState { return true }
+        return headphones.linkState == .controlBusy || connectionFailureMessage != nil
+    }
+
+    private var connectionFailureMessage: String? {
+        if let message = headphones.lastErrorMessage { return message }
+        if case .failed(let message) = headphones.linkState { return message }
+        return nil
     }
 
     private var connectionTitle: String {
+        if headphones.isBluetoothAccessDenied { return String(localized: "Bluetooth access is not allowed.") }
         if headphones.headGesturePracticeTransition?.phase == .interrupted { return String(localized: "Head Gesture Practice Needs Attention") }
         if headphones.earTipFitTransition?.phase == .interrupted { return String(localized: "Fit Test Needs Attention") }
+        if headphones.legacyOptimizerTransition?.phase == .interrupted { return String(localized: "Noise Cancelling Optimizer") }
         if isRecoveringMultipoint { return String(localized: "Reconnecting Controls…") }
         return switch headphones.powerOffState {
         case .sending: String(localized: "Sending Power Off…")
         case .acknowledged: String(localized: "Power Off Requested")
         case .disconnected: String(localized: "Headphones Disconnected")
         case .unconfirmed: String(localized: "Power Off Not Confirmed")
-        case nil: isSearching ? String(localized: "Checking Bluetooth…") : isAutomaticallyReconnecting ? String(localized: "Reconnecting Controls…") : isConnecting ? String(localized: "Connecting…") : headphones.isDeviceConnected ? String(localized: "Reconnect Headphone Controls") : String(localized: "Not Connected")
+        case nil: isSearching ? String(localized: "Checking Bluetooth…") : isConnecting ? String(localized: "Connecting…") : hasConnectionFailure ? String(localized: "Couldn’t connect to controls") : String(localized: "Not Connected")
         }
     }
 
     private var connectionDescription: String {
         if headphones.headGesturePracticeTransition?.phase == .interrupted, let message = headphones.headGesturePracticeTransition?.message { return message }
         if headphones.earTipFitTransition?.phase == .interrupted, let message = headphones.earTipFitTransition?.message { return message }
+        if headphones.legacyOptimizerTransition?.phase == .interrupted, let message = headphones.legacyOptimizerTransition?.message { return message }
         if let state = headphones.powerOffState {
             let outcome: String
             switch state {
@@ -1073,14 +981,7 @@ struct HeadphoneConnectionView: View {
                 : String(localized: "Turn the headphones on with their power button before reconnecting.")
             return String(localized: "\(outcome) Automatic reconnect is paused. \(turnOn)")
         }
-        if isRecoveringMultipoint { return String(localized: "Checking device connections…") }
-        if isSearching { return headphones.statusText }
-        if isAutomaticallyReconnecting { return String(localized: "Bluetooth is connected. Controls are reconnecting automatically.") }
-        return isConnecting
-            ? String(localized: "Waiting for a response…")
-            : headphones.isDeviceConnected
-                ? String(localized: "Bluetooth is connected. Try Reconnect Controls. If that doesn’t help, reconnect the headphones in Bluetooth Settings.")
-                : headphones.lastErrorMessage ?? String(localized: "Connect the headphones in Bluetooth settings.")
+        return headphones.statusText
     }
 }
 
@@ -1305,9 +1206,8 @@ private struct MultipointPopoverContent: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 MultipointSettingControl(compact: true)
-                Divider()
-                if headphones.multipoint.supportsInventory || headphones.sourceTransition?.phase == .failed
-                    || headphones.deviceActionTransition?.phase == .failed {
+                if MultipointControls.isVisible(for: headphones.multipoint) {
+                    Divider()
                     MultipointControls(compact: true)
                 }
                 Divider()

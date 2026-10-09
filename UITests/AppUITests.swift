@@ -622,11 +622,51 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testInterruptedLegacyOptimizerShowsRecoveryInstructionInConnectionPanel() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "whXM4", "--connection-lifecycle",
+                               "--gallery-hold-test-replies", "--settings-lifecycle", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        let title = panel.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: 12))
+        title.press(forDuration: 0.1, thenDragTo: title.withOffset(CGVector(
+            dx: 20 - panel.frame.minX, dy: 90 - panel.frame.minY
+        )))
+        panel.buttons["Open Settings"].click()
+        let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+        selectSettingsPane("headphones", in: settings)
+        settings.buttons["optimizer.open"].click()
+        let start = app.buttons["optimizer.start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 3))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: start
+        )], timeout: 3), .completed)
+        start.click()
+        XCTAssertTrue(app.descendants(matching: .any)["optimizer.progress"].waitForExistence(timeout: 3))
+        panel.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: 12)).click()
+        let disconnect = panel.buttons["Disconnect"]
+        XCTAssertTrue(disconnect.isHittable)
+        disconnect.click()
+        let message = panel.staticTexts["Controls disconnected. Optimization status is unknown. Check Sound Connect before reconnecting controls."]
+        XCTAssertTrue(message.waitForExistence(timeout: 3))
+        XCTAssertTrue(message.isHittable)
+        let status = panel.descendants(matching: .any).matching(identifier: "headphones.connectionStatus").firstMatch
+        XCTAssertEqual(status.value as? String ?? status.label, "Noise Cancelling Optimizer")
+        XCTAssertTrue(panel.buttons["headphones.connect"].isEnabled)
+        XCTAssertFalse(panel.buttons["noiseControl.anc"].exists)
+        captureGalleryScreenshot(panel.screenshot(), named: "Legacy optimizer — interrupted controls, recovery instruction")
+    }
+
+    @MainActor
     private func selectSettingsPane(_ pane: String, in window: XCUIElement) {
         let tab = window.toolbars.buttons[pane.capitalized]
         XCTAssertTrue(tab.waitForExistence(timeout: 3))
         tab.click()
-        XCTAssertEqual(window.title, pane.capitalized)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "title == %@", pane.capitalized), object: window
+        )], timeout: 3), .completed)
     }
 
     @MainActor
@@ -1193,7 +1233,8 @@ final class AppUITests: XCTestCase {
                 app.activate()
                 let panel = app.windows["Headphone Controls"]
                 XCTAssertTrue(panel.waitForExistence(timeout: 5))
-                XCTAssertTrue(panel.buttons["headphones.connect"].exists)
+                XCTAssertEqual(panel.descendants(matching: .any).matching(identifier: "headphones.connectionStatus").firstMatch.exists, state != "disconnected")
+                XCTAssertEqual(panel.buttons["headphones.connect"].exists, state != "permission")
                 XCTAssertFalse(panel.buttons["noiseControl.anc"].exists)
                 captureGalleryScreenshot(panel.screenshot(), named: "app-unknown-\(appearance)-state-\(state)-main")
                 if state == "timeout" {
@@ -1202,6 +1243,7 @@ final class AppUITests: XCTestCase {
                     hierarchy.lifetime = .keepAlways
                     add(hierarchy)
                     let message = "The headphones did not respond."
+                    XCTAssertTrue(panel.staticTexts["headphones.connectionFailure"].exists)
                     XCTAssertTrue(panel.descendants(matching: .any).matching(NSPredicate(
                         format: "label CONTAINS %@ OR value CONTAINS %@", message, message
                     )).firstMatch.exists)
@@ -1209,6 +1251,7 @@ final class AppUITests: XCTestCase {
                 panel.buttons["menu.settings"].click()
                 let settings = app.windows["com_apple_SwiftUI_Settings_window"]
                 selectSettingsPane("headphones", in: settings)
+                XCTAssertTrue(settings.descendants(matching: .any).matching(identifier: "headphones.connectionStatus").firstMatch.exists)
                 captureGalleryScreenshot(settings.screenshot(), named: "app-unknown-\(appearance)-state-\(state)-settings")
                 app.terminate()
             }
@@ -1572,6 +1615,7 @@ final class AppUITests: XCTestCase {
     @MainActor
     func testReopeningDisconnectedBackgroundAppShowsSettings() throws {
         let app = XCUIApplication()
+        defer { app.terminate() }
         app.launchArguments = ["-ui-testing", "--disconnected", "-AppleLanguages", "(en)"]
         app.launch()
         XCTAssertTrue(app.statusItems.firstMatch.waitForNonExistence(timeout: 3))
@@ -1579,9 +1623,13 @@ final class AppUITests: XCTestCase {
         XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
         XCTAssertEqual(app.state, .runningBackground)
 
+        let original = try XCTUnwrap(NSRunningApplication.runningApplications(
+            withBundleIdentifier: "dev.baglayan.Acouplet.debug"
+        ).first)
+        let bundleURL = try XCTUnwrap(original.bundleURL)
         let reopen = Process()
         reopen.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        reopen.arguments = ["-b", "dev.baglayan.Acouplet.debug"]
+        reopen.arguments = ["-a", bundleURL.path]
         try reopen.run()
         reopen.waitUntilExit()
         XCTAssertEqual(reopen.terminationStatus, 0)
@@ -1597,6 +1645,43 @@ final class AppUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.statusItems.firstMatch.waitForNonExistence(timeout: 3))
         XCTAssertEqual(app.windows.count, 0)
+    }
+
+    @MainActor
+    func testDuplicateLaunchReopensDisconnectedBackgroundAppWithoutReplacingIt() throws {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchArguments = ["-ui-testing", "--disconnected", "-AppleLanguages", "(en)"]
+        app.launch()
+        XCTAssertTrue(app.statusItems.firstMatch.waitForNonExistence(timeout: 3))
+        XCTAssertEqual(app.windows.count, 0)
+        XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
+        XCTAssertEqual(app.state, .runningBackground)
+        let original = try XCTUnwrap(NSRunningApplication.runningApplications(
+            withBundleIdentifier: "dev.baglayan.Acouplet.debug"
+        ).first)
+        XCTAssertTrue(original.isFinishedLaunching)
+        XCTAssertFalse(original.isTerminated)
+
+        let duplicate = Process()
+        duplicate.executableURL = try XCTUnwrap(original.executableURL)
+        duplicate.arguments = ["--disable-native-battery", "--disable-native-identity"]
+        duplicate.environment = ProcessInfo.processInfo.environment.filter { key, _ in
+            key != "ACOUPLET_TESTING" && !key.hasPrefix("XCTest") && !key.hasPrefix("XCInject")
+                && !key.hasPrefix("DYLD_") && !key.hasPrefix("__XPC_DYLD_")
+        }
+        try duplicate.run()
+        defer { if duplicate.isRunning { duplicate.terminate() } }
+        XCTAssertNotEqual(duplicate.processIdentifier, original.processIdentifier)
+        XCTAssertTrue(app.descendants(matching: .any)["settings.form"].waitForExistence(timeout: 5))
+        let exited = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !duplicate.isRunning }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [exited], timeout: 8), .completed)
+        XCTAssertFalse(original.isTerminated)
+        XCTAssertEqual(NSRunningApplication.runningApplications(
+            withBundleIdentifier: "dev.baglayan.Acouplet.debug"
+        ).map(\.processIdentifier), [original.processIdentifier])
+        XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, original.processIdentifier)
+        XCTAssertFalse(app.statusItems.firstMatch.exists)
     }
 
     @MainActor
@@ -1702,6 +1787,20 @@ final class AppUITests: XCTestCase {
         let manual = editor.buttons["Use Manual"]
         XCTAssertTrue(manual.isEnabled)
         XCTAssertFalse(editor.staticTexts["Applied to headphones."].exists)
+        let name = editor.textFields["Preset name"]
+        name.click()
+        name.typeText("Unapplied Draft")
+        let savedName = try XCTUnwrap(name.value as? String)
+        XCTAssertFalse(savedName.isEmpty)
+        editor.buttons["Save"].click()
+        let savedPreset = editor.buttons[savedName]
+        XCTAssertTrue(savedPreset.waitForExistence(timeout: 3))
+        XCTAssertFalse(savedPreset.isEnabled)
+        XCTAssertTrue(editor.staticTexts["Choose Manual to apply this draft."].exists)
+        XCTAssertTrue(manual.isEnabled)
+        XCTAssertFalse(editor.staticTexts["Applied to headphones."].exists)
+        XCTAssertEqual((bass.value as? NSNumber)?.intValue, draft)
+        captureGalleryScreenshot(editor.screenshot(), named: "Legacy equalizer — noneditable headphone state, saved local draft")
         manual.click()
         let apply = editor.buttons["Apply equalizer to headphones"]
         XCTAssertTrue(apply.waitForExistence(timeout: 3))
@@ -1817,9 +1916,13 @@ final class AppUITests: XCTestCase {
         selectSettingsPane("advanced", in: settingsWindow)
         settingsWindow.buttons[XCUIIdentifierCloseWindow].click()
         XCTAssertTrue(settingsWindow.waitForNonExistence(timeout: 3))
+        let original = try XCTUnwrap(NSRunningApplication.runningApplications(
+            withBundleIdentifier: "dev.baglayan.Acouplet.debug"
+        ).first)
+        let bundleURL = try XCTUnwrap(original.bundleURL)
         let reopen = Process()
         reopen.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        reopen.arguments = ["-b", "dev.baglayan.Acouplet.debug"]
+        reopen.arguments = ["-a", bundleURL.path]
         try reopen.run()
         reopen.waitUntilExit()
         XCTAssertEqual(reopen.terminationStatus, 0)
@@ -1913,25 +2016,205 @@ final class AppUITests: XCTestCase {
         app.launch()
         let window = app.windows["Headphone Controls"]
         XCTAssertTrue(window.waitForExistence(timeout: 5))
-        let status = window.activityIndicators["headphones.connectionStatus"]
+        let status = window.descendants(matching: .any).matching(identifier: "headphones.connectionStatus").firstMatch
         XCTAssertTrue(status.waitForExistence(timeout: 3))
-        XCTAssertTrue(status.label.contains("Waiting for Bluetooth permission…"), status.debugDescription)
-        let connect = window.buttons["headphones.connect"]
-        XCTAssertTrue(connect.exists)
-        XCTAssertFalse(connect.isEnabled)
-        XCTAssertEqual(connect.label, "Connect")
+        XCTAssertEqual(status.value as? String ?? status.label, "Checking Bluetooth…")
+        XCTAssertTrue(window.staticTexts["Waiting for Bluetooth permission…"].exists)
+        XCTAssertFalse(window.buttons["headphones.connect"].exists)
         XCTAssertFalse(window.staticTexts["Headphones Unavailable"].exists)
         XCTAssertFalse(window.staticTexts["Connect the headphones in Bluetooth settings."].exists)
         window.buttons["menu.settings"].click()
         let settings = app.windows["com_apple_SwiftUI_Settings_window"]
         selectSettingsPane("headphones", in: settings)
-        let settingsStatus = settings.activityIndicators["headphones.connectionStatus"]
+        let settingsStatus = settings.descendants(matching: .any).matching(identifier: "headphones.connectionStatus").firstMatch
         XCTAssertTrue(settingsStatus.exists)
-        XCTAssertTrue(settingsStatus.label.contains("Waiting for Bluetooth permission…"), settingsStatus.debugDescription)
-        XCTAssertFalse(settings.buttons["headphones.connect"].isEnabled)
+        XCTAssertEqual(settingsStatus.value as? String ?? settingsStatus.label, "Checking Bluetooth…")
+        XCTAssertTrue(settings.staticTexts["Waiting for Bluetooth permission…"].exists)
+        XCTAssertFalse(settings.buttons["headphones.connect"].exists)
         XCTAssertFalse(settings.staticTexts["Headphones Unavailable"].exists)
         XCTAssertFalse(settings.staticTexts["Color"].exists)
         XCTAssertFalse(settings.staticTexts["Firmware"].exists)
+    }
+
+    @MainActor
+    func testOptionalTouchAndSystemReadTimeoutsShowLocalizedErrorsAndRefreshRecovery() {
+        let app = XCUIApplication(bundleIdentifier: "dev.baglayan.Acouplet.debug")
+        defer { app.terminate() }
+        for (language, systemRead) in [("en", false), ("en", true), ("tr", false), ("tr", true)] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "wfXM5", "--optional-read-timeout",
+                                   "-AppleLanguages", "(\(language))", "-AppleLocale", language == "tr" ? "tr_TR" : "en_US"]
+            if systemRead { app.launchArguments.append("--optional-system-read-timeout") }
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            let title = panel.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: 12))
+            title.press(forDuration: 0.1, thenDragTo: title.withOffset(CGVector(
+                dx: 20 - panel.frame.minX, dy: 90 - panel.frame.minY
+            )))
+            panel.buttons["test.optionalRead.begin"].click()
+            panel.buttons["test.optionalRead.expire"].click()
+            panel.buttons["test.optionalRead.settings"].click()
+            let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 3))
+            settings.toolbars.buttons[language == "tr" ? "Kulaklıklar" : "Headphones"].click()
+            let message = language == "tr" ? "Kulaklık ayarları alınamadı. Yeniden denemek için yenileyin."
+                : "Headphone settings were not received. Refresh to try again."
+            let errors = settings.staticTexts.matching(NSPredicate(format: "value == %@ OR label == %@", message, message))
+            XCTAssertEqual(errors.count, 1, settings.debugDescription)
+            XCTAssertFalse(settings.staticTexts[language == "tr" ? "Dokunma denetimleri okunuyor…" : "Reading touch controls…"].exists)
+            if systemRead { XCTAssertFalse(settings.switches["system.1"].exists) }
+            let hierarchy = XCTAttachment(string: settings.debugDescription)
+            hierarchy.name = "Optional read timeout — \(language), setting error"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+            let error = errors.firstMatch
+            for _ in 0..<15 where !error.isHittable {
+                settings.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -250)
+            }
+            XCTAssertTrue(error.isHittable)
+            XCTAssertTrue(settings.frame.contains(error.frame))
+            captureGalleryScreenshot(settings.screenshot(), named: "Optional read timeout — \(language), \(systemRead ? "system" : "touch") error")
+            panel.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: 12)).click()
+            let refresh = panel.buttons[language == "tr" ? "Kulaklık durumunu yenile" : "Refresh headphone status"]
+            XCTAssertTrue(refresh.isEnabled)
+            XCTAssertTrue(refresh.isHittable)
+            refresh.click()
+            XCTAssertFalse(panel.buttons["noiseControl.anc"].exists)
+            panel.buttons["test.optionalRead.recover"].click()
+            XCTAssertTrue(panel.buttons["noiseControl.anc"].waitForExistence(timeout: 3))
+            settings.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: 12)).click()
+            settings.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: 2000)
+            let pause = settings.switches["system.1"]
+            XCTAssertTrue(pause.waitForExistence(timeout: 3))
+            for _ in 0..<15 where !pause.isHittable {
+                settings.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -250)
+            }
+            XCTAssertTrue(pause.isEnabled)
+            XCTAssertTrue(pause.isHittable)
+            pause.click()
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == 0"), object: pause
+            )], timeout: 3), .completed)
+            let assignment = settings.popUpButtons["touch.assignment.0"]
+            for _ in 0..<15 where !assignment.isHittable {
+                settings.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -250)
+            }
+            XCTAssertTrue(assignment.isEnabled)
+            XCTAssertTrue(assignment.isHittable)
+            XCTAssertEqual(errors.count, 0)
+            captureGalleryScreenshot(settings.screenshot(), named: "Optional read timeout — \(language), Refresh recovered controls")
+            app.terminate()
+        }
+    }
+
+    @MainActor
+    func testLegacyReadTimeoutErrorsSurviveReusedHandshakeAndRecover() {
+        let app = XCUIApplication(bundleIdentifier: "dev.baglayan.Acouplet.debug")
+        defer { app.terminate() }
+        for language in ["en", "tr"] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "whXM3", "--optional-read-timeout",
+                                   "-AppleLanguages", "(\(language))", "-AppleLocale", language == "tr" ? "tr_TR" : "en_US"]
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            let title = panel.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: 12))
+            title.press(forDuration: 0.1, thenDragTo: title.withOffset(CGVector(
+                dx: 20 - panel.frame.minX, dy: 90 - panel.frame.minY
+            )))
+            panel.buttons["test.optionalRead.begin"].click()
+            panel.buttons["test.optionalRead.expire"].click()
+            panel.buttons["test.optionalRead.settings"].click()
+            let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 3))
+            settings.toolbars.buttons[language == "tr" ? "Kulaklıklar" : "Headphones"].click()
+            let messages = language == "tr"
+                ? ["DSEE ayarları kullanılamıyor.", "Çevresel Ses (VPT) ayarları kullanılamıyor."]
+                : ["DSEE settings are unavailable.", "Surround (VPT) settings are unavailable."]
+            for phase in ["expired", "reused handshake"] {
+                if phase == "reused handshake" {
+                    panel.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: 12)).click()
+                    panel.buttons["test.optionalRead.rehandshake"].click()
+                    XCTAssertTrue(panel.buttons["noiseControl.anc"].waitForExistence(timeout: 3))
+                    settings.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0)).withOffset(CGVector(dx: 0, dy: 12)).click()
+                }
+                for message in messages {
+                    let error = settings.staticTexts[message]
+                    XCTAssertTrue(error.waitForExistence(timeout: 3), settings.debugDescription)
+                    for _ in 0..<10 where !error.isHittable {
+                        settings.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -150)
+                    }
+                    XCTAssertTrue(error.isHittable)
+                    XCTAssertTrue(settings.frame.contains(error.frame))
+                }
+                XCTAssertFalse(settings.popUpButtons["audio.dsee"].isEnabled)
+                XCTAssertFalse(settings.popUpButtons["audio.surround"].isEnabled)
+                XCTAssertEqual(settings.popUpButtons["audio.dsee"].value as? String, language == "tr" ? "Bilinmiyor" : "Unknown")
+                XCTAssertEqual(settings.popUpButtons["audio.surround"].value as? String, language == "tr" ? "Bilinmiyor" : "Unknown")
+                captureGalleryScreenshot(settings.screenshot(), named: "Legacy optional read timeout — \(language), \(phase)")
+            }
+            panel.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: 12)).click()
+            panel.buttons["test.optionalRead.recover"].click()
+            settings.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0)).withOffset(CGVector(dx: 0, dy: 12)).click()
+            for message in messages { XCTAssertTrue(settings.staticTexts[message].waitForNonExistence(timeout: 3)) }
+            let dsee = settings.popUpButtons["audio.dsee"]
+            let surround = settings.popUpButtons["audio.surround"]
+            XCTAssertTrue(dsee.isEnabled)
+            XCTAssertTrue(surround.isEnabled)
+            XCTAssertTrue(dsee.isHittable)
+            XCTAssertTrue(surround.isHittable)
+            surround.click()
+            app.menuItems[language == "tr" ? "Konser Salonu" : "Concert Hall"].click()
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", language == "tr" ? "Konser Salonu" : "Concert Hall"), object: surround
+            )], timeout: 3), .completed)
+            captureGalleryScreenshot(settings.screenshot(), named: "Legacy optional read timeout — \(language), recovered native picker")
+            app.terminate()
+        }
+    }
+
+    @MainActor
+    func testControlConnectionFailurePersistsUntilControlsReturn() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for language in ["en", "tr"] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--connection-lifecycle", "-AppleLanguages", "(\(language))",
+                                   "-AppleLocale", language == "tr" ? "tr_TR" : "en_US"]
+            app.launch()
+            let window = app.windows["Headphone Controls"]
+            XCTAssertTrue(window.waitForExistence(timeout: 5))
+            let success = window.descendants(matching: .any).matching(identifier: "headphones.connected").firstMatch
+            XCTAssertFalse(success.exists)
+            window.buttons["test.controlsBusy"].click()
+            let status = window.descendants(matching: .any).matching(identifier: "headphones.connectionStatus").firstMatch
+            XCTAssertTrue(status.waitForExistence(timeout: 3))
+            XCTAssertEqual(status.value as? String ?? status.label, language == "tr" ? "Denetimlere bağlanılamadı" : "Couldn’t connect to controls")
+            let retry = window.buttons["headphones.connect"]
+            XCTAssertEqual(retry.label, language == "tr" ? "Yeniden Dene" : "Retry")
+            XCTAssertTrue(retry.isEnabled)
+            XCTAssertEqual(status.frame.midY, retry.frame.midY, accuracy: 1)
+            XCTAssertTrue(window.frame.contains(status.frame))
+            XCTAssertTrue(window.frame.contains(retry.frame))
+            XCTAssertLessThan(status.frame.maxX, retry.frame.minX)
+            let guidance = window.descendants(matching: .any).matching(identifier: "headphones.bluetoothSettings").firstMatch
+            XCTAssertTrue(guidance.exists)
+            XCTAssertTrue(window.frame.contains(guidance.frame))
+            window.buttons["test.scheduleRetry"].click()
+            XCTAssertTrue(retry.exists)
+            XCTAssertTrue(retry.isEnabled)
+            XCTAssertTrue(guidance.exists)
+            XCTAssertEqual(status.value as? String ?? status.label, language == "tr" ? "Denetimlere bağlanılamadı" : "Couldn’t connect to controls")
+            XCTAssertFalse(status.waitForNonExistence(timeout: 2.5))
+            XCTAssertFalse(success.exists)
+            captureGalleryScreenshot(window.screenshot(), named: "Controls — connection unavailable — \(language)")
+            window.buttons["test.connectWF"].click()
+            XCTAssertTrue(window.buttons["noiseControl.anc"].waitForExistence(timeout: 3))
+            XCTAssertFalse(success.exists)
+            captureGalleryScreenshot(window.screenshot(), named: "Controls — connection restored — \(language)")
+            XCTAssertFalse(status.exists)
+            XCTAssertFalse(retry.exists)
+            XCTAssertTrue(window.buttons["noiseControl.anc"].exists)
+            app.terminate()
+        }
     }
 
     @MainActor
@@ -2285,8 +2568,20 @@ final class AppUITests: XCTestCase {
         app.launch()
         let panel = app.windows["Headphone Controls"]
         XCTAssertTrue(panel.waitForExistence(timeout: 5))
-        panel.buttons["menu.settings"].click()
+        panel.buttons["multipoint.open"].click()
+        let manager = app.descendants(matching: .any).matching(identifier: "multipoint.popover").firstMatch
+        let compactMultipoint = manager.descendants(matching: .any).matching(identifier: "multipoint.enabled").firstMatch
+        XCTAssertTrue(compactMultipoint.waitForExistence(timeout: 3))
+        compactMultipoint.click()
         let window = app.windows["com_apple_SwiftUI_Settings_window"]
+        XCTAssertTrue(window.waitForExistence(timeout: 3))
+        let cancel = window.sheets.buttons["Cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3))
+        XCTAssertEqual(app.sheets.count, 1)
+        XCTAssertEqual(window.sheets.count, 1)
+        XCTAssertFalse(app.buttons["multipoint.reviewChange"].exists)
+        cancel.click()
+        XCTAssertTrue(window.sheets.firstMatch.waitForNonExistence(timeout: 3))
         selectSettingsPane("headphones", in: window)
         let multipoint = window.descendants(matching: .any).matching(identifier: "multipoint.enabled").firstMatch
         XCTAssertTrue(multipoint.waitForExistence(timeout: 3))
@@ -2295,8 +2590,8 @@ final class AppUITests: XCTestCase {
         }
         XCTAssertEqual(multipoint.value as? Int, 1)
         multipoint.click()
-        let cancel = window.sheets.buttons["Cancel"]
-        XCTAssertTrue(cancel.waitForExistence(timeout: 3))
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertFalse(window.buttons["multipoint.reviewChange"].exists)
         cancel.click()
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == 1 AND isEnabled == true"), object: multipoint
@@ -2304,6 +2599,7 @@ final class AppUITests: XCTestCase {
         multipoint.click()
         let proceed = window.sheets.buttons["Continue"]
         XCTAssertTrue(proceed.waitForExistence(timeout: 3))
+        XCTAssertFalse(window.buttons["multipoint.reviewChange"].exists)
         proceed.click()
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == 0 AND isEnabled == true"), object: multipoint
@@ -2313,9 +2609,15 @@ final class AppUITests: XCTestCase {
         for cancelWarning in [true, false] {
             multipoint.click()
             XCTAssertTrue(proceed.waitForExistence(timeout: 3))
-            proceed.click()
-            let warning = window.sheets.staticTexts["Audio may cut out when Sound Quality and multipoint are both enabled."]
-            XCTAssertTrue(warning.waitForExistence(timeout: 3))
+            XCTAssertTrue(window.sheets.staticTexts["Enable multipoint?"].exists)
+            let warningText = "Audio may cut out when Sound Quality and multipoint are both enabled."
+            let message = window.sheets.staticTexts.matching(NSPredicate(
+                format: "label CONTAINS %@ OR value CONTAINS %@", warningText, warningText
+            )).firstMatch
+            XCTAssertTrue(message.exists)
+            XCTAssertTrue((message.value as? String ?? message.label).contains("Changing this setting may briefly disconnect the headphones. Reconnect them if needed."))
+            XCTAssertEqual(app.sheets.count, 1)
+            XCTAssertFalse(window.buttons["multipoint.reviewChange"].exists)
             XCTAssertEqual(multipoint.value as? Int, 0)
             if cancelWarning {
                 XCTAssertTrue(cancel.waitForExistence(timeout: 3))
@@ -2328,6 +2630,8 @@ final class AppUITests: XCTestCase {
                 predicate: NSPredicate(format: "value == %d AND isEnabled == true", cancelWarning ? 0 : 1), object: multipoint
             )], timeout: 4), .completed)
             XCTAssertFalse(window.staticTexts["multipoint.settingError"].exists)
+            XCTAssertTrue(window.sheets.firstMatch.waitForNonExistence(timeout: 3))
+            XCTAssertEqual(app.sheets.count, 0)
         }
     }
 
@@ -2779,7 +3083,7 @@ final class AppUITests: XCTestCase {
         let app = XCUIApplication()
         defer { app.terminate() }
         for failure in [nil, "--finder-missing-ack", "--finder-rejected-start", "--finder-early-stop"] {
-            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "wfXM5", "--finder-no-wear-sensor",
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "wfXM5", "--finder-no-wear-sensor", "--finder-auth-success",
                                    "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
             if let failure { app.launchArguments.append(failure) }
             app.launch()
@@ -2803,6 +3107,19 @@ final class AppUITests: XCTestCase {
                 let confirm = settings.buttons["Play Sound"]
                 XCTAssertTrue(confirm.waitForExistence(timeout: 3))
                 confirm.click()
+                let proceed = settings.buttons["Play Anyway"]
+                XCTAssertTrue(proceed.waitForExistence(timeout: 3))
+                proceed.click()
+                let authorizedPlay = settings.buttons["finder.authorizedPlay"]
+                XCTAssertTrue(authorizedPlay.waitForExistence(timeout: 3))
+                XCTAssertFalse(authorizedPlay.isEnabled)
+                let verification = settings.checkBoxes["finder.verifyNotWorn"]
+                XCTAssertTrue(verification.waitForExistence(timeout: 3))
+                verification.click()
+                XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "isEnabled == true"), object: authorizedPlay
+                )], timeout: 3), .completed)
+                authorizedPlay.click()
                 if failure == nil {
                     let ringing = "Playing a sound in the \(target) earbud."
                     XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
@@ -2832,7 +3149,7 @@ final class AppUITests: XCTestCase {
     func testFindEarbudsShowsControlRecoveryAfterSoundStops() {
         let app = XCUIApplication()
         defer { app.terminate() }
-        app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "wfXM5", "--finder-no-wear-sensor",
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "wfXM5", "--finder-no-wear-sensor", "--finder-auth-success",
                                "--finder-controls-lost-after-stop", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         let panel = app.windows["Headphone Controls"]
@@ -2851,6 +3168,19 @@ final class AppUITests: XCTestCase {
         let confirm = settings.buttons["Play Sound"]
         XCTAssertTrue(confirm.waitForExistence(timeout: 3))
         confirm.click()
+        let proceed = settings.buttons["Play Anyway"]
+        XCTAssertTrue(proceed.waitForExistence(timeout: 3))
+        proceed.click()
+        let authorizedPlay = settings.buttons["finder.authorizedPlay"]
+        XCTAssertTrue(authorizedPlay.waitForExistence(timeout: 3))
+        XCTAssertFalse(authorizedPlay.isEnabled)
+        let verification = settings.checkBoxes["finder.verifyNotWorn"]
+        XCTAssertTrue(verification.waitForExistence(timeout: 3))
+        verification.click()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: authorizedPlay
+        )], timeout: 3), .completed)
+        authorizedPlay.click()
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label == %@ OR value == %@", "Playing a sound in the left earbud.", "Playing a sound in the left earbud."),
             object: app.staticTexts["finder.status"]

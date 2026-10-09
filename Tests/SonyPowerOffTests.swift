@@ -15,8 +15,7 @@ final class SonyPowerOffTests: XCTestCase {
         XCTAssertNil(controller.powerOffState)
         XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0x24, 3, 1] })
 
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [0x01, 0, 0x03, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([0x01, 0, 0x03, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeAll(controller)
         deliver([0x07, 0, 1, 0x6B, 0xFF], to: controller)
         acknowledgeAll(controller)
@@ -224,8 +223,7 @@ final class SonyPowerOffTests: XCTestCase {
             }
             XCTAssertTrue(controller.showsMenuBarIcon)
 
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-                payload: [0x01, 0, 0x03, 0, 0x30, 0x18, 1, 0]), beginConnection: true)
+            controller.simulateProtocolMessage([0x01, 0, 0x03, 0, 0x30, 0x18, 1, 0], beginConnection: true)
             acknowledgeAll(controller)
             XCTAssertEqual(controller.linkState, .failed(String(localized: "Acouplet does not support this device’s control protocol.")))
             XCTAssertNil(controller.powerOffState)
@@ -234,8 +232,7 @@ final class SonyPowerOffTests: XCTestCase {
             XCTAssertFalse(controller.showsMenuBarIcon)
 
             controller.simulateControlLoss(deviceConnected: true)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-                payload: [0x01, 0, 0x03, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+            controller.simulateProtocolMessage([0x01, 0, 0x03, 0, 0x30, 0x18, 0, 0], beginConnection: true)
             acknowledgeAll(controller)
             deliver([0x07, 0, 2, 0x6B, 0xFF, 0x23, 0xFF], to: controller)
             acknowledgeAll(controller)
@@ -293,7 +290,7 @@ final class SonyPowerOffTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload)
     }
 
     @MainActor

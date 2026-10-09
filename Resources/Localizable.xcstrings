@@ -1,6 +1,261 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Last reported": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last reported"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Son bildirilen"
+          }
+        }
+      }
+    },
+    "Case percentage and charging show the last report received from the headphones.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Case percentage and charging show the last report received from the headphones."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kutu yüzdesi ve şarj durumu, kulaklıktan alınan son bildirimi gösterir."
+          }
+        }
+      }
+    },
+    "%lld percent, %@, last reported": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld percent, %@, last reported"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "yüzde %lld, %@, son bildirilen"
+          }
+        }
+      }
+    },
+    "Case %lld%%, %@, last reported": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Case %lld%%, %@, last reported"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kutu %%%lld, %@, son bildirilen"
+          }
+        }
+      }
+    },
+    ", last reported": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": ", last reported"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": ", son bildirilen"
+          }
+        }
+      }
+    },
+    "%@ settings are unavailable.": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ ayarları kullanılamıyor."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ settings are unavailable."
+          }
+        }
+      }
+    },
+    "DSEE settings are unavailable.": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DSEE ayarları kullanılamıyor."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DSEE settings are unavailable."
+          }
+        }
+      }
+    },
+    "Authorize playing a loud locating sound despite the earbud wear warning.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authorize playing a loud locating sound despite the earbud wear warning."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklığın takılı olabileceği uyarısına rağmen yüksek sesli bulma uyarısının çalınmasına izin verin."
+          }
+        }
+      }
+    },
+    "Acouplet can’t determine whether this earbud is being worn. Make sure this earbud is out of everyone’s ears before playing the loud sound.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet can’t determine whether this earbud is being worn. Make sure this earbud is out of everyone’s ears before playing the loud sound."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet bu kulaklığın takılı olup olmadığını belirleyemiyor. Yüksek sesli uyarıyı çalmadan önce kulaklığın kimsenin kulağında olmadığından emin olun."
+          }
+        }
+      }
+    },
+    "Right earbud wear status unknown": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Right earbud wear status unknown"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sağ kulaklığın takılı olup olmadığı bilinmiyor"
+          }
+        }
+      }
+    },
+    "Left earbud wear status unknown": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Left earbud wear status unknown"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sol kulaklığın takılı olup olmadığı bilinmiyor"
+          }
+        }
+      }
+    },
+    "Allow Acouplet to use Bluetooth in [System Settings](x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth).": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow Acouplet to use Bluetooth in [System Settings](x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth)."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[Sistem Ayarları](x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth) üzerinden Acouplet’in Bluetooth erişimine izin verin."
+          }
+        }
+      }
+    },
+    "Audio may cut out": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio may cut out"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses kesilebilir"
+          }
+        }
+      }
+    },
+    "If this continues, disconnect and reconnect the headphones in [Bluetooth Settings](x-apple.systempreferences:com.apple.BluetoothSettings).": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If this continues, disconnect and reconnect the headphones in [Bluetooth Settings](x-apple.systempreferences:com.apple.BluetoothSettings)."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sorun devam ederse [Bluetooth Ayarları](x-apple.systempreferences:com.apple.BluetoothSettings) üzerinden kulaklığın bağlantısını kesip yeniden bağlayın."
+          }
+        }
+      }
+    },
+    "Couldn’t connect to controls": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t connect to controls"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Denetimlere bağlanılamadı"
+          }
+        }
+      }
+    },
     "Audio may cut out when Sound Quality and multipoint are both enabled.": {
       "extractionState": "manual",
       "localizations": {
@@ -461,23 +716,6 @@
         }
       }
     },
-    "%@ Low (%lld%%)": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@: Düşük Şarj (%lld%%)"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@ Low (%lld%%)"
-          }
-        }
-      }
-    },
     "%@ assignment": {
       "extractionState": "manual",
       "localizations": {
@@ -648,24 +886,6 @@
         }
       }
     },
-    "%@%%": {
-      "comment": "A label displaying the battery level of the device.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@%%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@%%"
-          }
-        }
-      }
-    },
     "%@, %@": {
       "extractionState": "manual",
       "localizations": {
@@ -785,23 +1005,6 @@
         }
       }
     },
-    "%llu gestures detected": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%llu hareket algılandı"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%llu gestures detected"
-          }
-        }
-      }
-    },
     "%u %@": {
       "extractionState": "manual",
       "localizations": {
@@ -832,24 +1035,6 @@
           "stringUnit": {
             "state": "translated",
             "value": ", charging"
-          }
-        }
-      }
-    },
-    "/ 20": {
-      "comment": "A label that shows the current value of a slider.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "/ 20"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "/ 20"
           }
         }
       }
@@ -918,23 +1103,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Acoustic"
-          }
-        }
-      }
-    },
-    "Actions for %@": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@ için işlemler"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Actions for %@"
           }
         }
       }
@@ -1432,24 +1600,6 @@
         }
       }
     },
-    "Ambient sound": {
-      "comment": "A label displayed above the ambient sound level slider.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ortam sesi"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ambient sound"
-          }
-        }
-      }
-    },
     "Ambient sound level": {
       "extractionState": "manual",
       "localizations": {
@@ -1671,23 +1821,6 @@
         }
       }
     },
-    "Audio Source": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ses Kaynağı"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Audio Source"
-          }
-        }
-      }
-    },
     "Audio format": {
       "extractionState": "manual",
       "localizations": {
@@ -1888,23 +2021,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Automatic power off"
-          }
-        }
-      }
-    },
-    "Automatic power-off": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Otomatik kapanma"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Automatic power-off"
           }
         }
       }
@@ -2334,23 +2450,6 @@
         }
       }
     },
-    "Bluetooth is connected. Try Reconnect Controls. If that doesn’t help, reconnect the headphones in Bluetooth Settings.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bluetooth bağlı. Denetimleri Yeniden Bağla düğmesini deneyin. Sorun devam ederse Bluetooth Ayarları’ndan kulaklıkları yeniden bağlayın."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bluetooth is connected. Try Reconnect Controls. If that doesn’t help, reconnect the headphones in Bluetooth Settings."
-          }
-        }
-      }
-    },
     "Bluetooth is turned off.": {
       "extractionState": "manual",
       "localizations": {
@@ -2487,75 +2586,6 @@
         }
       }
     },
-    "CONTROL ROOM": {
-      "comment": "The title of the control room.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "DENETİM MERKEZİ"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "CONTROL ROOM"
-          }
-        }
-      }
-    },
-    "Call Volume": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Arama Ses Düzeyi"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Call Volume"
-          }
-        }
-      }
-    },
-    "Call volume": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Arama ses düzeyi"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Call volume"
-          }
-        }
-      }
-    },
-    "Call volume is currently unavailable.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Arama ses düzeyi şu anda kullanılamıyor."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Call volume is currently unavailable."
-          }
-        }
-      }
-    },
     "Cancel": {
       "extractionState": "manual",
       "localizations": {
@@ -2671,23 +2701,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Case"
-          }
-        }
-      }
-    },
-    "Case Battery": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kutu Pili"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Case Battery"
           }
         }
       }
@@ -2977,23 +2990,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Check Preference"
-          }
-        }
-      }
-    },
-    "Check Setting": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ayarı Denetle"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Check Setting"
           }
         }
       }
@@ -3423,23 +3419,6 @@
         }
       }
     },
-    "Connect the headphones in Bluetooth settings.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklıkları Bluetooth ayarlarından bağlayın."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Connect the headphones in Bluetooth settings."
-          }
-        }
-      }
-    },
     "Connect the headphones to change settings.": {
       "extractionState": "manual",
       "localizations": {
@@ -3491,40 +3470,6 @@
         }
       }
     },
-    "Connect to two devices": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "İki aygıta bağlan"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Connect to two devices"
-          }
-        }
-      }
-    },
-    "Connect to two devices?": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "İki aygıta bağlanılsın mı?"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Connect to two devices?"
-          }
-        }
-      }
-    },
     "Connected": {
       "extractionState": "manual",
       "localizations": {
@@ -3538,23 +3483,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Connected"
-          }
-        }
-      }
-    },
-    "Connecting LDAC…": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "LDAC bağlanıyor…"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Connecting LDAC…"
           }
         }
       }
@@ -3725,40 +3653,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Reconnecting Controls…"
-          }
-        }
-      }
-    },
-    "Bluetooth is connected. Controls are reconnecting automatically.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bluetooth bağlı. Denetimler otomatik olarak yeniden bağlanıyor."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bluetooth is connected. Controls are reconnecting automatically."
-          }
-        }
-      }
-    },
-    "Reconnect Headphone Controls": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklık Denetimlerini Yeniden Bağla"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Reconnect Headphone Controls"
           }
         }
       }
@@ -4134,23 +4028,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "DSEE became unavailable before the change could be sent."
-          }
-        }
-      }
-    },
-    "DSEE settings were not received. Reconnect the headphones to try again.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "DSEE ayarları alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "DSEE settings were not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -5294,24 +5171,6 @@
         }
       }
     },
-    "Focus on voice": {
-      "comment": "A label displayed above a toggle that lets the user prioritize nearby speech.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sese odaklan"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Focus on voice"
-          }
-        }
-      }
-    },
     "Front": {
       "extractionState": "manual",
       "localizations": {
@@ -5703,23 +5562,6 @@
         }
       }
     },
-    "Head gesture practice timed out.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Baş hareketi alıştırması zaman aşımına uğradı."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Head gesture practice timed out."
-          }
-        }
-      }
-    },
     "Head gestures": {
       "extractionState": "manual",
       "localizations": {
@@ -5784,23 +5626,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Head-gesture practice changed before the command could be sent."
-          }
-        }
-      }
-    },
-    "Headphone": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklık"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Headphone"
           }
         }
       }
@@ -5890,40 +5715,6 @@
         }
       }
     },
-    "Headphone Volume": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklık Ses Düzeyi"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Headphone Volume"
-          }
-        }
-      }
-    },
-    "Headphone call volume": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklık arama ses düzeyi"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Headphone call volume"
-          }
-        }
-      }
-    },
     "The headphone settings changed before the audio source change was confirmed.": {
       "extractionState": "manual",
       "localizations": {
@@ -5992,23 +5783,6 @@
         }
       }
     },
-    "Headphone volume": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklık ses düzeyi"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Headphone volume"
-          }
-        }
-      }
-    },
     "Headphones": {
       "extractionState": "manual",
       "localizations": {
@@ -6039,23 +5813,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Headphones Disconnected"
-          }
-        }
-      }
-    },
-    "Headphones controls their connected audio source. This Mac controls the current macOS media player.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklıklar seçeneği, kulaklıkların bağlı ses kaynağını denetler. Bu Mac seçeneği, geçerli macOS ortam oynatıcısını denetler."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Headphones controls their connected audio source. This Mac controls the current macOS media player."
           }
         }
       }
@@ -6449,23 +6206,6 @@
         }
       }
     },
-    "LDAC audio is active.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "LDAC etkin."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "LDAC audio is active."
-          }
-        }
-      }
-    },
     "LDAC did not start with the selected audio format.": {
       "extractionState": "manual",
       "localizations": {
@@ -6513,6 +6253,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "LDAC reported an invalid audio format."
+          }
+        }
+      }
+    },
+    "Headphone settings were not received. Refresh to try again.": {
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık ayarları alınamadı. Yeniden denemek için yenileyin."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Headphone settings were not received. Refresh to try again."
+          }
+        }
+      }
+    },
+    "Schedule Retry": {
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yeniden Denemeyi Planla"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schedule Retry"
+          }
+        }
+      }
+    },
+    "LDAC requires a macOS administrator account.": {
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC için bir macOS yönetici hesabı gerekir."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC requires a macOS administrator account."
           }
         }
       }
@@ -6648,23 +6436,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Left"
-          }
-        }
-      }
-    },
-    "Left Earbud": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sol Kulaklık"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Left Earbud"
           }
         }
       }
@@ -6920,24 +6691,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Low battery"
-          }
-        }
-      }
-    },
-    "MAC PRESETS": {
-      "comment": "A label for the equalizer presets section.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "MAC ÖNAYARLARI"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "MAC PRESETS"
           }
         }
       }
@@ -7384,23 +7137,6 @@
         }
       }
     },
-    "Next Track": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sonraki Parça"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Next Track"
-          }
-        }
-      }
-    },
     "Next track": {
       "extractionState": "manual",
       "localizations": {
@@ -7452,23 +7188,6 @@
         }
       }
     },
-    "No device information received.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Aygıt bilgisi alınmadı."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No device information received."
-          }
-        }
-      }
-    },
     "No function": {
       "extractionState": "manual",
       "localizations": {
@@ -7516,40 +7235,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "No response. Check that the headphones are on."
-          }
-        }
-      }
-    },
-    "No saved devices.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kayıtlı aygıt yok."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No saved devices."
-          }
-        }
-      }
-    },
-    "No track information": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Parça bilgisi yok"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No track information"
           }
         }
       }
@@ -8540,23 +8225,6 @@
         }
       }
     },
-    "Play or Pause": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Çal veya Duraklat"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Play or Pause"
-          }
-        }
-      }
-    },
     "Playback": {
       "extractionState": "manual",
       "localizations": {
@@ -8621,40 +8289,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Playback Quality"
-          }
-        }
-      }
-    },
-    "Playback Source": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Çalma Kaynağı"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Playback Source"
-          }
-        }
-      }
-    },
-    "Playback controls are currently unavailable.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Çalma denetimleri şu anda kullanılamıyor."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Playback controls are currently unavailable."
           }
         }
       }
@@ -8791,23 +8425,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Power saving is active."
-          }
-        }
-      }
-    },
-    "Power settings were not received. Reconnect the headphones to try again.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Güç ayarları alınmadı. Yeniden denemek için kulaklıkları yeniden bağlayın."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Power settings were not received. Reconnect the headphones to try again."
           }
         }
       }
@@ -9080,23 +8697,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Preview Noise Replacement"
-          }
-        }
-      }
-    },
-    "Previous Track": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Önceki Parça"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Previous Track"
           }
         }
       }
@@ -9560,22 +9160,6 @@
         }
       }
     },
-    "Reconnecting LDAC…": {
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "LDAC yeniden bağlanıyor…"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Reconnecting LDAC…"
-          }
-        }
-      }
-    },
     "Reconnecting controls…": {
       "extractionState": "manual",
       "localizations": {
@@ -9914,23 +9498,6 @@
         }
       }
     },
-    "Retry Controls": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Denetimleri Yeniden Dene"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Retry Controls"
-          }
-        }
-      }
-    },
     "Retry LDAC": {
       "extractionState": "manual",
       "localizations": {
@@ -9944,24 +9511,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Retry LDAC"
-          }
-        }
-      }
-    },
-    "Retrying in %@s": {
-      "comment": "A label that appears when the connection to the device is lost, indicating that the app will automatically reconnect in a few seconds. The argument is the number of seconds remaining before the app will automatically reconnect.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@ sn sonra yeniden denenecek"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Retrying in %@s"
           }
         }
       }
@@ -9996,23 +9545,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Right"
-          }
-        }
-      }
-    },
-    "Right Earbud": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sağ Kulaklık"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Right Earbud"
           }
         }
       }
@@ -10187,24 +9719,6 @@
         }
       }
     },
-    "Saved on this Mac. Applying one writes its curve to the headphones, where Sound Connect can read the active Manual EQ.": {
-      "comment": "A description of the saved equalizer profiles.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bu Mac’e kaydedildi. Birini uygulamak, eğrisini kulaklıklara yazar; Sound Connect etkin Elle ekolayzırını okuyabilir."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Saved on this Mac. Applying one writes its curve to the headphones, where Sound Connect can read the active Manual EQ."
-          }
-        }
-      }
-    },
     "Schedule Settings Refresh": {
       "extractionState": "manual",
       "localizations": {
@@ -10269,23 +9783,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sending Power Off…"
-          }
-        }
-      }
-    },
-    "Sending playback command": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Çalma komutu gönderiliyor"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sending playback command"
           }
         }
       }
@@ -10406,23 +9903,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Settings"
-          }
-        }
-      }
-    },
-    "Settings…": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ayarlar…"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Settings…"
           }
         }
       }
@@ -11073,19 +10553,19 @@
         }
       }
     },
-    "Speak-to-Chat settings changed while waiting. Reconnect the headphones and try again.": {
+    "Speak-to-Chat settings changed. Try again.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Beklerken Speak-to-Chat ayarları değişti. Kulaklıkları yeniden bağlayıp tekrar deneyin."
+            "value": "Speak-to-Chat ayarları değişti. Tekrar deneyin."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Speak-to-Chat settings changed while waiting. Reconnect the headphones and try again."
+            "value": "Speak-to-Chat settings changed. Try again."
           }
         }
       }
@@ -11409,23 +10889,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "System audio recording could not be checked. Try LDAC again."
-          }
-        }
-      }
-    },
-    "System playback controls are unavailable.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sistem çalma denetimleri kullanılamıyor."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "System playback controls are unavailable."
           }
         }
       }
@@ -11951,23 +11414,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "The control connection was lost before the multipoint request was sent."
-          }
-        }
-      }
-    },
-    "The current Mac player did not confirm the command.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Geçerli Mac oynatıcısı komutu doğrulamadı."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The current Mac player did not confirm the command."
           }
         }
       }
@@ -12890,23 +12336,6 @@
         }
       }
     },
-    "The playback command could not be sent.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Çalma komutu gönderilemedi."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The playback command could not be sent."
-          }
-        }
-      }
-    },
     "The power-off command could not be sent. Its outcome is unknown.": {
       "extractionState": "manual",
       "localizations": {
@@ -13192,40 +12621,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "These headphones are no longer available for noise control."
-          }
-        }
-      }
-    },
-    "These headphones did not report a supported noise-control function.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bu kulaklıklar desteklenen bir gürültü denetimi işlevi bildirmedi."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "These headphones did not report a supported noise-control function."
-          }
-        }
-      }
-    },
-    "These headphones did not report a supported older noise-control function.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bu kulaklıklar desteklenen eski bir gürültü denetimi işlevi bildirmedi."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "These headphones did not report a supported older noise-control function."
           }
         }
       }
@@ -13570,23 +12965,6 @@
         }
       }
     },
-    "Touch control": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Dokunma denetimi"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Touch control"
-          }
-        }
-      }
-    },
     "Touch controls changed before the command could be sent.": {
       "extractionState": "manual",
       "localizations": {
@@ -13617,23 +12995,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Track Control"
-          }
-        }
-      }
-    },
-    "Track information is reported by the headphones’ current audio source.": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Parça bilgisi, kulaklıkların geçerli ses kaynağından bildirilir."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Track information is reported by the headphones’ current audio source."
           }
         }
       }
@@ -14216,23 +13577,6 @@
         }
       }
     },
-    "Updating volume": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ses düzeyi güncelleniyor"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Updating volume"
-          }
-        }
-      }
-    },
     "Use %@ for Audio": {
       "extractionState": "manual",
       "localizations": {
@@ -14297,23 +13641,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Use Stable Connection?"
-          }
-        }
-      }
-    },
-    "Use for Audio": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ses için Kullan"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Use for Audio"
           }
         }
       }
@@ -14862,23 +14189,6 @@
         }
       }
     },
-    "Waiting for a response…": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Yanıt bekleniyor…"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Waiting for a response…"
-          }
-        }
-      }
-    },
     "Waiting for headphones…": {
       "extractionState": "manual",
       "localizations": {
@@ -15066,24 +14376,6 @@
         }
       }
     },
-    "Works while Acouplet is running and does not require Accessibility permission.": {
-      "comment": "A description of the keyboard shortcut.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Acouplet çalışırken kullanılabilir; Erişilebilirlik izni gerektirmez."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Works while Acouplet is running and does not require Accessibility permission."
-          }
-        }
-      }
-    },
     "Acouplet": {
       "comment": "The name of the app.",
       "isCommentAutoGenerated": true,
@@ -15098,24 +14390,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Acouplet"
-          }
-        }
-      }
-    },
-    "Acouplet uses Sony's Serial HPC service. Audio remains managed by macOS.": {
-      "comment": "A description of the Sony headphones' audio management.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Acouplet, Sony’nin Serial HPC servisini kullanır. Ses macOS tarafından yönetilir."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Acouplet uses Sony's Serial HPC service. Audio remains managed by macOS."
           }
         }
       }
@@ -15154,40 +14428,6 @@
         }
       }
     },
-    "app.name": {
-      "extractionState": "stale",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Acouplet"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Acouplet"
-          }
-        }
-      }
-    },
-    "app.quit": {
-      "extractionState": "stale",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Çık"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Quit"
-          }
-        }
-      }
-    },
     "channel": {
       "extractionState": "manual",
       "localizations": {
@@ -15222,40 +14462,6 @@
         }
       }
     },
-    "home.subtitle": {
-      "extractionState": "stale",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bu başlangıç içeriğini ürün deneyiminizle değiştirin."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Replace this starter content with your product experience."
-          }
-        }
-      }
-    },
-    "home.title": {
-      "extractionState": "stale",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Acouplet’e Hoş Geldiniz"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Welcome to Acouplet"
-          }
-        }
-      }
-    },
     "macOS could not read the available LDAC sample rates.": {
       "localizations": {
         "tr": {
@@ -15285,40 +14491,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "macOS did not confirm the selected LDAC sample rate. Update Acouplet LDAC Output, then retry."
-          }
-        }
-      }
-    },
-    "menu.subtitle": {
-      "extractionState": "stale",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Menü çubuğu deneyiminiz için odaklı bir alan."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "A focused place for your menu-bar experience."
-          }
-        }
-      }
-    },
-    "menu.title": {
-      "extractionState": "stale",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Acouplet"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Acouplet"
           }
         }
       }
@@ -15357,57 +14529,6 @@
         }
       }
     },
-    "preferences.showSeconds": {
-      "extractionState": "stale",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Saniyeleri göster"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Show seconds"
-          }
-        }
-      }
-    },
-    "settings.open": {
-      "extractionState": "stale",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ayarlar"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Settings"
-          }
-        }
-      }
-    },
-    "status.accessibilityLabel": {
-      "extractionState": "stale",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Acouplet’ü Aç"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open Acouplet"
-          }
-        }
-      }
-    },
     "this connection": {
       "extractionState": "manual",
       "localizations": {
@@ -15421,24 +14542,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "this connection"
-          }
-        }
-      }
-    },
-    "v%@": {
-      "comment": "A label showing the version of the app.",
-      "isCommentAutoGenerated": true,
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "v%@"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "v%@"
           }
         }
       }
@@ -16123,23 +15226,6 @@
         }
       }
     },
-    "Choose which earbud to find.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Choose which earbud to find."
-          }
-        },
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bulmak istediğiniz kulaklığı seçin."
-          }
-        }
-      }
-    },
     "Connect your paired earbuds before finding them.": {
       "extractionState": "manual",
       "localizations": {
@@ -16344,23 +15430,6 @@
         }
       }
     },
-    "Couldn’t check whether the earbuds are being worn. Try again.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Couldn’t check whether the earbuds are being worn. Try again."
-          }
-        },
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklıkların takılı olup olmadığı kontrol edilemedi. Yeniden deneyin."
-          }
-        }
-      }
-    },
     "Could not confirm the earbud finding status.": {
       "extractionState": "manual",
       "localizations": {
@@ -16425,23 +15494,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ses seviyesi yüksek olacak. Çalarken kulaklıkları kendi kulaklarınızdan ve başkalarının kulaklarından uzak tutun."
-          }
-        }
-      }
-    },
-    "The earbud wear check hasn’t finished. Reconnect the earbuds to try again.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The earbud wear check hasn’t finished. Reconnect the earbuds to try again."
-          }
-        },
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklıkların takılı olup olmadığı henüz belirlenemedi. Yeniden denemek için kulaklıkları yeniden bağlayın."
           }
         }
       }
@@ -16561,23 +15613,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Şu anda bu kulaklığın kimsenin kulağında olmadığından EN UFAK BİR ŞÜPHEYE YER BIRAKMAYACAK KADAR EMİN MİSİNİZ? Bu işlem, %@ tarafından yetkilendirilmiş olarak kaydedilecek."
-          }
-        }
-      }
-    },
-    "Authorize playing a loud locating sound despite the in-ear warning.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Authorize playing a loud locating sound despite the in-ear warning."
-          }
-        },
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kulaklığın takılı olduğu uyarısına rağmen yüksek sesli bulma sesinin çalınmasına izin verin."
           }
         }
       }
@@ -16731,6 +15766,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Acouplet, bu kulaklıkların kulağınızda olup olmadığını algılayamıyor."
+          }
+        }
+      }
+    },
+    "Couldn’t finish checking the earbuds.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t finish checking the earbuds."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklıklar kontrol edilemedi."
           }
         }
       }
@@ -16969,23 +16021,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "LDAC sürücüsünün sürümü kontrol edilemedi."
-          }
-        }
-      }
-    },
-    "Another app is using LDAC audio. Stop its playback and try again.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Another app is using LDAC audio. Stop its playback and try again."
-          }
-        },
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Başka bir uygulama LDAC sesini kullanıyor. O uygulamada ses çalmayı durdurup tekrar deneyin."
           }
         }
       }
@@ -17275,6 +16310,312 @@
           "stringUnit": {
             "state": "translated",
             "value": "LDAC başlamadan önce Mac’in ses çıkışı değişti. Tekrar deneyin."
+          }
+        }
+      }
+    },
+    "Remove LDAC Audio Driver…": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove LDAC Audio Driver…"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC Ses Sürücüsünü Kaldır…"
+          }
+        }
+      }
+    },
+    "Remove LDAC Audio Driver?": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove LDAC Audio Driver?"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC Ses Sürücüsü Kaldırılsın mı?"
+          }
+        }
+      }
+    },
+    "Acouplet will quit and open the removal installer. Restart your Mac after removing the driver.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet will quit and open the removal installer. Restart your Mac after removing the driver."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet kapanacak ve sürücüyü kaldırmak için yükleyici açılacak. Sürücüyü kaldırdıktan sonra Mac’inizi yeniden başlatın."
+          }
+        }
+      }
+    },
+    "Restore Stable Connection": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore Stable Connection"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kararlı Bağlantıyı Geri Yükle"
+          }
+        }
+      }
+    },
+    "Keep Current Preference": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep Current Preference"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geçerli Tercihi Koru"
+          }
+        }
+      }
+    },
+    "Restore the previous Stable Connection preference?": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore the previous Stable Connection preference?"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Önceki Kararlı Bağlantı tercihi geri yüklensin mi?"
+          }
+        }
+      }
+    },
+    "%@ kHz · %lld kb/s": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ kHz · %lld kb/s"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ kHz · %lld kb/sn"
+          }
+        }
+      }
+    },
+    " · %lld channels": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · %lld channels"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " · %lld kanal"
+          }
+        }
+      }
+    },
+    "The device is not connected for Bluetooth audio.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The device is not connected for Bluetooth audio."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aygıt Bluetooth sesi için bağlı değil."
+          }
+        }
+      }
+    },
+    "The headphone audio settings changed. Try LDAC again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphone audio settings changed. Try LDAC again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklığın ses ayarları değişti. LDAC’i tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The headphone volume controls became unavailable. LDAC stopped.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphone volume controls became unavailable. LDAC stopped."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklığın ses düzeyi denetimleri kullanılamaz hale geldi. LDAC durduruldu."
+          }
+        }
+      }
+    },
+    "The headphones did not confirm the requested volume. LDAC stopped.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphones did not confirm the requested volume. LDAC stopped."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık istenen ses düzeyini onaylamadı. LDAC durduruldu."
+          }
+        }
+      }
+    },
+    "Select your headphones as the Mac output, then retry LDAC.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Select your headphones as the Mac output, then retry LDAC."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac’in ses çıkışı olarak kulaklığınızı seçin, ardından LDAC’i tekrar deneyin."
+          }
+        }
+      }
+    },
+    "The Mac audio output changed. LDAC stopped.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The Mac audio output changed. LDAC stopped."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac’in ses çıkışı değişti. LDAC durduruldu."
+          }
+        }
+      }
+    },
+    "The previous Mac audio output did not return. Check Sound settings to select it.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previous Mac audio output did not return. Check Sound settings to select it."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac’in önceki ses çıkışı yeniden kullanılabilir hale gelmedi. Seçmek için Ses ayarlarını kontrol edin."
+          }
+        }
+      }
+    },
+    "macOS could not read the audio volume and mute settings. Check Sound settings and try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not read the audio volume and mute settings. Check Sound settings and try again."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS, ses düzeyi ve sessize alma ayarlarını okuyamadı. Ses ayarlarını kontrol edip tekrar deneyin."
+          }
+        }
+      }
+    },
+    "Acouplet couldn’t update its startup settings. Try again.": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet başlangıç ayarlarını güncelleyemedi. Yeniden deneyin."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet couldn’t update its startup settings. Try again."
+          }
+        }
+      }
+    },
+    "Acouplet may reopen until its startup settings are updated.": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Başlangıç ayarları güncellenene kadar Acouplet yeniden açılabilir."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet may reopen until its startup settings are updated."
           }
         }
       }

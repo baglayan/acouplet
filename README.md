@@ -23,9 +23,10 @@ open it, and allow Bluetooth access. Pair your device in
 macOS Bluetooth settings first. If another headphone-control app is
 running, close it before connecting through Acouplet.
 
-For LDAC, enable the experimental feature in "More Settings…". The app includes its
-audio driver installer; follow the setup prompt and restart the Mac after
-installation. Restarting only the app does not reload the driver.
+LDAC currently requires a macOS administrator account. Enable the experimental
+feature in "More Settings…". The app includes its audio driver installer; follow
+the setup prompt and restart the Mac after installation. Restarting only the app
+does not reload the driver.
 
 When reporting a problem, you may open an issue on this repository.
 Please include your device model, macOS version, app version
@@ -48,12 +49,16 @@ Administrator authorization is needed to install the plug-in in
 `/Library/Audio/Plug-Ins/HAL/`. The driver is only needed for LDAC;
 headphone controls and ordinary Bluetooth playback work without it.
 
+To remove the driver, stop LDAC, then choose "Remove LDAC Audio Driver…" in
+More Settings > General. Acouplet quits and opens macOS Installer for removal.
+Restart the Mac afterward.
+
 ## Building from source
 
 See [Development](NATIVE_MACOS.md) for build requirements, options and tests.
 
-Sony product photographs are excluded from this repository because they are
-third-party artwork, not assets covered by this project's MIT license. Source
+Sony product photographs are not included in the current source tree. They are
+third-party artwork and are not covered by this project's MIT license. Source
 builds use the included vector icons. An external photo catalog can be supplied
 at build time.
 

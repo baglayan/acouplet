@@ -1,0 +1,23 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "NSBluetoothAlwaysUsageDescription": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet uses Bluetooth to read and change your Sony headphone settings."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Acouplet, Sony kulaklığınızın ayarlarını okumak ve değiştirmek için Bluetooth kullanır."
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

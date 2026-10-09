@@ -125,6 +125,17 @@ struct SonyVoiceAssistantState: Equatable, Sendable {
         (options == nil ? [[0xF0, 0x04]] : []) + [[0xF2, 0x04], [0xF6, 0x04]]
     }
 
+    mutating func invalidateRead(_ query: [UInt8]) {
+        switch query {
+        case [0xF0, 0x04]:
+            options = nil
+            keyType = nil
+        case [0xF2, 0x04]: available = nil
+        case [0xF6, 0x04]: current = nil
+        default: break
+        }
+    }
+
     func setPayload(_ option: SonyVoiceAssistantOption) -> [UInt8]? {
         guard available == true, hasKnownParameter, knownOptions.contains(option) else { return nil }
         return [0xF8, 0x04, option.rawValue]
@@ -203,6 +214,19 @@ struct SonyAutomaticPowerOffState: Equatable, Sendable {
     }
 
     var parameterQueryPayload: [UInt8] { [generation == .v1 ? 0xF6 : 0x26, inquiryType] }
+
+    mutating func invalidateRead(_ query: [UInt8]) {
+        guard query.count == 2, query[1] == inquiryType else { return }
+        switch (generation, query[0]) {
+        case (.v1, 0xF0), (.v2, 0x20): options = nil
+        case (.v1, 0xF2), (.v2, 0x22): available = nil
+        case (.v1, 0xF6), (.v2, 0x26):
+            parameterType = nil
+            current = nil
+            last = nil
+        default: break
+        }
+    }
 
     var queryPayloads: [[UInt8]] {
         (options == nil ? [[generation == .v1 ? 0xF0 : 0x20, inquiryType]] : [])
@@ -296,6 +320,23 @@ struct SonySystemFeatures: Equatable, Sendable {
               state.isVisible == true else { return nil }
         return [0xF8, feature.rawValue, enabled ? 0x00 : 0x01]
             + (feature == .speakToChat ? [0x01] : [])
+    }
+
+    mutating func invalidateRead(_ query: [UInt8]) {
+        voiceAssistant?.invalidateRead(query)
+        automaticPowerOff?.invalidateRead(query)
+        if query == [0xFA, 0x0C], speakToChatOptions != nil { speakToChatOptions = SonySpeakToChatOptions() }
+        guard query.count == 2 else { return }
+        if let feature = SonySystemFeature(rawValue: query[1]), states[feature] != nil {
+            if query[0] == 0xF2 {
+                states[feature]?.available = nil
+                if feature == .voiceAssistantWakeWord { states[feature]?.isVisible = nil }
+            } else if query[0] == 0xF6 {
+                states[feature]?.enabled = nil
+            }
+        }
+        if query[0] == 0xD2 { sidetoneStates[query[1]]?.available = nil }
+        else if query[0] == 0xD6 { sidetoneStates[query[1]]?.enabled = nil }
     }
 
     func sidetoneSetPayload(enabled: Bool) -> [UInt8]? {

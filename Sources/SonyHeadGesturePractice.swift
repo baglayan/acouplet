@@ -72,6 +72,7 @@ struct SonyHeadGesturePracticeTransition: Equatable {
     private(set) var phase = Phase.checking
     private(set) var message: String?
     private(set) var commandTransmitted = false
+    private(set) var dismissWhenFinished = false
     private var queryTransmitted = false
     private var closing = false
     private var ordinaryAvailable = true
@@ -119,7 +120,8 @@ struct SonyHeadGesturePracticeTransition: Equatable {
         return true
     }
 
-    mutating func cancel() {
+    mutating func cancel(dismissWhenFinished: Bool = false) {
+        self.dismissWhenFinished = self.dismissWhenFinished || dismissWhenFinished
         closing = true
         switch phase {
         case .ready, .unavailable: move(to: .finished)
@@ -194,9 +196,6 @@ struct SonyHeadGesturePracticeTransition: Equatable {
         case .entering:
             message = String(localized: "Head gesture practice could not start.")
             move(to: .leaving)
-        case .practicing:
-            message = String(localized: "Head gesture practice timed out.")
-            move(to: .leaving)
         case .leaving:
             interrupt(String(localized: "The headphones did not confirm that practice ended. Use Sound Connect to end it before reconnecting controls."))
         default: break
@@ -205,6 +204,10 @@ struct SonyHeadGesturePracticeTransition: Equatable {
 
     mutating func controlLost() {
         guard blocksCommands else { return }
+        if phase == .checking || phase == .ready {
+            move(to: .finished)
+            return
+        }
         interrupt(String(localized: "Controls disconnected. Practice status is unknown. Check the earbuds in Sound Connect before reconnecting controls."))
     }
 

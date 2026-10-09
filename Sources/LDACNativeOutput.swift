@@ -1,9 +1,12 @@
 #if !ACOUPLET_PUBLIC_APIS_ONLY
 import CoreAudio
+import CoreBluetooth
+import Darwin
 import Foundation
+import IOBluetooth
 import OSLog
 
-struct LDACNativeVolume: Equatable {
+struct LDACNativeVolume: Equatable, Codable, Sendable {
     var scalar: Float32
     var muted: Bool
 
@@ -30,14 +33,25 @@ struct LDACNativeVolume: Equatable {
     }
 }
 
+struct LDACRouteRecovery: Codable, Sendable {
+    let address: String
+    let model: String
+    let sampleRate: LDACSampleRate
+    let defaults: [UInt32: String]
+    let controls: LDACNativeVolume
+    let selected: Bool
+}
+
 @MainActor
 final class LDACNativeOutput {
     nonisolated static let uid = "dev.baglayan.Acouplet.ldac-output"
-    private static let leaseSelector: AudioObjectPropertySelector = 0x786D6C73
+    private nonisolated static let leaseSelector: AudioObjectPropertySelector = 0x786D6C73
     private static let modelSelector: AudioObjectPropertySelector = 0x786D6E6D
     private nonisolated static let prioritySelector: AudioObjectPropertySelector = 0x786D7072
     private static let system = AudioObjectID(kAudioObjectSystemObject)
     private static let defaultSelectors = [kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice]
+    private static var routeOwner: FileHandle?
+    private var holdsRouteOwner = false
     private let id: UUID
     private let address: String
     private nonisolated static let logger = Logger(subsystem: "dev.baglayan.Acouplet", category: "LDACLifecycle")
@@ -47,6 +61,7 @@ final class LDACNativeOutput {
     private var sampleRateHz = Float64(48000)
     private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
     private var renewTask: Task<Void, Never>?
+    private var leaseActivity: NSObjectProtocol?
     private var savedDefaults: [AudioObjectPropertySelector: String] = [:]
     private var expected = LDACNativeVolume(scalar: 0, muted: true)
     private(set) var controls = LDACNativeVolume(scalar: 0, muted: true)
@@ -57,14 +72,20 @@ final class LDACNativeOutput {
     private var restoring = false
     private var ownsLease = false
     private var observesPriority = false
+    private var restoringOwner = false
+    private var model = ""
+
+    private var handoffSelectors: [AudioObjectPropertySelector] {
+        Self.defaultSelectors.filter {
+            $0 == kAudioHardwarePropertyDefaultOutputDevice || savedDefaults[$0] == savedDefaults[kAudioHardwarePropertyDefaultOutputDevice]
+        }
+    }
 
     init(id: UUID, address: String, changed: @escaping (Result<LDACNativeVolume, Error>) -> Void) {
         self.id = id
         self.address = address
         self.changed = changed
     }
-
-    static var isAvailable: Bool { (try? resolve(uid)) != nil }
 
     static func driverRevision() throws -> Int? {
         guard let device = try resolve(uid) else { return nil }
@@ -85,63 +106,99 @@ final class LDACNativeOutput {
         alive == 1 && hidden == 0 && defaultOutput == 1 && systemOutput == 1
     }
 
-    func claim(model: String, targetAddress: String, sampleRate: LDACSampleRate = .hz48000) async throws {
+    nonisolated static func canTransferControls(uid: String, transport: UInt32, address: String) -> Bool {
+        guard transport == kAudioDeviceTransportTypeBluetooth,
+              uid.count == 17 || (uid.count > 17 && uid.dropFirst(17).first == ":"),
+              let target = SonyBLEIdentity.normalizedAddress(address),
+              let source = SonyBLEIdentity.normalizedAddress(String(uid.prefix(17))) else { return false }
+        return source == target
+    }
+
+    func claim(model: String, targetAddress: String, sampleRate: LDACSampleRate = .hz48000, recovering: LDACRouteRecovery? = nil) async throws {
         record("claim-requested", reason: "model=\(model)")
         guard let endpoint = try Self.resolve(Self.uid) else {
             throw OutputError(String(localized: "Install the LDAC driver from the app, then restart your Mac."))
         }
-        for selector in Self.defaultSelectors {
-            let output: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
-            let savedUID = try Self.readString(output, selector: kAudioDevicePropertyDeviceUID)
-            guard savedUID != Self.uid else { throw OutputError("Select your headphones as the Mac output, then retry LDAC.") }
-            savedDefaults[selector] = savedUID
-            if selector == kAudioHardwarePropertyDefaultOutputDevice {
-                var volumeProperty = Self.property(kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput)
-                if AudioObjectHasProperty(output, &volumeProperty) {
-                    let scalar: Float32 = try Self.read(output, selector: kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput, initial: 0)
-                    guard scalar.isFinite, (0...1).contains(scalar) else { throw OutputError("macOS returned an invalid audio volume.") }
-                    controls.scalar = scalar
-                    hasInitialVolume = true
-                }
-                var property = Self.property(kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput)
-                if AudioObjectHasProperty(output, &property) {
-                    let mute: UInt32 = try Self.read(output, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, initial: 0)
-                    guard mute <= 1 else { throw OutputError("macOS returned an invalid audio mute state.") }
-                    controls.muted = mute == 1
-                } else {
-                    controls.muted = false
+        do { try Self.acquireRouteOwner(); holdsRouteOwner = true }
+        catch {
+            throw OutputError("macOS could not reserve LDAC route ownership: \(error.localizedDescription)", userFacing: String(localized: "macOS did not make LDAC audio available. Try again."))
+        }
+        self.model = model
+        restoringOwner = recovering != nil
+        controls.muted = false
+        if let recovering {
+            savedDefaults = recovering.defaults
+            controls = recovering.controls
+            isSelected = recovering.selected
+        } else {
+            for selector in Self.defaultSelectors {
+                let output: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
+                let savedUID = try Self.readString(output, selector: kAudioDevicePropertyDeviceUID)
+                guard savedUID != Self.uid else { throw OutputError(String(localized: "Select your headphones as the Mac output, then retry LDAC.")) }
+                savedDefaults[selector] = savedUID
+                let transport: UInt32 = try Self.read(output, selector: kAudioDevicePropertyTransportType, initial: 0)
+                if selector == kAudioHardwarePropertyDefaultOutputDevice,
+                   Self.canTransferControls(uid: savedUID, transport: transport, address: targetAddress) {
+                    var volumeProperty = Self.property(kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput)
+                    if AudioObjectHasProperty(output, &volumeProperty) {
+                        let scalar: Float32 = try Self.read(output, selector: kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput, initial: 0)
+                        guard scalar.isFinite, (0...1).contains(scalar) else { throw OutputError("macOS returned an invalid audio volume.", userFacing: String(localized: "macOS could not read the audio volume and mute settings. Check Sound settings and try again.")) }
+                        controls.scalar = scalar
+                        hasInitialVolume = true
+                    }
+                    var property = Self.property(kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput)
+                    if AudioObjectHasProperty(output, &property) {
+                        let mute: UInt32 = try Self.read(output, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, initial: 0)
+                        guard mute <= 1 else { throw OutputError("macOS returned an invalid audio mute state.", userFacing: String(localized: "macOS could not read the audio volume and mute settings. Check Sound settings and try again.")) }
+                        controls.muted = mute == 1
+                    } else {
+                        controls.muted = false
+                    }
                 }
             }
         }
         device = endpoint
         sampleRateHz = Float64(sampleRate.rawValue)
-        try setLease(true)
+        do { try setLease(true) }
+        catch {
+            throw OutputError("macOS could not claim the experimental LDAC output: \(error.localizedDescription)", userFacing: String(localized: "macOS did not make LDAC audio available. Try again."))
+        }
         ownsLease = true
-        guard try leaseIsOwned() else { throw OutputError("Another app owns the experimental LDAC output. Stop that session and retry.", userFacing: String(localized: "Another app is using LDAC audio. Stop its playback and try again.")) }
+        leaseActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "LDAC audio playback")
+        guard try leaseIsOwned() else { throw OutputError("macOS did not confirm ownership of the experimental LDAC output.", userFacing: String(localized: "macOS did not make LDAC audio available. Try again.")) }
         record("lease-owned", reason: "device=\(device) retainedVolume=\(hasInitialVolume) scalar=\(controls.scalar) retainedUserMute=\(controls.muted)")
-        try Self.write(device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(1))
-        try Self.write(device, selector: kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput, value: Float32(0))
+        try Self.write(device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(1), requiringLease: true)
+        try Self.write(device, selector: kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput, value: Float32(0), requiringLease: true)
         try Self.write(device, selector: Self.modelSelector, value: model as CFString)
-        renewTask = Task { [weak self] in
+        renewTask = Task.detached { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(1)) }
                 catch { return }
-                guard let self, self.ownsLease else { return }
+                guard self != nil else { return }
                 do {
-                    guard try self.leaseIsOwned() else { throw OutputError("The experimental LDAC output lost its owner.", userFacing: String(localized: "LDAC audio became unavailable. Try again.")) }
-                    try self.setLease(true)
+                    try Task.checkCancellation()
+                    guard try Self.leaseIsOwned(endpoint) else { throw OutputError("The experimental LDAC output lost its owner.", userFacing: String(localized: "LDAC audio became unavailable. Try again.")) }
+                    try Task.checkCancellation()
+                    try Self.write(endpoint, selector: Self.leaseSelector, value: ["claim": kCFBooleanTrue!] as CFDictionary)
+                } catch is CancellationError {
+                    return
                 } catch {
-                    self.record("lease-failed", reason: error.localizedDescription)
-                    self.changed(.failure(error))
+                    await MainActor.run { [weak self] in
+                        guard let self, self.ownsLease, !self.restoring else { return }
+                        self.record("lease-failed", reason: error.localizedDescription)
+                        self.changed(.failure(error))
+                    }
                     return
                 }
             }
         }
-        let deadline = Date().addingTimeInterval(5)
+        try await clearPreviousPriority()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
         while true {
             try Task.checkCancellation()
             if try Self.isSelectableEndpoint(device) { break }
-            guard Date() < deadline else { throw OutputError("macOS did not make the experimental LDAC output available. Retry LDAC.", userFacing: String(localized: "macOS did not make LDAC audio available. Try again.")) }
+            guard clock.now < deadline else { throw OutputError("macOS did not make the experimental LDAC output available. Retry LDAC.", userFacing: String(localized: "macOS did not make LDAC audio available. Try again.")) }
             try await Task.sleep(for: .milliseconds(100))
         }
         stream = try Self.read(device, selector: kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeOutput, initial: AudioObjectID(0))
@@ -161,10 +218,10 @@ final class LDACNativeOutput {
             }
             try Self.write(device, selector: kAudioDevicePropertyNominalSampleRate, value: sampleRateHz)
         }
-        let formatDeadline = Date().addingTimeInterval(5)
+        let formatDeadline = clock.now.advanced(by: .seconds(5))
         while try !hasSelectedFormat() {
             try Task.checkCancellation()
-            guard Date() < formatDeadline else { throw OutputError(String(localized: "macOS did not confirm the selected LDAC sample rate. Update Acouplet LDAC Output, then retry.")) }
+            guard clock.now < formatDeadline else { throw OutputError(String(localized: "macOS did not confirm the selected LDAC sample rate. Update Acouplet LDAC Output, then retry.")) }
             try await Task.sleep(for: .milliseconds(100))
         }
         record("claim-ready", reason: "device=\(device) visible and eligible")
@@ -185,6 +242,11 @@ final class LDACNativeOutput {
         for selector in Self.defaultSelectors { try listen(Self.system, selector: selector) }
     }
 
+    var routeRecovery: LDACRouteRecovery {
+        LDACRouteRecovery(address: address, model: model, sampleRate: LDACSampleRate(rawValue: Int(sampleRateHz))!,
+                          defaults: savedDefaults, controls: controls, selected: isSelected)
+    }
+
     func configure(volume: Int, range: ClosedRange<Int>, preservingUserChange: Bool = false) throws {
         guard !preservingUserChange || (!userVolumeChanged && !hasInitialVolume) else { return }
         guard controls.update(volume: volume, range: range) else { return }
@@ -194,12 +256,12 @@ final class LDACNativeOutput {
     func priorityControl() throws -> LDACPriorityControl {
         var property = Self.property(Self.prioritySelector)
         guard AudioObjectHasProperty(device, &property) else {
-            throw OutputError("Update the Acouplet LDAC Output driver, then retry LDAC.")
+            throw OutputError("Update the Acouplet LDAC Output driver, then retry LDAC.", userFacing: String(localized: "An LDAC audio driver update is required. Install it, then restart your Mac."))
         }
         var settable = DarwinBoolean(false)
         let status = AudioObjectIsPropertySettable(device, &property, &settable)
         guard status == noErr, settable.boolValue else {
-            throw OutputError("Update the Acouplet LDAC Output driver, then retry LDAC.")
+            throw OutputError("Update the Acouplet LDAC Output driver, then retry LDAC.", userFacing: String(localized: "An LDAC audio driver update is required. Install it, then restart your Mac."))
         }
         let device = device
         let address = address
@@ -219,9 +281,49 @@ final class LDACNativeOutput {
         })
     }
 
+    private func clearPreviousPriority() async throws {
+        let previous = try Self.prioritySnapshot(device)
+        guard previous.state.phase != "idle" else { return }
+        let previousAddress = previous.address!
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(45))
+        var disconnected = false
+        record("priority-cleanup-requested", reason: "phase=\(previous.state.phase)")
+        try Self.write(device, selector: Self.prioritySelector, value: [
+            "address": previousAddress as CFString, "enabled": kCFBooleanFalse!
+        ] as CFDictionary)
+        while true {
+            try Task.checkCancellation()
+            guard try leaseIsOwned() else {
+                throw OutputError("The LDAC output lease ended during previous-session cleanup.", userFacing: String(localized: "LDAC audio became unavailable. Try again."))
+            }
+            let current = try Self.prioritySnapshot(device)
+            if current.state.phase == "idle" { return }
+            guard current.address == previousAddress else {
+                throw OutputError("The Bluetooth priority target changed during cleanup.", userFacing: String(localized: "The LDAC driver reported an audio connection for a different device. Try again."))
+            }
+            if !disconnected, Self.priorityConnectionDisconnected(address: previousAddress) {
+                disconnected = true
+                try Self.write(device, selector: Self.prioritySelector, value: [
+                    "address": previousAddress as CFString, "enabled": kCFBooleanFalse!, "disconnected": kCFBooleanTrue!
+                ] as CFDictionary)
+            }
+            guard clock.now < deadline else {
+                throw LDACPriorityCleanupError(message: String(localized: "LDAC did not stop completely."))
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    private static func priorityConnectionDisconnected(address: String) -> Bool {
+        guard CBManager.authorization == .allowedAlways,
+              let device = IOBluetoothDevice(addressString: address), device.isPaired() else { return false }
+        return !device.isClassicConnected()
+    }
+
     func selectForHandoff() throws {
         try verifyRoute()
-        for selector in Self.defaultSelectors {
+        for selector in handoffSelectors {
             let current: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
             guard try LDACNativeVolume.canHandoff(currentUID: Self.readString(current, selector: kAudioDevicePropertyDeviceUID),
                                                  savedUID: savedDefaults[selector]) else {
@@ -229,9 +331,9 @@ final class LDACNativeOutput {
             }
         }
         isSelected = true
-        for selector in Self.defaultSelectors { try Self.write(Self.system, selector: selector, value: device) }
+        for selector in handoffSelectors { try Self.write(Self.system, selector: selector, value: device) }
         try verifyRoute()
-        record("selected", reason: "silent endpoint is both defaults")
+        record("selected", reason: "silent endpoint selected")
     }
 
     func validateForRecovery() throws {
@@ -250,26 +352,36 @@ final class LDACNativeOutput {
         record("prepared", reason: "scalar=\(controls.scalar) userMuted=\(controls.muted)")
     }
 
-    func silence() {
+    @discardableResult
+    func silence() -> String? {
         ready = false
         if ownsLease {
-            expected.muted = true
-            do { try Self.write(device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(1)) }
-            catch { NSLog("Could not mute LDAC output: %@", error.localizedDescription) }
+            do {
+                try Self.write(device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(1), requiringLease: true)
+                expected.muted = true
+            } catch {
+                NSLog("Could not mute LDAC output: %@", error.localizedDescription)
+                return error.localizedDescription
+            }
         }
+        return nil
     }
 
     func restoreAndRelease(targetDisconnected: Bool = false) async -> String? {
         restoring = true
         record("restoring", reason: "selected=\(isSelected) userMuted=\(controls.muted)")
-        silence()
-        var errors: [String] = []
-        let deadline = Date().addingTimeInterval(8)
-        if ownsLease || isSelected {
-            for selector in Self.defaultSelectors {
+        let silenceError = silence()
+        var errors = [silenceError].compactMap { $0 }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(8))
+        if isSelected {
+            for selector in handoffSelectors {
                 guard let savedUID = savedDefaults[selector] else { continue }
                 do {
                     while true {
+                        guard try leaseIsOwned() else {
+                            throw OutputError("The LDAC output lease ended before route restoration.", userFacing: String(localized: "LDAC audio became unavailable. Try again."))
+                        }
                         let current: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
                         let currentUID = try Self.readString(current, selector: kAudioDevicePropertyDeviceUID)
                         guard LDACNativeVolume.shouldRestore(currentUID: currentUID, savedUID: savedUID) else {
@@ -277,19 +389,17 @@ final class LDACNativeOutput {
                             break
                         }
                         if let restored = try Self.resolve(savedUID), try Self.isAliveOutput(restored) {
-                            if isSelected { try Self.setMute(restored, muted: controls.muted) }
+                            let transport: UInt32 = try Self.read(restored, selector: kAudioDevicePropertyTransportType, initial: 0)
+                            if isSelected, !restoringOwner, Self.canTransferControls(uid: savedUID, transport: transport, address: address) {
+                                try Self.setMute(restored, muted: controls.muted)
+                            }
                             try Self.write(Self.system, selector: selector, value: restored)
                             record("route-restored", reason: "selector=\(selector) savedUID=\(savedUID) userMuted=\(controls.muted)")
                             break
                         }
-                        if targetDisconnected || Date() >= deadline {
-                            if let fallback = try Self.availableFallback() {
-                                try Self.setMute(fallback, muted: true)
-                                try Self.write(Self.system, selector: selector, value: fallback)
-                                record("route-fallback", reason: "selector=\(selector) device=\(fallback) forcedMute=true")
-                                if targetDisconnected { break }
-                            }
-                            errors.append("The previous Mac audio output did not return. Check Sound settings to select it.")
+                        if targetDisconnected || clock.now >= deadline {
+                            if targetDisconnected { break }
+                            errors.append(String(localized: "The previous Mac audio output did not return. Check Sound settings to select it."))
                             break
                         }
                         try await Task.sleep(for: .milliseconds(100))
@@ -309,13 +419,24 @@ final class LDACNativeOutput {
             }
         }
         listeners = []
+        renewTask?.cancel()
+        await renewTask?.value
+        renewTask = nil
         if ownsLease {
             do { try setLease(false); record("lease-released", reason: "native restoration finished") }
             catch { errors.append(error.localizedDescription) }
         }
         ownsLease = false
-        renewTask?.cancel()
-        renewTask = nil
+        if let leaseActivity {
+            ProcessInfo.processInfo.endActivity(leaseActivity)
+            self.leaseActivity = nil
+        }
+        if holdsRouteOwner {
+            do { try Self.routeOwner?.close() }
+            catch { errors.append(error.localizedDescription) }
+            Self.routeOwner = nil
+            holdsRouteOwner = false
+        }
         device = AudioObjectID(kAudioObjectUnknown)
         record("restored", reason: errors.isEmpty ? "complete" : errors.joined(separator: " "))
         return errors.isEmpty ? nil : Array(Set(errors)).sorted().joined(separator: " ")
@@ -323,17 +444,17 @@ final class LDACNativeOutput {
 
     private func applyControls() throws {
         expected = LDACNativeVolume(scalar: controls.scalar, muted: !ready || controls.muted)
-        try Self.write(device, selector: kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput, value: expected.scalar)
-        try Self.write(device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(expected.muted ? 1 : 0))
+        try Self.write(device, selector: kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput, value: expected.scalar, requiringLease: true)
+        try Self.write(device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(expected.muted ? 1 : 0), requiringLease: true)
     }
 
     private func verifyRoute() throws {
         guard try leaseIsOwned(), try Self.isSelectableEndpoint(device) else { throw OutputError("The experimental LDAC output became unavailable.", userFacing: String(localized: "LDAC audio became unavailable. Try again.")) }
         guard try hasSelectedFormat() else { throw OutputError(String(localized: "The Mac audio format changed. LDAC stopped.")) }
         if isSelected {
-            for selector in Self.defaultSelectors {
+            for selector in handoffSelectors {
                 let current: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
-                guard current == device else { throw OutputError("The Mac audio output changed. LDAC stopped.") }
+                guard current == device else { throw OutputError(String(localized: "The Mac audio output changed. LDAC stopped.")) }
             }
         }
     }
@@ -363,7 +484,7 @@ final class LDACNativeOutput {
         }
         let scalar: Float32 = try Self.read(device, selector: kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput, initial: 0)
         let muted: UInt32 = try Self.read(device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, initial: 0)
-        guard scalar.isFinite, (0...1).contains(scalar), muted <= 1 else { throw OutputError("macOS returned invalid LDAC volume controls.") }
+        guard scalar.isFinite, (0...1).contains(scalar), muted <= 1 else { throw OutputError("macOS returned invalid LDAC volume controls.", userFacing: String(localized: "macOS could not read the LDAC audio settings. Try again.")) }
         let actual = LDACNativeVolume(scalar: scalar, muted: muted == 1)
         guard actual != expected else { return }
         guard isSelected else {
@@ -378,12 +499,39 @@ final class LDACNativeOutput {
         changed(.success(controls))
     }
 
+    private static func acquireRouteOwner() throws {
+        guard routeOwner == nil else { throw POSIXError(.EBUSY) }
+        let directory = "/Library/Application Support/Acouplet"
+        var metadata = stat()
+        guard lstat(directory, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFDIR, metadata.st_uid == 0, metadata.st_mode & 0o022 == 0 else {
+            throw POSIXError(.EPERM)
+        }
+        let descriptor = Darwin.open(directory + "/ldac-route-owner.lock", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { if routeOwner == nil { try? handle.close() } }
+        guard fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFREG, metadata.st_uid == 0,
+              metadata.st_mode & 0o022 == 0, metadata.st_nlink == 1 else {
+            throw POSIXError(.EPERM)
+        }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        routeOwner = handle
+    }
+
     private func setLease(_ value: Bool) throws {
-        try Self.write(device, selector: Self.leaseSelector, value: value ? kCFBooleanTrue! : kCFBooleanFalse!)
+        try Self.write(device, selector: Self.leaseSelector, value: ["claim": value ? kCFBooleanTrue! : kCFBooleanFalse!] as CFDictionary)
     }
 
     private func leaseIsOwned() throws -> Bool {
-        let value = try Self.read(device, selector: Self.leaseSelector, initial: Optional<Unmanaged<CFBoolean>>.none)
+        try Self.leaseIsOwned(device)
+    }
+
+    private nonisolated static func leaseIsOwned(_ device: AudioObjectID) throws -> Bool {
+        let value = try read(device, selector: leaseSelector, initial: Optional<Unmanaged<CFBoolean>>.none)
         guard let value else { throw OutputError("macOS could not read the experimental LDAC output owner.", userFacing: String(localized: "macOS could not check whether LDAC audio is available. Try again.")) }
         return CFBooleanGetValue(value.takeRetainedValue())
     }
@@ -413,7 +561,7 @@ final class LDACNativeOutput {
     private static func setMute(_ object: AudioObjectID, muted: Bool) throws {
         var property = property(kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput)
         guard AudioObjectHasProperty(object, &property) else {
-            if muted { throw OutputError("The previous Mac output could not preserve LDAC mute. Select an output in Sound settings before unmuting.") }
+            if muted { throw OutputError("The previous Mac output could not preserve LDAC mute. Select an output in Sound settings before unmuting.", userFacing: String(localized: "macOS could not restore the mute setting on the previous audio output. Check Sound settings before playing audio.")) }
             return
         }
         var settable = DarwinBoolean(false)
@@ -423,12 +571,7 @@ final class LDACNativeOutput {
         }
         try write(object, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(muted ? 1 : 0))
         let actual: UInt32 = try read(object, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, initial: 0)
-        guard actual == (muted ? 1 : 0) else { throw OutputError("macOS did not confirm the restored audio mute state.") }
-    }
-
-    private static func availableFallback() throws -> AudioObjectID? {
-        let outputs = try allDevices().filter { try readString($0, selector: kAudioDevicePropertyDeviceUID) != uid && isAliveOutput($0) }
-        return try outputs.first { try read($0, selector: kAudioDevicePropertyTransportType, initial: UInt32(0)) == kAudioDeviceTransportTypeBuiltIn } ?? outputs.first
+        guard actual == (muted ? 1 : 0) else { throw OutputError("macOS did not confirm the restored audio mute state.", userFacing: String(localized: "macOS could not restore the mute setting on the previous audio output. Check Sound settings before playing audio.")) }
     }
 
     private static func isSelectableEndpoint(_ object: AudioObjectID) throws -> Bool {
@@ -462,18 +605,6 @@ final class LDACNativeOutput {
         return device == kAudioObjectUnknown ? nil : device
     }
 
-    private static func allDevices() throws -> [AudioObjectID] {
-        var property = property(kAudioHardwarePropertyDevices)
-        var size: UInt32 = 0
-        let status = AudioObjectGetPropertyDataSize(system, &property, 0, nil, &size)
-        guard status == noErr, size % UInt32(MemoryLayout<AudioObjectID>.size) == 0 else { throw OutputError("macOS could not list its audio outputs (\(status)).", userFacing: String(localized: "macOS could not list its audio outputs. Check Sound settings and try again.")) }
-        guard size > 0 else { return [] }
-        var devices = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
-        let readStatus = devices.withUnsafeMutableBytes { AudioObjectGetPropertyData(system, &property, 0, nil, &size, $0.baseAddress!) }
-        guard readStatus == noErr else { throw OutputError("macOS could not read its audio outputs (\(readStatus)).", userFacing: String(localized: "macOS could not read its audio outputs. Check Sound settings and try again.")) }
-        return Array(devices.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
-    }
-
     private static func readString(_ object: AudioObjectID, selector: AudioObjectPropertySelector) throws -> String {
         let value = try read(object, selector: selector, initial: Optional<Unmanaged<CFString>>.none)
         guard let value else { throw OutputError("macOS returned no audio output identity.", userFacing: String(localized: "macOS could not identify the audio output. Check Sound settings and try again.")) }
@@ -481,6 +612,14 @@ final class LDACNativeOutput {
     }
 
     private nonisolated static func priorityState(_ object: AudioObjectID, address: String) throws -> LDACPriorityControl.State {
+        let snapshot = try prioritySnapshot(object)
+        if let reportedAddress = snapshot.address, reportedAddress != SonyBLEIdentity.normalizedAddress(address) {
+            throw OutputError("The Acouplet LDAC Output driver reported Bluetooth priority for a different device.", userFacing: String(localized: "The LDAC driver reported an audio connection for a different device. Try again."))
+        }
+        return snapshot.state
+    }
+
+    private nonisolated static func prioritySnapshot(_ object: AudioObjectID) throws -> (state: LDACPriorityControl.State, address: String?) {
         let value = try read(object, selector: prioritySelector, initial: Optional<Unmanaged<CFTypeRef>>.none)
         guard let value else { throw OutputError("The Acouplet LDAC Output driver returned no Bluetooth priority state.", userFacing: String(localized: "The LDAC driver could not confirm the Bluetooth audio setup. Try again.")) }
         let state = value.takeRetainedValue()
@@ -490,11 +629,14 @@ final class LDACNativeOutput {
               ["idle", "observing", "configuring", "configured", "stopping", "cleanup-required"].contains(phase) else {
             throw OutputError("The Acouplet LDAC Output driver returned an invalid Bluetooth priority state.", userFacing: String(localized: "The LDAC driver could not confirm the Bluetooth audio setup. Try again."))
         }
+        var address: String?
         if let reportedAddress = state["address"] {
             guard CFGetTypeID(reportedAddress as CFTypeRef) == CFStringGetTypeID(),
-                  let reportedAddress = reportedAddress as? String, reportedAddress == address else {
-                throw OutputError("The Acouplet LDAC Output driver reported Bluetooth priority for a different device.", userFacing: String(localized: "The LDAC driver reported an audio connection for a different device. Try again."))
+                  let reportedAddress = reportedAddress as? String,
+                  let normalized = SonyBLEIdentity.normalizedAddress(reportedAddress) else {
+                throw OutputError("The Acouplet LDAC Output driver returned an invalid Bluetooth priority device.", userFacing: String(localized: "The LDAC driver could not identify the headphones. Try again."))
             }
+            address = normalized
         } else if phase != "idle" {
             throw OutputError("The Acouplet LDAC Output driver returned no Bluetooth priority device.", userFacing: String(localized: "The LDAC driver could not identify the headphones. Try again."))
         }
@@ -505,7 +647,7 @@ final class LDACNativeOutput {
             }
             error = reportedError
         }
-        return LDACPriorityControl.State(phase: phase, error: error)
+        return (LDACPriorityControl.State(phase: phase, error: error), address)
     }
 
     private nonisolated static func read<T>(_ object: AudioObjectID, selector: AudioObjectPropertySelector,
@@ -519,10 +661,16 @@ final class LDACNativeOutput {
     }
 
     private nonisolated static func write<T>(_ object: AudioObjectID, selector: AudioObjectPropertySelector,
-                                 scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal, value: T) throws {
+                                 scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal, value: T, requiringLease: Bool = false) throws {
         var property = property(selector, scope: scope)
         var value = value
-        let status = withUnsafePointer(to: &value) { AudioObjectSetPropertyData(object, &property, 0, nil, UInt32(MemoryLayout<T>.size), $0) }
+        var qualifier = leaseSelector
+        let status = withUnsafePointer(to: &qualifier) { qualifier in
+            withUnsafePointer(to: &value) { value in
+                AudioObjectSetPropertyData(object, &property, requiringLease ? UInt32(MemoryLayout<AudioObjectPropertySelector>.size) : 0,
+                    requiringLease ? qualifier : nil, UInt32(MemoryLayout<T>.size), value)
+            }
+        }
         guard status == noErr else { throw OutputError("macOS could not update an LDAC output property (\(status)).", userFacing: String(localized: "macOS could not update the LDAC audio settings. Try again.")) }
     }
 

@@ -283,8 +283,6 @@ final class SonyMultipointTests: XCTestCase {
         XCTAssertNil(multipoint.peripheralActionPayload(.connect, address: firstAddress))
         XCTAssertNil(multipoint.peripheralActionPayload(.disconnect, address: pairedAddress))
         XCTAssertNil(multipoint.peripheralActionPayload(.unpair, address: "00:00:00:00:00:00"))
-        XCTAssertEqual(multipoint.pairingModeSetPayload(true), [0x34, 2, 1, 0])
-        XCTAssertEqual(multipoint.pairingModeSetPayload(false), [0x34, 2, 0, 0])
         XCTAssertEqual(multipoint, prior)
         XCTAssertTrue(multipoint.update([0x35, 2, 1, 0]))
         XCTAssertEqual(multipoint.pairingMode, true)

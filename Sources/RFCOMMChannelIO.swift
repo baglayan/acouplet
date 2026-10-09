@@ -1,13 +1,23 @@
 import Foundation
 @preconcurrency import IOBluetooth
 
+protocol RFCOMMChannel: AnyObject {
+    func isOpen() -> Bool
+    func getMTU() -> BluetoothRFCOMMMTU
+    func writeSync(_ data: UnsafeMutableRawPointer!, length: UInt16) -> IOReturn
+    func setDelegate(_ delegate: Any!) -> IOReturn
+    func close() -> IOReturn
+}
+
+extension IOBluetoothRFCOMMChannel: RFCOMMChannel {}
+
 final class RFCOMMChannelIO: @unchecked Sendable {
-    private let channel: IOBluetoothRFCOMMChannel
+    private var channel: (any RFCOMMChannel)?
     private let writeQueue = DispatchQueue(label: "dev.baglayan.Acouplet.rfcomm-write", qos: .utility)
     private let lock = NSLock()
     private var retired = false
 
-    init(channel: IOBluetoothRFCOMMChannel) {
+    init(channel: any RFCOMMChannel) {
         self.channel = channel
     }
 
@@ -25,7 +35,7 @@ final class RFCOMMChannelIO: @unchecked Sendable {
             }
             var buffer = data
             let result = buffer.withUnsafeMutableBytes {
-                self.channel.writeSync($0.baseAddress, length: UInt16($0.count))
+                self.channel!.writeSync($0.baseAddress, length: UInt16($0.count))
             }
             DispatchQueue.main.async { completion(result) }
         }
@@ -40,9 +50,10 @@ final class RFCOMMChannelIO: @unchecked Sendable {
         }
         guard !alreadyRetired else { return }
         DispatchQueue.global(qos: .utility).async {
-            self.channel.setDelegate(nil)
-            self.channel.close()
+            self.channel!.setDelegate(nil)
+            self.channel!.close()
             self.writeQueue.async {
+                self.channel = nil
                 DispatchQueue.main.async { completion() }
             }
         }

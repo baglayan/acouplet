@@ -26,8 +26,10 @@ struct SonyNativeBatteryPublication: Equatable, Codable {
     let address: String
     let identifier: UUID
     let controlSession: UInt64
+    let name: String
     let left: Part
     let right: Part
+    var caseBattery: Part?
 
     var identity: Identity { Identity(address: address, identifier: identifier, controlSession: controlSession) }
     var expiresAt: Date { Date(timeIntervalSince1970: min(left.observedAt, right.observedAt) + 45) }
@@ -40,12 +42,52 @@ struct SonyNativeBatteryPublication: Equatable, Codable {
         self.address = address
         identifier = snapshot.identifier
         self.controlSession = controlSession
+        name = snapshot.name
         self.left = Part(left)
         self.right = Part(right)
+        caseBattery = snapshot.caseBattery.flatMap { $0.isFresh(at: date) ? Part($0) : nil }
     }
 
     func canReplace(_ previous: Self) -> Bool {
-        identity == previous.identity && left.observedAt > previous.left.observedAt && right.observedAt > previous.right.observedAt
+        let samePair = left == previous.left && right == previous.right
+        let newerPair = left.observedAt > previous.left.observedAt && right.observedAt > previous.right.observedAt
+        let validCase = caseBattery == previous.caseBattery
+            || (caseBattery.map { $0.observedAt > (previous.caseBattery?.observedAt ?? -.infinity) } ?? true)
+        return identity == previous.identity && (samePair || newerPair) && validCase
+            && (!samePair || caseBattery != previous.caseBattery)
+    }
+
+    func withdrawingExpiredCase(at date: Date) -> Self {
+        var value = self
+        if let caseBattery, date.timeIntervalSince1970 >= caseBattery.observedAt + 45 { value.caseBattery = nil }
+        return value
+    }
+}
+
+struct SonyNativeCaseBatteryPublication: Equatable, Codable {
+    let address: String
+    let identifier: UUID
+    let controlSession: UInt64
+    let name: String
+    let caseBattery: SonyNativeBatteryPublication.Part
+
+    var identity: SonyNativeBatteryPublication.Identity {
+        SonyNativeBatteryPublication.Identity(address: address, identifier: identifier, controlSession: controlSession)
+    }
+    var expiresAt: Date { Date(timeIntervalSince1970: caseBattery.observedAt + 45) }
+
+    init?(address: String, controlSession: UInt64, snapshot: SonyNativeBatterySnapshot, at date: Date) {
+        guard let address = SonyBLEIdentity.normalizedAddress(address),
+              let caseBattery = snapshot.caseBattery, caseBattery.isFresh(at: date) else { return nil }
+        self.address = address
+        identifier = snapshot.identifier
+        self.controlSession = controlSession
+        name = snapshot.name
+        self.caseBattery = SonyNativeBatteryPublication.Part(caseBattery)
+    }
+
+    func canReplace(_ previous: Self) -> Bool {
+        identity == previous.identity && caseBattery.observedAt > previous.caseBattery.observedAt
     }
 }
 
@@ -59,6 +101,7 @@ final class SonyNativeBatteryPublisher {
         var didExitSuccessfully: () -> Bool = { false }
         var didWithdrawAfterNativeDisconnect: () -> Bool = { false }
         var exitStatus: () -> Int32? = { nil }
+        var didWithdrawAfterLeaseExpiry: () -> Bool = { false }
     }
 
     private struct Session {
@@ -71,6 +114,8 @@ final class SonyNativeBatteryPublisher {
         var acknowledgmentDeadline: Date?
         var acknowledgmentExpiry: AnyCancellable?
         var expiry: AnyCancellable?
+        var caseExpiry: AnyCancellable?
+        var lastCaseObservation: TimeInterval?
         var output = Data()
     }
 
@@ -90,44 +135,107 @@ final class SonyNativeBatteryPublisher {
         let update: UInt64
     }
 
+    private struct CaseSession {
+        let connection: Connection
+        let attempt: Int
+        var publication: SonyNativeCaseBatteryPublication
+        var pending: SonyNativeCaseBatteryPublication?
+        var queued: SonyNativeCaseBatteryPublication?
+        var update: UInt64 = 0
+        var expiry: AnyCancellable?
+        var acknowledgmentExpiry: AnyCancellable?
+        var acknowledgmentDeadline: Date?
+        var output = Data()
+        var closing = false
+        var outputComplete = false
+        var protocolFailed = false
+        var resumeAfterWithdrawal = false
+        var allowPrerequisiteRetry = true
+    }
+
+    private struct CaseAttempt {
+        let publication: SonyNativeCaseBatteryPublication
+        let date: Date
+        let count: Int
+        var successful = false
+        var retry = false
+        var resumeAfterWithdrawal = false
+    }
+
+    private struct CaseAcknowledgment: Decodable {
+        let sample: SonyNativeCaseBatteryPublication
+        let update: UInt64
+    }
+
+    private let launchCase: (SonyNativeCaseBatteryPublication, @escaping @MainActor @Sendable (Data) -> Void) throws -> Connection
+    private var caseSessions: [String: CaseSession] = [:]
+    private var caseAttempts: [String: CaseAttempt] = [:]
     private let launch: (SonyNativeBatteryPublication, @escaping @MainActor @Sendable (Data) -> Void) throws -> Connection
     private let schedule: @MainActor (Date, @escaping @MainActor () -> Void) -> AnyCancellable
     private let now: () -> Date
     private var sessions: [String: Session] = [:]
-    private var closing: [String: (connection: Connection, publication: SonyNativeBatteryPublication, date: Date, retry: Bool, resumeAfterWithdrawal: Bool, attempt: Int, output: Data, outputComplete: Bool, protocolFailed: Bool)] = [:]
+    private var closing: [String: (connection: Connection, publication: SonyNativeBatteryPublication, date: Date, retry: Bool, resumeAfterWithdrawal: Bool, attempt: Int, output: Data, outputComplete: Bool, protocolFailed: Bool, allowLeaseExpiryResume: Bool)] = [:]
     private var attempts: [String: Attempt] = [:]
     private var isStopped = false
+    private static let maximumSubmissionAge: TimeInterval = 18
+    private static let minimumSubmissionLifetime = 45 - maximumSubmissionAge
     private static let logger = Logger(subsystem: "dev.baglayan.Acouplet", category: "NativeBatteryPublisher")
 
     var ownedAddresses: Set<String> { Set(sessions.keys) }
+    var ownedCaseAddresses: Set<String> { Set(caseSessions.filter { !$0.value.closing }.keys) }
 
     init(now: @escaping () -> Date = Date.init,
          schedule: @escaping @MainActor (Date, @escaping @MainActor () -> Void) -> AnyCancellable = SonyNativeBatteryPublisher.scheduleExpiry,
+         launchCase: @escaping (SonyNativeCaseBatteryPublication, @escaping @MainActor @Sendable (Data) -> Void) throws -> Connection,
          launch: @escaping (SonyNativeBatteryPublication, @escaping @MainActor @Sendable (Data) -> Void) throws -> Connection) {
         self.now = now
         self.schedule = schedule
         self.launch = launch
+        self.launchCase = launchCase
     }
 
     convenience init(executableURL: URL) {
-        self.init { publication, receive in
+        self.init(launchCase: { publication, receive in
             let pipe = try SonyNativeBatteryPipe(executableURL: executableURL,
-                arguments: ["--publish", publication.identifier.uuidString, UUID().uuidString], receive: receive)
+                arguments: ["--case", publication.identifier.uuidString, UUID().uuidString], receive: receive)
             return Connection(send: pipe.send, close: pipe.close, isRunning: { pipe.process.isRunning }, didExitWithoutPublishing: {
                 !pipe.process.isRunning && pipe.process.terminationReason == .exit && pipe.process.terminationStatus == 75
             }, didExitSuccessfully: {
                 !pipe.process.isRunning && pipe.process.terminationReason == .exit && [0, 76].contains(pipe.process.terminationStatus)
             }, didWithdrawAfterNativeDisconnect: {
                 !pipe.process.isRunning && pipe.process.terminationReason == .exit && pipe.process.terminationStatus == 76
+            }, exitStatus: { pipe.process.isRunning ? nil : pipe.process.terminationStatus })
+        }) { publication, receive in
+            let pipe = try SonyNativeBatteryPipe(executableURL: executableURL,
+                arguments: ["--publish", publication.identifier.uuidString, UUID().uuidString], receive: receive)
+            return Connection(send: pipe.send, close: pipe.close, isRunning: { pipe.process.isRunning }, didExitWithoutPublishing: {
+                !pipe.process.isRunning && pipe.process.terminationReason == .exit && pipe.process.terminationStatus == 75
+            }, didExitSuccessfully: {
+                !pipe.process.isRunning && pipe.process.terminationReason == .exit && [0, 76, 78].contains(pipe.process.terminationStatus)
+            }, didWithdrawAfterNativeDisconnect: {
+                !pipe.process.isRunning && pipe.process.terminationReason == .exit && pipe.process.terminationStatus == 76
             }, exitStatus: {
                 pipe.process.isRunning ? nil : pipe.process.terminationStatus
+            }, didWithdrawAfterLeaseExpiry: {
+                !pipe.process.isRunning && pipe.process.terminationReason == .exit && pipe.process.terminationStatus == 78
             })
         }
     }
 
-    func reconcile(_ publications: [SonyNativeBatteryPublication]) {
+    func reconcile(_ publications: [SonyNativeBatteryPublication], cases: [SonyNativeCaseBatteryPublication] = []) {
         let date = now()
+        let publications = publications.map { publication in
+            var value = publication.withdrawingExpiredCase(at: date)
+            let session = sessions[value.address]
+            let latest = session?.queued ?? session?.pending ?? session?.publication
+            if let caseBattery = value.caseBattery, caseBattery != latest?.caseBattery,
+               date.timeIntervalSince1970 - caseBattery.observedAt > Self.maximumSubmissionAge {
+                value.caseBattery = latest?.identity == value.identity ? latest?.withdrawingExpiredCase(at: date).caseBattery : nil
+            }
+            return value
+        }
         guard !isStopped else { return }
+        reconcileCases(cases, at: date)
         let current = Dictionary(uniqueKeysWithValues: publications.map { ($0.address, $0) })
         for address in Array(sessions.keys) {
             guard let session = sessions[address] else { continue }
@@ -140,7 +248,7 @@ final class SonyNativeBatteryPublisher {
                 close(address, retryIfUnpublished: true)
                 continue
             }
-            guard let publication = current[address] else {
+            guard var publication = current[address] else {
                 close(address, resumeAfterWithdrawal: true)
                 continue
             }
@@ -153,8 +261,14 @@ final class SonyNativeBatteryPublisher {
                 continue
             }
             let latest = session.queued ?? session.pending ?? session.publication
-            if publication == latest { continue }
+            if publication.identity == latest.identity, publication.left == latest.left, publication.right == latest.right, publication.caseBattery == latest.caseBattery { continue }
+            if let caseBattery = publication.caseBattery, caseBattery != latest.caseBattery,
+               caseBattery.observedAt <= (session.lastCaseObservation ?? -.infinity) {
+                publication.caseBattery = latest.caseBattery
+            }
+            if publication.left == latest.left, publication.right == latest.right, publication.caseBattery == latest.caseBattery { continue }
             guard publication.canReplace(latest) else { close(address); continue }
+            if let caseBattery = publication.caseBattery { sessions[address]?.lastCaseObservation = caseBattery.observedAt }
             if session.pending != nil {
                 sessions[address]?.queued = publication
             } else {
@@ -166,18 +280,20 @@ final class SonyNativeBatteryPublisher {
             let disconnected = retired.connection.didWithdrawAfterNativeDisconnect()
             let successful = !retired.protocolFailed && retired.connection.didExitSuccessfully()
                 && (!disconnected || retired.retry || retired.resumeAfterWithdrawal)
-            if disconnected && successful, let previous = attempts[address] {
+            let expiredLease = retired.allowLeaseExpiryResume && retired.connection.didWithdrawAfterLeaseExpiry()
+            if (disconnected || expiredLease) && successful, let previous = attempts[address] {
                 attempts[address] = Attempt(publication: retired.publication, date: retired.date, count: previous.count)
             }
             attempts[address]?.retry = !retired.protocolFailed && retired.retry && retired.connection.didExitWithoutPublishing()
             attempts[address]?.exitedSuccessfully = successful
             attempts[address]?.withdrewAfterNativeDisconnect = disconnected && successful
-            attempts[address]?.resumeAfterWithdrawal = (retired.resumeAfterWithdrawal || (retired.retry && disconnected)) && successful
+            attempts[address]?.resumeAfterWithdrawal = (retired.resumeAfterWithdrawal || (retired.retry && disconnected)
+                || expiredLease) && successful
             Self.logger.info("Native battery helper retired: status=\(retired.connection.exitStatus() ?? -1, privacy: .public) successful=\(successful, privacy: .public) protocolFailed=\(retired.protocolFailed, privacy: .public) disconnected=\(disconnected, privacy: .public) resume=\(self.attempts[address]?.resumeAfterWithdrawal == true, privacy: .public)")
             closing.removeValue(forKey: address)
         }
         for publication in publications where sessions[publication.address] == nil && closing[publication.address] == nil {
-            guard publication.expiresAt.timeIntervalSince(date) >= 25 else { continue }
+            guard publication.expiresAt.timeIntervalSince(date) >= Self.minimumSubmissionLifetime else { continue }
             let previous = attempts[publication.address]
             if let previous, previous.resumeAfterWithdrawal || previous.publication.identity == publication.identity || !previous.exitedSuccessfully {
                 guard previous.resumeAfterWithdrawal || (previous.retry && previous.retryCount < 3),
@@ -192,7 +308,7 @@ final class SonyNativeBatteryPublisher {
                 let connection = try launch(publication) { [weak self] data in
                     self?.receive(data, identity: publication.identity, attempt: attempt)
                 }
-                sessions[publication.address] = Session(connection: connection, attempt: attempt, publication: publication)
+                sessions[publication.address] = Session(connection: connection, attempt: attempt, publication: publication, lastCaseObservation: publication.caseBattery?.observedAt)
                 setExpiry(publication)
                 send(publication)
             } catch {
@@ -202,10 +318,20 @@ final class SonyNativeBatteryPublisher {
     }
 
     func revoke() {
+        for address in Array(caseSessions.keys) { closeCase(address) }
+        for address in Array(caseSessions.keys) {
+            caseSessions[address]?.resumeAfterWithdrawal = false
+            caseSessions[address]?.allowPrerequisiteRetry = false
+        }
+        for address in Array(caseAttempts.keys) {
+            caseAttempts[address]?.resumeAfterWithdrawal = false
+            caseAttempts[address]?.retry = false
+        }
         for address in Array(sessions.keys) { close(address) }
         for address in Array(closing.keys) {
             closing[address]?.retry = false
             closing[address]?.resumeAfterWithdrawal = false
+            closing[address]?.allowLeaseExpiryResume = false
         }
         for address in Array(attempts.keys) {
             if attempts[address]?.withdrewAfterNativeDisconnect == true { attempts[address]?.exitedSuccessfully = false }
@@ -220,9 +346,19 @@ final class SonyNativeBatteryPublisher {
     }
 
     private func send(_ publication: SonyNativeBatteryPublication) {
+        var publication = publication
         let address = publication.address, date = now()
-        guard let session = sessions[address], session.publication.expiresAt > date,
-              publication.expiresAt.timeIntervalSince(date) >= 25 else { close(address); return }
+        guard let session = sessions[address], session.publication.expiresAt > date else { close(address); return }
+        guard (session.update > 0 && publication.left == session.publication.left && publication.right == session.publication.right)
+            || publication.expiresAt.timeIntervalSince(date) >= Self.minimumSubmissionLifetime else {
+            if session.update == 0 { close(address, retryIfUnpublished: true) }
+            return
+        }
+        if let caseBattery = publication.caseBattery, caseBattery != session.publication.caseBattery,
+           date.timeIntervalSince1970 - caseBattery.observedAt > Self.maximumSubmissionAge {
+            publication.caseBattery = session.publication.withdrawingExpiredCase(at: date).caseBattery
+            if publication == session.publication { return }
+        }
         do {
             var data = try JSONEncoder().encode(publication)
             data.append(0x0A)
@@ -278,8 +414,9 @@ final class SonyNativeBatteryPublisher {
             logHelperEvent(object)
             guard object["event"] as? String == "refresh-completed" else { continue }
             guard let sample = object["sample"] as? [String: Any],
-                  Set(sample.keys) == ["address", "identifier", "controlSession", "left", "right"],
-                  ["left", "right"].allSatisfy({ key in
+                  Set(sample.keys) == Set(["address", "identifier", "controlSession", "name", "left", "right"]
+                    + (sample["caseBattery"] == nil ? [] : ["caseBattery"])),
+                  (["left", "right"] + (sample["caseBattery"] == nil ? [] : ["caseBattery"])).allSatisfy({ key in
                       guard let part = sample[key] as? [String: Any] else { return false }
                       return Set(part.keys) == ["level", "isCharging", "observedAt"]
                   }),
@@ -317,15 +454,27 @@ final class SonyNativeBatteryPublisher {
 
     private func setExpiry(_ publication: SonyNativeBatteryPublication) {
         sessions[publication.address]?.expiry?.cancel()
+        sessions[publication.address]?.caseExpiry?.cancel()
         sessions[publication.address]?.expiry = schedule(publication.expiresAt) { [weak self] in
             guard let self, self.sessions[publication.address]?.publication == publication else { return }
             self.close(publication.address)
+        }
+        if let caseBattery = publication.caseBattery {
+            sessions[publication.address]?.caseExpiry = schedule(Date(timeIntervalSince1970: caseBattery.observedAt + 45)) { [weak self] in
+                guard let self, let session = self.sessions[publication.address] else { return }
+                let latest = session.queued ?? session.pending ?? session.publication
+                let next = latest.withdrawingExpiredCase(at: self.now())
+                guard next != latest else { return }
+                if session.pending != nil { self.sessions[publication.address]?.queued = next }
+                else { self.send(next) }
+            }
         }
     }
 
     private func close(_ address: String, retryIfUnpublished: Bool = false, resumeAfterWithdrawal: Bool = false, outputComplete: Bool = false, protocolFailed: Bool = false) {
         guard let session = sessions.removeValue(forKey: address) else { return }
         session.expiry?.cancel()
+        session.caseExpiry?.cancel()
         session.acknowledgmentExpiry?.cancel()
         session.connection.close()
         if resumeAfterWithdrawal {
@@ -334,7 +483,150 @@ final class SonyNativeBatteryPublisher {
         }
         let classification = resumeAfterWithdrawal ? "intentional-withdrawal" : retryIfUnpublished ? "process-exit" : "failure"
         Self.logger.info("Native battery closing: classification=\(classification, privacy: .public)")
-        closing[address] = (session.connection, session.queued ?? session.pending ?? session.publication, now(), retryIfUnpublished, resumeAfterWithdrawal, session.attempt, session.output, outputComplete, protocolFailed)
+        closing[address] = (session.connection, session.queued ?? session.pending ?? session.publication, now(), retryIfUnpublished, resumeAfterWithdrawal, session.attempt, session.output, outputComplete, protocolFailed, true)
+    }
+
+    private func reconcileCases(_ publications: [SonyNativeCaseBatteryPublication], at date: Date) {
+        let current = Dictionary(uniqueKeysWithValues: publications.map { ($0.address, $0) })
+        for address in Array(caseSessions.keys) {
+            guard let session = caseSessions[address] else { continue }
+            if session.closing {
+                guard !session.connection.isRunning(), session.outputComplete else { continue }
+                caseAttempts[address]?.successful = !session.protocolFailed && session.connection.didExitSuccessfully()
+                caseAttempts[address]?.retry = !session.protocolFailed && session.allowPrerequisiteRetry && session.connection.didExitWithoutPublishing()
+                caseAttempts[address]?.resumeAfterWithdrawal = session.resumeAfterWithdrawal
+                caseSessions.removeValue(forKey: address)
+                continue
+            }
+            guard session.publication.expiresAt > date else { closeCase(address, resumeAfterWithdrawal: true); continue }
+            guard session.acknowledgmentDeadline.map({ date < $0 }) ?? true else { closeCase(address); continue }
+            guard session.connection.isRunning() else {
+                closeCase(address, resumeAfterWithdrawal: session.connection.didExitWithoutPublishing()
+                    || session.connection.didWithdrawAfterNativeDisconnect())
+                continue
+            }
+            guard let publication = current[address], publication.identity == session.publication.identity else {
+                closeCase(address, resumeAfterWithdrawal: true)
+                continue
+            }
+            let latest = session.queued ?? session.pending ?? session.publication
+            if publication.identity == latest.identity, publication.caseBattery == latest.caseBattery { continue }
+            guard publication.canReplace(latest) else { closeCase(address); continue }
+            if session.pending != nil { caseSessions[address]?.queued = publication }
+            else { sendCase(publication) }
+        }
+        for publication in publications where caseSessions[publication.address] == nil {
+            guard publication.expiresAt.timeIntervalSince(date) >= Self.minimumSubmissionLifetime else { continue }
+            let previous = caseAttempts[publication.address]
+            if let previous {
+                guard previous.successful || previous.retry,
+                      previous.retry || previous.resumeAfterWithdrawal || previous.publication.identity != publication.identity,
+                      date.timeIntervalSince(previous.date) >= 15,
+                      publication.caseBattery.observedAt > previous.publication.caseBattery.observedAt else { continue }
+            }
+            let attempt = (previous?.count ?? 0) + 1
+            caseAttempts[publication.address] = CaseAttempt(publication: publication, date: date, count: attempt)
+            do {
+                let connection = try launchCase(publication) { [weak self] data in
+                    self?.receiveCase(data, identity: publication.identity, attempt: attempt)
+                }
+                caseSessions[publication.address] = CaseSession(connection: connection, attempt: attempt, publication: publication)
+                setCaseExpiry(publication)
+                sendCase(publication)
+            } catch {
+                Self.logger.error("Native Case battery launch failed: \(error.localizedDescription, privacy: .private)")
+            }
+        }
+    }
+
+    private func sendCase(_ publication: SonyNativeCaseBatteryPublication) {
+        let address = publication.address, date = now()
+        guard let session = caseSessions[address], !session.closing, session.publication.expiresAt > date else { closeCase(address); return }
+        guard publication.expiresAt.timeIntervalSince(date) >= Self.minimumSubmissionLifetime else {
+            if session.update == 0 { closeCase(address) }
+            return
+        }
+        do {
+            var data = try JSONEncoder().encode(publication)
+            data.append(0x0A)
+            let deadline = min(date.addingTimeInterval(10), session.publication.expiresAt)
+            caseSessions[address]?.pending = publication
+            caseSessions[address]?.update += 1
+            caseSessions[address]?.acknowledgmentDeadline = deadline
+            caseSessions[address]?.acknowledgmentExpiry = schedule(deadline) { [weak self] in
+                guard let self, self.caseSessions[address]?.pending == publication else { return }
+                self.closeCase(address)
+            }
+            try session.connection.send(data)
+        } catch { closeCase(address) }
+    }
+
+    private func receiveCase(_ data: Data, identity: SonyNativeBatteryPublication.Identity, attempt: Int) {
+        let address = identity.address
+        guard let session = caseSessions[address], session.publication.identity == identity, session.attempt == attempt else { return }
+        if data.isEmpty {
+            closeCase(address, resumeAfterWithdrawal: session.connection.didExitWithoutPublishing()
+                || session.connection.didWithdrawAfterNativeDisconnect() || (session.publication.expiresAt <= now() && session.pending == nil))
+            caseSessions[address]?.outputComplete = true
+            if !session.output.isEmpty { caseSessions[address]?.protocolFailed = true }
+            return
+        }
+        caseSessions[address]?.output.append(data)
+        while let newline = caseSessions[address]?.output.firstIndex(of: 0x0A) {
+            guard let line = caseSessions[address]?.output.prefix(upTo: newline), line.count <= 8192,
+                  let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else {
+                closeCase(address, protocolFailed: true)
+                return
+            }
+            caseSessions[address]?.output.removeSubrange(...newline)
+            guard let session = caseSessions[address], !session.closing,
+                  object["event"] as? String == "refresh-completed" else { continue }
+            guard let sample = object["sample"] as? [String: Any],
+                  Set(sample.keys) == ["address", "identifier", "controlSession", "name", "caseBattery"],
+                  let part = sample["caseBattery"] as? [String: Any], Set(part.keys) == ["level", "isCharging", "observedAt"],
+                  let acknowledgment = try? JSONDecoder().decode(CaseAcknowledgment.self, from: Data(line)),
+                  let pending = session.pending, acknowledgment.sample == pending, acknowledgment.update == session.update,
+                  let deadline = session.acknowledgmentDeadline, now() < deadline,
+                  now() < session.publication.expiresAt else {
+                closeCase(address, protocolFailed: true)
+                return
+            }
+            guard session.connection.isRunning() else {
+                closeCase(address, resumeAfterWithdrawal: session.connection.didWithdrawAfterNativeDisconnect()
+                    || session.connection.didExitWithoutPublishing())
+                continue
+            }
+            session.acknowledgmentExpiry?.cancel()
+            caseSessions[address]?.acknowledgmentExpiry = nil
+            caseSessions[address]?.acknowledgmentDeadline = nil
+            caseSessions[address]?.publication = pending
+            caseSessions[address]?.pending = nil
+            caseSessions[address]?.queued = nil
+            setCaseExpiry(pending)
+            if let queued = session.queued { sendCase(queued) }
+        }
+        if let count = caseSessions[address]?.output.count, count > 8192 { closeCase(address, protocolFailed: true) }
+    }
+
+    private func setCaseExpiry(_ publication: SonyNativeCaseBatteryPublication) {
+        caseSessions[publication.address]?.expiry?.cancel()
+        caseSessions[publication.address]?.expiry = schedule(publication.expiresAt) { [weak self] in
+            guard let self, self.caseSessions[publication.address]?.publication == publication else { return }
+            self.closeCase(publication.address, resumeAfterWithdrawal: true)
+        }
+    }
+
+    private func closeCase(_ address: String, resumeAfterWithdrawal: Bool = false, protocolFailed: Bool = false) {
+        guard let session = caseSessions[address] else { return }
+        if protocolFailed { caseSessions[address]?.protocolFailed = true }
+        guard !session.closing else { return }
+        session.expiry?.cancel()
+        session.acknowledgmentExpiry?.cancel()
+        caseSessions[address]?.closing = true
+        caseSessions[address]?.resumeAfterWithdrawal = resumeAfterWithdrawal
+        caseAttempts[address] = CaseAttempt(publication: session.queued ?? session.pending ?? session.publication,
+            date: now(), count: session.attempt)
+        session.connection.close()
     }
 
     private static func scheduleExpiry(_ date: Date, action: @escaping @MainActor () -> Void) -> AnyCancellable {

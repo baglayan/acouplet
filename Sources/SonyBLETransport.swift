@@ -52,8 +52,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
     private static let lengthUUID = CBUUID(string: "5B833C91-6BC7-4802-8E9A-723CECA4BD8F")
     private var manager: CBCentralManager?
     private var peripheral: CBPeripheral?
-    private var expectedHash: String?
-    private var preferredIdentifier: UUID?
+    private var connectionTarget: SonyBLEIdentity.ConnectionTarget?
     private var expectedModel: SonyDeviceModel = .unknown
     private var deviceName: String?
     private var candidates: [UUID: (CBPeripheral, String)] = [:]
@@ -102,12 +101,11 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
         waitForConnection && isWaitingForConnection ? nil : .seconds(20)
     }
 
-    func start(model: SonyDeviceModel, identityHash: String, preferredIdentifier: UUID? = nil) {
+    func start(model: SonyDeviceModel, target: SonyBLEIdentity.ConnectionTarget) {
         stop()
         diagnosticError = nil
-        expectedHash = identityHash
         expectedModel = model
-        self.preferredIdentifier = preferredIdentifier
+        connectionTarget = target
         sessionID = UUID()
         manager = CBCentralManager(delegate: self, queue: .main, options: [CBCentralManagerOptionShowPowerAlertKey: false])
         scheduleSetupTimeout()
@@ -141,8 +139,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
         manager?.delegate = nil
         manager = nil
         peripheral = nil
-        expectedHash = nil
-        preferredIdentifier = nil
+        connectionTarget = nil
         deviceName = nil
         candidates.removeAll()
         writeCharacteristic = nil
@@ -172,7 +169,7 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
         switch central.state {
         case .poweredOn:
             guard peripheral == nil, !central.isScanning else { return }
-            if let preferredIdentifier,
+            if let preferredIdentifier = connectionTarget?.peripheralIdentifier,
                let target = central.retrievePeripherals(withIdentifiers: [preferredIdentifier]).first {
                 connect(target, name: target.name, central: central)
                 return
@@ -192,7 +189,13 @@ final class SonyBLETransport: NSObject, @preconcurrency CBCentralManagerDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover target: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        guard central === manager, peripheral == nil,
+        guard central === manager, peripheral == nil, let connectionTarget else { return }
+        if case .paired(let identifier) = connectionTarget {
+            guard target.identifier == identifier else { return }
+            connect(target, name: target.name, central: central)
+            return
+        }
+        guard case .verified(let expectedHash, _) = connectionTarget,
               let data = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
               let advertisement = SonyBLEIdentity.advertisement(from: data),
               advertisement.supportsGATT, advertisement.hash == expectedHash,

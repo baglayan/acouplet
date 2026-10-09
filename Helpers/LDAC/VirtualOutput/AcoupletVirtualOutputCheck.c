@@ -15,10 +15,19 @@ static atomic_bool rejectRequest;
 static AudioServerPlugInDriverRef driver;
 static pid_t owner;
 static atomic_uint timerWakeups;
+static atomic_int deniedClient;
+static atomic_uint authenticationChecks;
+
+static Boolean AuthenticateClient(pid_t client) {
+    atomic_fetch_add(&authenticationChecks, 1);
+    assert(pthread_mutex_lock(&gPlugIn_StateMutex) == 0);
+    pthread_mutex_unlock(&gPlugIn_StateMutex);
+    return client != atomic_load(&deniedClient) && (client == owner || client == owner + 1);
+}
 
 static OSStatus Changed(AudioServerPlugInHostRef host, AudioObjectID object, UInt32 count,
                          const AudioObjectPropertyAddress *properties) {
-    assert(pthread_mutex_trylock(&gPlugIn_StateMutex) == 0);
+    assert(pthread_mutex_lock(&gPlugIn_StateMutex) == 0);
     pthread_mutex_unlock(&gPlugIn_StateMutex);
     if (object == kObjectID_Device) {
         for (UInt32 i = 0; i < count; ++i) {
@@ -38,7 +47,7 @@ static OSStatus Changed(AudioServerPlugInHostRef host, AudioObjectID object, UIn
 
 static OSStatus Request(AudioServerPlugInHostRef host, AudioObjectID object, UInt64 action, void *info) {
     assert(object == kObjectID_Device && action && info == NULL);
-    assert(pthread_mutex_trylock(&gPlugIn_StateMutex) == 0);
+    assert(pthread_mutex_lock(&gPlugIn_StateMutex) == 0);
     pthread_mutex_unlock(&gPlugIn_StateMutex);
     atomic_store(&requestedAction, action);
     dispatch_semaphore_signal(requested);
@@ -82,10 +91,48 @@ static Boolean Lease(pid_t client) {
     return leased;
 }
 
+static OSStatus RequestLease(pid_t client, Boolean claim) {
+    const void *key = CFSTR("claim");
+    const void *value = claim ? kCFBooleanTrue : kCFBooleanFalse;
+    CFDictionaryRef request = CFDictionaryCreate(NULL, &key, &value, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    OSStatus status = Set(kObjectID_Device, client, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
+        sizeof(request), &request);
+    CFRelease(request);
+    return status;
+}
+
 static void SetLease(pid_t client, Boolean claim) {
-    CFBooleanRef value = claim ? kCFBooleanTrue : kCFBooleanFalse;
-    assert(Set(kObjectID_Device, client, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
-               sizeof(value), &value) == noErr);
+    assert(RequestLease(client, claim) == noErr);
+}
+
+static void CheckLeaseProtocol(void) {
+    pid_t previousOwner = gLeaseOwner;
+    UInt64 deadline = gLeaseDeadline;
+    UInt64 generation = gLeaseGeneration;
+    CFBooleanRef values[] = {kCFBooleanTrue, kCFBooleanFalse};
+    for (UInt32 i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+        assert(Set(kObjectID_Device, owner, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
+            sizeof(values[i]), &values[i]) == kAudioHardwareIllegalOperationError);
+        assert(gLeaseOwner == previousOwner && gLeaseDeadline == deadline && gLeaseGeneration == generation);
+    }
+    CFMutableDictionaryRef request = CFDictionaryCreateMutable(NULL, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    assert(Set(kObjectID_Device, owner, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
+        sizeof(request), &request) == kAudioHardwareIllegalOperationError);
+    CFDictionarySetValue(request, CFSTR("claim"), CFSTR("true"));
+    assert(Set(kObjectID_Device, owner, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
+        sizeof(request), &request) == kAudioHardwareIllegalOperationError);
+    CFDictionarySetValue(request, CFSTR("claim"), kCFBooleanTrue);
+    CFDictionarySetValue(request, CFSTR("unknown"), kCFBooleanTrue);
+    assert(Set(kObjectID_Device, owner, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
+        sizeof(request), &request) == kAudioHardwareIllegalOperationError);
+    CFDictionaryRemoveValue(request, CFSTR("claim"));
+    assert(Set(kObjectID_Device, owner, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
+        sizeof(request), &request) == kAudioHardwareIllegalOperationError);
+    CFRelease(request);
+    assert(gLeaseOwner == previousOwner && gLeaseDeadline == deadline && gLeaseGeneration == generation);
+    assert(Lease(owner) == (previousOwner == owner));
 }
 
 static UInt64 WaitRequest(void) {
@@ -140,12 +187,13 @@ static void PriorityPhase(CFStringRef phase) {
     CFPropertyListRef state;
     Get(kObjectID_Device, owner, kAcoupletPriority, kAudioObjectPropertyScopeGlobal, sizeof(state), &state);
     assert(CFEqual(CFDictionaryGetValue(state, CFSTR("phase")), phase));
-    if (CFEqual(phase, CFSTR("idle"))) assert(!CFDictionaryGetValue(state, CFSTR("address")));
+    if (CFEqual(phase, CFSTR("idle")) || gLeaseOwner != owner || !AcoupletLeaseValid())
+        assert(!CFDictionaryGetValue(state, CFSTR("address")));
     else assert(CFEqual(CFDictionaryGetValue(state, CFSTR("address")), CFSTR("AA:BB:CC:DD:EE:FF")));
     CFRelease(state);
 }
 
-static void PriorityPublication(const char *uid, const char *address, int64_t type) {
+static xpc_object_t PriorityPublicationEvent(const char *uid, const char *address, int64_t type) {
     xpc_object_t event = xpc_dictionary_create(NULL, NULL, 0);
     xpc_object_t args = xpc_dictionary_create(NULL, NULL, 0);
     xpc_object_t properties = xpc_dictionary_create(NULL, NULL, 0);
@@ -155,9 +203,14 @@ static void PriorityPublication(const char *uid, const char *address, int64_t ty
     xpc_dictionary_set_value(event, "kBTAudioMsgArgs", args);
     xpc_dictionary_set_int64(event, "kBTAudioMsgId", 2);
     xpc_dictionary_set_string(event, "kBTAudioMsgDeviceUid", uid);
-    dispatch_sync(gLeaseQueue, ^{ AcoupletPriorityEvent(event); });
     xpc_release(properties);
     xpc_release(args);
+    return event;
+}
+
+static void PriorityPublication(const char *uid, const char *address, int64_t type) {
+    xpc_object_t event = PriorityPublicationEvent(uid, address, type);
+    dispatch_sync(gLeaseQueue, ^{ AcoupletPriorityEvent(event); });
     xpc_release(event);
 }
 
@@ -173,6 +226,289 @@ static void PriorityWithdrawal(const char *uid) {
     xpc_release(event);
 }
 
+static void CheckClientAuthentication(CFStringRef address) {
+    UInt64 deadline = gLeaseDeadline;
+    UInt64 generation = gLeaseGeneration;
+    UInt64 sends = gPriorityCheckSends;
+    UInt64 bootstraps = gPriorityCheckBootstraps;
+    atomic_store(&deniedClient, owner);
+    assert(!Lease(owner));
+    assert(RequestLease(owner, true) == kAudioDevicePermissionsError);
+    assert(RequestLease(owner, false) == kAudioDevicePermissionsError);
+    CFStringRef model = CFSTR("WH-1000XM5");
+    assert(Set(kObjectID_Device, owner, kAcoupletModel, kAudioObjectPropertyScopeGlobal,
+        sizeof(model), &model) == kAudioDevicePermissionsError);
+    Float64 rate = gDevice_SampleRate == 96000 ? 48000 : 96000;
+    assert(Set(kObjectID_Device, owner, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal,
+        sizeof(rate), &rate) == kAudioDevicePermissionsError);
+    assert(PreparePriority(owner, address, false, false) == kAudioDevicePermissionsError);
+    assert(SetPriority(owner, address, true, false) == kAudioDevicePermissionsError);
+    assert(SetPriority(owner, address, false, true) == kAudioDevicePermissionsError);
+    AcoupletPriorityPhase(CFSTR("observing"), CFSTR("Private target detail"));
+    pid_t readers[] = {owner, owner + 1, owner + 2, 0};
+    unsigned checks = atomic_load(&authenticationChecks);
+    for (UInt32 i = 0; i < sizeof(readers) / sizeof(readers[0]); ++i) {
+        CFDictionaryRef state;
+        Get(kObjectID_Device, readers[i], kAcoupletPriority, kAudioObjectPropertyScopeGlobal,
+            sizeof(state), &state);
+        assert(CFDictionaryGetCount(state) == 1 &&
+            CFEqual(CFDictionaryGetValue(state, CFSTR("phase")), CFSTR("observing")));
+        CFRelease(state);
+    }
+    assert(atomic_load(&authenticationChecks) == checks + 1);
+    checks = atomic_load(&authenticationChecks);
+    assert(!Lease(owner + 1) && !Lease(owner + 2) && !Lease(0));
+    assert(atomic_load(&authenticationChecks) == checks);
+    assert(gLeaseOwner == owner && gLeaseDeadline == deadline && gLeaseGeneration == generation);
+    assert(gPriorityCheckSends == sends && gPriorityCheckBootstraps == bootstraps);
+    atomic_store(&deniedClient, 0);
+    CFDictionaryRef state;
+    Get(kObjectID_Device, owner, kAcoupletPriority, kAudioObjectPropertyScopeGlobal, sizeof(state), &state);
+    assert(CFDictionaryGetCount(state) == 3 &&
+        CFEqual(CFDictionaryGetValue(state, CFSTR("address")), CFSTR("AA:BB:CC:DD:EE:FF")) &&
+        CFEqual(CFDictionaryGetValue(state, CFSTR("error")), CFSTR("Private target detail")));
+    CFRelease(state);
+    AcoupletPriorityPhase(CFSTR("observing"), NULL);
+    assert(Lease(owner) && PreparePriority(owner, address, false, false) == noErr);
+}
+
+static void CheckInterruptedOwnerRecovery(void) {
+    CFStringRef address = CFSTR("AA:BB:CC:DD:EE:FF");
+    CFStringRef nextAddress = CFSTR("00:00:00:00:00:01");
+    assert(SetPriority(owner, address, true, false) == noErr);
+    PriorityPublication("lost-owner", "AA:BB:CC:DD:EE:FF", 1952538980);
+    PriorityNotification();
+    dispatch_sync(gLeaseQueue, ^{
+        AcoupletOwnerExited(owner, gOwnerWatchGeneration);
+        AcoupletPriorityEvent((xpc_object_t)XPC_ERROR_CONNECTION_INTERRUPTED);
+    });
+    Perform(WaitRequest());
+    assert(!gPriorityOwner && !gLeaseOwner && !gPriorityListening && gPrioritySent && !gPriorityDisconnected);
+    pid_t recoveryOwner = owner + 1;
+    SetLease(recoveryOwner, true);
+    Perform(WaitRequest());
+    CFDictionaryRef state;
+    Get(kObjectID_Device, recoveryOwner, kAcoupletPriority, kAudioObjectPropertyScopeGlobal, sizeof(state), &state);
+    assert(CFEqual(CFDictionaryGetValue(state, CFSTR("address")), address));
+    CFRelease(state);
+    assert(SetPriority(recoveryOwner, nextAddress, false, false) == kAudioHardwareIllegalOperationError);
+    assert(SetPriority(recoveryOwner, address, true, false) == kAudioHardwareIllegalOperationError);
+    UInt64 sends = gPriorityCheckSends;
+    UInt64 bootstraps = gPriorityCheckBootstraps;
+    UInt64 generation = gPriorityConnectionGeneration;
+    assert(SetPriority(recoveryOwner, address, false, false) == noErr);
+    UInt64 deadline = gPriorityDeadline;
+    assert(!gPriorityListening && !deadline && !gPriorityUID &&
+        gPriorityConnectionGeneration == generation && gPriorityCheckBootstraps == bootstraps);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        assert(SetPriority(recoveryOwner, address, false, false) == noErr);
+        PriorityPublication("replacement", "AA:BB:CC:DD:EE:FF", 1952538980);
+        PriorityNotification();
+        assert(gPrioritySent && CFEqual(gPriorityAddress, address) && !gPriorityListening &&
+            !gPriorityDeadline && gPriorityWaiting < 0 && gPriorityCheckSends == sends &&
+            gPriorityConnectionGeneration == generation && gPriorityCheckBootstraps == bootstraps &&
+            CFEqual(gPriorityPhase, CFSTR("cleanup-required")));
+    }
+    assert(SetPriority(recoveryOwner, nextAddress, false, false) == kAudioHardwareIllegalOperationError);
+    assert(SetPriority(recoveryOwner, address, true, false) == kAudioHardwareIllegalOperationError);
+    assert(SetPriority(owner, address, false, true) == kAudioDevicePermissionsError);
+    assert(SetPriority(recoveryOwner, address, false, true) == noErr);
+    PriorityPublication("after-confirmed-disconnect", "AA:BB:CC:DD:EE:FF", 1952538980);
+    assert(gPriorityCheckSends == sends + 1 && gPriorityCheckStatus == 0 && gPriorityWaiting == 0);
+    PriorityNotification();
+    assert(PreparePriority(recoveryOwner, nextAddress, false, false) == noErr && CFEqual(gPriorityAddress, nextAddress));
+    assert(SetPriority(recoveryOwner, nextAddress, false, false) == noErr && gPriorityCheckSends == sends + 1);
+    SetLease(recoveryOwner, false);
+    Perform(WaitRequest());
+    SetLease(owner, true);
+    Perform(WaitRequest());
+}
+
+static void CheckPriorityDeadlineOrdering(void) {
+    CFStringRef address = CFSTR("AA:BB:CC:DD:EE:FF");
+    assert(SetPriority(owner, address, true, false) == noErr);
+    xpc_object_t publication = PriorityPublicationEvent("deadline-publication", "AA:BB:CC:DD:EE:FF", 1952538980);
+    UInt64 sends = gPriorityCheckSends;
+    dispatch_sync(gLeaseQueue, ^{
+        gPriorityDeadline = mach_absolute_time();
+        AcoupletPriorityEvent(publication);
+        assert(!gPrioritySent && !gPriorityUID && !gPriorityListening && !gPriorityDeadline &&
+            gPriorityWaiting < 0 && gPriorityCheckSends == sends && CFEqual(gPriorityAddress, address));
+    });
+    xpc_release(publication);
+    assert(SetPriority(owner, address, false, false) == noErr);
+    for (int64_t waiting = 2; waiting >= 0; --waiting) {
+        assert(SetPriority(owner, address, true, false) == noErr);
+        PriorityPublication("deadline-notification", "AA:BB:CC:DD:EE:FF", 1952538980);
+        if (waiting != 2) {
+            PriorityNotification();
+            assert(SetPriority(owner, address, false, false) == noErr);
+            if (waiting == 0) PriorityNotification();
+        }
+        assert(gPriorityWaiting == waiting);
+        sends = gPriorityCheckSends;
+        dispatch_sync(gLeaseQueue, ^{
+            gPriorityDeadline = mach_absolute_time();
+            AcoupletPriorityNotification();
+            assert(gPrioritySent && CFEqual(gPriorityAddress, address) &&
+                CFEqual(gPriorityPhase, CFSTR("cleanup-required")) && !gPriorityDeadline &&
+                !gPriorityListening && gPriorityWaiting < 0 && gPriorityCheckSends == sends);
+        });
+        PriorityNotification();
+        PriorityPublication("expired-republication", "AA:BB:CC:DD:EE:FF", 1952538980);
+        PriorityWithdrawal("deadline-notification");
+        assert(gPrioritySent && CFEqual(gPriorityAddress, address) && gPriorityCheckSends == sends);
+        UInt64 bootstraps = gPriorityCheckBootstraps;
+        assert(SetPriority(owner, address, false, false) == noErr && !gPriorityListening);
+        PriorityPublication("retry-cleanup", "AA:BB:CC:DD:EE:FF", 1952538980);
+        assert(gPriorityWaiting < 0 && gPriorityCheckSends == sends &&
+            gPriorityCheckBootstraps == bootstraps && gPrioritySent && CFEqual(gPriorityAddress, address));
+        assert(SetPriority(owner, address, false, true) == noErr);
+        PriorityPublication("after-confirmed-disconnect", "AA:BB:CC:DD:EE:FF", 1952538980);
+        assert(gPriorityWaiting == 0 && gPriorityCheckStatus == 0 && gPriorityCheckSends == sends + 1);
+        PriorityNotification();
+        PriorityNotification();
+        assert(!gPrioritySent && !gPriorityAddress && CFEqual(gPriorityPhase, CFSTR("idle")));
+    }
+    assert(SetPriority(owner, address, true, false) == noErr);
+    PriorityPublication("deadline-withdrawal", "AA:BB:CC:DD:EE:FF", 1952538980);
+    PriorityNotification();
+    assert(SetPriority(owner, address, false, true) == noErr && gPriorityRetiredUID);
+    xpc_object_t withdrawal = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_int64(withdrawal, "kBTAudioMsgId", 4);
+    xpc_dictionary_set_string(withdrawal, "kBTAudioMsgDeviceUid", "deadline-withdrawal");
+    sends = gPriorityCheckSends;
+    dispatch_sync(gLeaseQueue, ^{
+        gPriorityDeadline = mach_absolute_time();
+        AcoupletPriorityEvent(withdrawal);
+        assert(gPrioritySent && CFEqual(gPriorityAddress, address) &&
+            CFEqual(gPriorityPhase, CFSTR("cleanup-required")) && !gPriorityDeadline && gPriorityCheckSends == sends);
+    });
+    xpc_release(withdrawal);
+    PriorityWithdrawal("deadline-withdrawal");
+    assert(gPrioritySent && gPriorityAddress);
+    assert(SetPriority(owner, address, false, true) == noErr);
+    PriorityPublication("retry-disconnected", "AA:BB:CC:DD:EE:FF", 1952538980);
+    assert(gPriorityWaiting == 0);
+    PriorityNotification();
+    assert(!gPrioritySent && !gPriorityAddress);
+}
+
+static Boolean ReplaceLeaseDuringAuthentication(pid_t client) {
+    Boolean authorized = AuthenticateClient(client);
+    gClientCheckAuthentication = AuthenticateClient;
+    pthread_mutex_lock(&gPlugIn_StateMutex);
+    gLeaseDeadline = mach_absolute_time();
+    AcoupletRefreshLease();
+    gLeaseOwner = owner + 1;
+    gLeaseDeadline = mach_absolute_time() + (UInt64)(gTicksPerSecond * 3);
+    AcoupletRefreshLease();
+    pthread_mutex_unlock(&gPlugIn_StateMutex);
+    return authorized;
+}
+
+static void CheckScopedMute(void) {
+    AudioObjectPropertyAddress property = Property(kAudioDevicePropertyMute, kAudioObjectPropertyScopeOutput);
+    UInt32 qualifier = kAcoupletLease;
+    UInt32 mute = 0;
+    assert(Set(kObjectID_Device, 0, kAudioDevicePropertyMute, kAudioObjectPropertyScopeOutput,
+        sizeof(mute), &mute) == noErr);
+    mute = 1;
+    unsigned notifications = atomic_load(&muteNotifications);
+    atomic_store(&deniedClient, owner);
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(mute), &mute) == kAudioDevicePermissionsError);
+    assert(!gMute_Output_Master_Value && atomic_load(&muteNotifications) == notifications);
+    atomic_store(&deniedClient, 0);
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(mute), &mute) == noErr);
+    assert(gMute_Output_Master_Value && atomic_load(&muteNotifications) == notifications + 1);
+    mute = 0;
+    assert(Set(kObjectID_Device, 0, kAudioDevicePropertyMute, kAudioObjectPropertyScopeOutput,
+        sizeof(mute), &mute) == noErr);
+    mute = 1;
+    gClientCheckAuthentication = ReplaceLeaseDuringAuthentication;
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(mute), &mute) == kAudioDevicePermissionsError);
+    assert(!gMute_Output_Master_Value && Lease(owner + 1));
+    SetLease(owner + 1, false);
+    SetLease(owner, true);
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(mute), &mute) == noErr);
+    pthread_mutex_lock(&gPlugIn_StateMutex);
+    gLeaseDeadline = mach_absolute_time();
+    pthread_mutex_unlock(&gPlugIn_StateMutex);
+    mute = 0;
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(mute), &mute) == kAudioDevicePermissionsError);
+    assert(gMute_Output_Master_Value);
+    SetLease(owner + 1, true);
+    assert(!Lease(owner) && Lease(owner + 1));
+    assert(Set(kObjectID_Device, owner + 2, kAudioDevicePropertyMute, kAudioObjectPropertyScopeOutput,
+        sizeof(mute), &mute) == noErr);
+    notifications = atomic_load(&muteNotifications);
+    mute = 1;
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(mute), &mute) == kAudioDevicePermissionsError);
+    assert(!gMute_Output_Master_Value && atomic_load(&muteNotifications) == notifications && Lease(owner + 1));
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner + 1, &property, sizeof(qualifier), &qualifier,
+        sizeof(mute), &mute) == noErr && gMute_Output_Master_Value);
+    qualifier = kAcoupletModel;
+    mute = 0;
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner + 1, &property, sizeof(qualifier), &qualifier,
+        sizeof(mute), &mute) == kAudioHardwareIllegalOperationError && gMute_Output_Master_Value);
+    SetLease(owner + 1, false);
+    SetLease(owner, true);
+    dispatch_sync(gLeaseQueue, ^{});
+}
+
+static void CheckScopedVolume(void) {
+    AudioObjectPropertyAddress property = Property(kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyScopeOutput);
+    UInt32 qualifier = kAcoupletLease;
+    Float32 volume = 0.625;
+    unsigned notifications = atomic_load(&volumeNotifications);
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(volume), &volume) == noErr);
+    assert(gVolume_Output_Master_Value == volume && atomic_load(&volumeNotifications) == notifications + 1);
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(volume), &volume) == noErr && atomic_load(&volumeNotifications) == notifications + 1);
+    volume = NAN;
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(volume), &volume) == kAudioHardwareIllegalOperationError);
+    volume = 0.25;
+    atomic_store(&deniedClient, owner);
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(volume), &volume) == kAudioDevicePermissionsError);
+    atomic_store(&deniedClient, 0);
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner + 1, &property, sizeof(qualifier), &qualifier,
+        sizeof(volume), &volume) == kAudioDevicePermissionsError);
+    pthread_mutex_lock(&gPlugIn_StateMutex);
+    gLeaseDeadline = mach_absolute_time();
+    pthread_mutex_unlock(&gPlugIn_StateMutex);
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(volume), &volume) == kAudioDevicePermissionsError);
+    SetLease(owner + 1, true);
+    assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, sizeof(qualifier), &qualifier,
+        sizeof(volume), &volume) == kAudioDevicePermissionsError);
+    assert(gVolume_Output_Master_Value == 0.625 && atomic_load(&volumeNotifications) == notifications + 1);
+    property = Property(kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal);
+    volume = kVolume_MinDB + (kVolume_MaxDB - kVolume_MinDB) * 0.25;
+    assert((*driver)->SetPropertyData(driver, kObjectID_Volume_Output_Master, owner + 1, &property, sizeof(qualifier), &qualifier,
+        sizeof(volume), &volume) == noErr && gVolume_Output_Master_Value == 0.5);
+    Float32 decibels;
+    Get(kObjectID_Volume_Output_Master, owner + 1, kAudioLevelControlPropertyDecibelValue,
+        kAudioObjectPropertyScopeGlobal, sizeof(decibels), &decibels);
+    assert(decibels == volume && atomic_load(&volumeNotifications) == notifications + 2);
+    volume = 0.75;
+    unsigned checks = atomic_load(&authenticationChecks);
+    assert(Set(kObjectID_Device, owner + 2, kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyScopeOutput,
+        sizeof(volume), &volume) == noErr && gVolume_Output_Master_Value == volume);
+    assert(atomic_load(&authenticationChecks) == checks && Lease(owner + 1));
+    SetLease(owner + 1, false);
+    SetLease(owner, true);
+    dispatch_sync(gLeaseQueue, ^{});
+}
+
 static void CheckPriority(void) {
     CFStringRef address = CFSTR("aa-bb-cc-dd-ee-ff");
     PriorityPhase(CFSTR("idle"));
@@ -181,6 +517,7 @@ static void CheckPriority(void) {
     assert(PreparePriority(owner, address, false, true) == kAudioHardwareIllegalOperationError);
     assert(PreparePriority(owner, address, false, false) == noErr);
     PriorityPhase(CFSTR("observing"));
+    CheckClientAuthentication(address);
     UInt64 bootstraps = gPriorityCheckBootstraps;
     UInt64 sends = gPriorityCheckSends;
     assert(gPriorityListening && !gPriorityDeadline && !gPrioritySent);
@@ -274,8 +611,12 @@ static void CheckPriority(void) {
     PriorityPhase(CFSTR("cleanup-required"));
     PriorityPublication("opaque-new", "AA:BB:CC:DD:EE:FF", 1952538980);
     assert(gPriorityWaiting == -1 && gPriorityCheckStatus == 2);
+    sends = gPriorityCheckSends;
+    bootstraps = gPriorityCheckBootstraps;
+    assert(SetPriority(owner, address, false, false) == noErr);
+    assert(gPriorityWaiting < 0 && gPriorityCheckSends == sends && gPriorityCheckBootstraps == bootstraps &&
+        gPrioritySent && CFEqual(gPriorityAddress, CFSTR("AA:BB:CC:DD:EE:FF")));
     assert(SetPriority(owner, address, true, false) == kAudioHardwareIllegalOperationError);
-    assert(SetPriority(owner, address, false, false) == noErr && gPriorityWaiting == -1);
     bootstraps = gPriorityCheckBootstraps;
     assert(SetPriority(owner, address, false, true) == noErr && !strcmp(gPriorityUID, "opaque-new") &&
         gPriorityCheckBootstraps == bootstraps);
@@ -363,8 +704,16 @@ static void CheckPriority(void) {
     }
     assert(expiredDeadline);
     PriorityPhase(CFSTR("cleanup-required"));
-    assert(SetPriority(owner, address, false, false) == noErr && gPriorityWaiting == 1);
-    PriorityNotification();
+    assert(gPrioritySent && gPriorityWaiting < 0 && !gPriorityListening);
+    sends = gPriorityCheckSends;
+    bootstraps = gPriorityCheckBootstraps;
+    assert(SetPriority(owner, address, false, false) == noErr && !gPriorityListening);
+    PriorityPublication("after-deadline-retry", "AA:BB:CC:DD:EE:FF", 1952538980);
+    assert(gPriorityWaiting < 0 && gPriorityCheckSends == sends &&
+        gPriorityCheckBootstraps == bootstraps && gPrioritySent);
+    assert(SetPriority(owner, address, false, true) == noErr);
+    PriorityPublication("after-confirmed-disconnect", "AA:BB:CC:DD:EE:FF", 1952538980);
+    assert(gPriorityWaiting == 0 && gPriorityCheckStatus == 0);
     PriorityNotification();
     PriorityPhase(CFSTR("idle"));
     assert(SetPriority(owner, address, true, false) == noErr);
@@ -386,6 +735,10 @@ static void CheckPriority(void) {
     CheckIdleTimer();
     SetLease(owner, true);
     Perform(WaitRequest());
+    CheckInterruptedOwnerRecovery();
+    CheckPriorityDeadlineOrdering();
+    CheckScopedMute();
+    CheckScopedVolume();
 }
 
 static void CheckResourceBundle(void) {
@@ -463,7 +816,7 @@ static void CheckRevision(void) {
     Get(kObjectID_Device, owner, kAcoupletRevision, kAudioObjectPropertyScopeGlobal, sizeof(revision), &revision);
     SInt32 value = 0;
     assert(revision && CFGetTypeID(revision) == CFNumberGetTypeID());
-    assert(CFNumberGetValue(revision, kCFNumberSInt32Type, &value) && value == kAcoupletDriverRevision && value == 3);
+    assert(CFNumberGetValue(revision, kCFNumberSInt32Type, &value) && value == kAcoupletDriverRevision && value == 5);
     assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, 0, NULL,
         sizeof(revision), &revision) != noErr);
     CFRelease(revision);
@@ -495,6 +848,13 @@ int main(int argc, const char *argv[]) {
         AcoupletRequestAvailability();
     });
     owner = getpid();
+    assert(!AcoupletClientAuthorized(0) && !AcoupletClientAuthorized(-1));
+    assert(!AcoupletClientAuthorized(owner));
+    assert(RequestLease(owner, true) == kAudioDevicePermissionsError);
+    gClientCheckAuthentication = AuthenticateClient;
+    assert(RequestLease(owner + 2, true) == kAudioDevicePermissionsError);
+    assert(!gLeaseOwner && !gLeaseDeadline && !gDesiredAvailable && !gPriorityCheckBootstraps);
+    CheckLeaseProtocol();
     CheckIdleTimer();
     CheckResourceBundle();
     CheckRevision();
@@ -511,7 +871,8 @@ int main(int argc, const char *argv[]) {
     AudioServerPlugInCustomPropertyInfo custom[4];
     Get(kObjectID_Device, owner, kAudioObjectPropertyCustomPropertyInfoList, kAudioObjectPropertyScopeGlobal,
         sizeof(custom), custom);
-    assert(custom[0].mSelector == kAcoupletLease && custom[0].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList);
+    assert(custom[0].mSelector == kAcoupletLease && custom[0].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList &&
+        custom[0].mQualifierDataType == kAudioServerPlugInCustomPropertyDataTypeNone);
     assert(custom[1].mSelector == kAcoupletModel && custom[1].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFString);
     assert(custom[2].mSelector == kAcoupletPriority && custom[2].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList);
     assert(custom[3].mSelector == kAcoupletRevision && custom[3].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList);
@@ -592,12 +953,12 @@ int main(int argc, const char *argv[]) {
     assert(Set(kObjectID_Device, owner, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
                sizeof(model), &model) == kAudioHardwareIllegalOperationError);
     CFBooleanRef claim = kCFBooleanTrue;
-    assert(Set(kObjectID_Device, 0, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
-               sizeof(claim), &claim) == kAudioHardwareIllegalOperationError);
+    assert(RequestLease(0, true) == kAudioHardwareIllegalOperationError);
     atomic_store(&rejectRequest, true);
     SetLease(owner, true);
     UInt64 failed = WaitRequest();
     assert(Lease(owner) && !Lease(owner + 1) && !AcoupletAlive());
+    CheckLeaseProtocol();
     assert(gPendingAction == 0);
     atomic_store(&rejectRequest, false);
     RequestNow();
@@ -607,11 +968,8 @@ int main(int argc, const char *argv[]) {
     Perform(aborted);
     UInt64 stale = WaitRequest();
     assert(!AcoupletAlive() && stale != aborted);
-    assert(Set(kObjectID_Device, owner + 1, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
-               sizeof(claim), &claim) == kAudioDevicePermissionsError);
-    CFBooleanRef release = kCFBooleanFalse;
-    assert(Set(kObjectID_Device, owner + 1, kAcoupletLease, kAudioObjectPropertyScopeGlobal,
-               sizeof(release), &release) == kAudioDevicePermissionsError);
+    assert(RequestLease(owner + 1, true) == kAudioDevicePermissionsError);
+    assert(RequestLease(owner + 1, false) == kAudioDevicePermissionsError);
     assert(Set(kObjectID_Device, owner + 1, kAcoupletModel, kAudioObjectPropertyScopeGlobal,
                sizeof(model), &model) == kAudioDevicePermissionsError);
     model = CFSTR("");
@@ -638,6 +996,13 @@ int main(int argc, const char *argv[]) {
     CFRelease(model);
     CheckIdentity(CFSTR("Headphones.png"), kAudioStreamTerminalTypeHeadphones);
     assert(atomic_load(&iconNotifications) == 1 && !atomic_load(&terminalNotifications));
+    CFStringRef headphoneNames[] = {CFSTR("ULT WEAR"), CFSTR("1000X THE COLLEXION")};
+    for (size_t i = 0; i < sizeof(headphoneNames) / sizeof(headphoneNames[0]); ++i) {
+        model = headphoneNames[i];
+        assert(Set(kObjectID_Device, owner, kAcoupletModel, kAudioObjectPropertyScopeGlobal, sizeof(model), &model) == noErr);
+        CheckIdentity(CFSTR("Headphones.png"), kAudioStreamTerminalTypeHeadphones);
+        assert(atomic_load(&iconNotifications) == 1 && !atomic_load(&terminalNotifications));
+    }
     model = CFSTR("WH-1000XM5");
     assert(Set(kObjectID_Device, owner, kAcoupletModel, kAudioObjectPropertyScopeGlobal, sizeof(model), &model) == noErr);
     assert(atomic_load(&iconNotifications) == 1 && !atomic_load(&terminalNotifications));
@@ -804,6 +1169,6 @@ int main(int argc, const char *argv[]) {
         !gPriorityConnection && gPriorityNotify == -1 && !gOwnerWatcher && gPriorityCheckStatus == 1);
     dispatch_release(requested);
     printf("HAL_TIMER_CHECK passed: zero idle timer callbacks across four 600 ms windows; %u active timer callbacks; lease expiry, priority deadline and owner-exit cleanup retained.\n", atomic_load(&timerWakeups));
-    puts("HAL_CALLBACK_CHECK passed: resource-bundle capacity/canary, activation/withdrawal, request failure, abort, stale generations, timer expiry, PID ownership, model identity, volume/mute, native rates and clocks; empty-bootstrap observing, explicit enable, publication replacement, passive owner loss, priority validation, opaque UID, notification ordering, deferred stop, disconnect-only removal with retained observer, deadline and owner-exit cleanup; no live XPC or Bluetooth.");
+    puts("HAL_CALLBACK_CHECK passed: resource-bundle capacity/canary, activation/withdrawal, request failure, abort, stale generations, timer expiry, PID ownership, model identity, volume/mute, native rates and clocks; empty-bootstrap observing, explicit enable, publication replacement, passive owner loss, priority validation, opaque UID, notification ordering, deferred stop, disconnect-only removal with retained observer, deadline-before-event rejection, cleanup retry refusal before verified disconnect, scoped mute/volume with replacement-owner preservation and unrestricted system controls, and owner-exit cleanup; no live XPC or Bluetooth.");
     return 0;
 }

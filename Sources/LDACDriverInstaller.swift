@@ -47,9 +47,17 @@ enum LDACDriverInstaller {
     }
 
     static func openInstaller(bundle: Bundle = .main) async throws {
-        let package = bundle.bundleURL.appendingPathComponent("Contents/Resources/Acouplet LDAC Output.pkg")
+        try await openPackage(named: "Acouplet LDAC Output.pkg", bundle: bundle)
+    }
+
+    static func openUninstaller(bundle: Bundle = .main) async throws {
+        try await openPackage(named: "Acouplet LDAC Removal.pkg", bundle: bundle)
+    }
+
+    private static func openPackage(named name: String, bundle: Bundle) async throws {
+        let package = bundle.bundleURL.appendingPathComponent("Contents/Resources/" + name)
         let values = try package.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-        let expectedPackage = bundle.bundleURL.resolvingSymlinksInPath().appendingPathComponent("Contents/Resources/Acouplet LDAC Output.pkg")
+        let expectedPackage = bundle.bundleURL.resolvingSymlinksInPath().appendingPathComponent("Contents/Resources/" + name)
         guard values.isRegularFile == true, values.isSymbolicLink != true,
               package.resolvingSymlinksInPath() == expectedPackage else {
             throw failure("The LDAC installer is missing or has been changed. Reinstall the app.")

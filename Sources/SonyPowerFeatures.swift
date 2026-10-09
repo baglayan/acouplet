@@ -19,6 +19,17 @@ struct SonyBatteryCare: Equatable, Sendable {
         return [0x28, inquiryType, enabled ? 0x00 : 0x01]
     }
 
+    mutating func invalidateRead(_ query: [UInt8]) {
+        switch query {
+        case [0x20, inquiryType]: threshold = nil
+        case [0x22, inquiryType]:
+            available = nil
+            noticeNecessary = nil
+        case [0x26, inquiryType]: enabled = nil
+        default: break
+        }
+    }
+
     @discardableResult
     mutating func update(_ payload: [UInt8], frameType: UInt8) -> Bool {
         guard frameType == self.frameType, payload.count >= 3, payload[1] == inquiryType else { return false }
@@ -59,6 +70,19 @@ struct SonyAutoPowerSave: Equatable, Sendable {
     var cancelEffectPayload: [UInt8]? {
         guard threshold != nil, enabled == true, effectActive == true else { return nil }
         return [0x28, 0x0B, 0x00, 0x01]
+    }
+
+    mutating func invalidateRead(_ query: [UInt8]) {
+        switch query {
+        case [0x20, 0x0B]:
+            threshold = nil
+            affectedFunctions = []
+            affectedFunctions2 = []
+        case [0x26, 0x0B]:
+            enabled = nil
+            effectActive = nil
+        default: break
+        }
     }
 
     @discardableResult
@@ -107,6 +131,11 @@ struct SonyPowerFeatures: Equatable, Sendable {
     func queryPayloads(frameType: UInt8) -> [[UInt8]] {
         (batteryCare?.frameType == frameType ? batteryCare?.queryPayloads ?? [] : [])
             + (frameType == 0x0C ? autoPowerSave?.queryPayloads ?? [] : [])
+    }
+
+    mutating func invalidateRead(_ query: [UInt8], frameType: UInt8) {
+        if batteryCare?.frameType == frameType { batteryCare?.invalidateRead(query) }
+        if frameType == 0x0C { autoPowerSave?.invalidateRead(query) }
     }
 
     @discardableResult

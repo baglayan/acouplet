@@ -163,7 +163,10 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(8_100))
         XCTAssertNotNil(controller.playbackReadError)
         let previousReads = controller.simulatedTransmittedFrames.filter { $0.payload == [0xA6, 0x20] }.count
-        refreshPlayback(on: controller)
+        for _ in 0..<5 { controller.simulateAutomaticRefresh() }
+        acknowledgeSimulatedCommands(controller)
+        receive([0x67, 0x17, 1, 1, 0, 0, 10], on: controller)
+        acknowledgeSimulatedCommands(controller)
         completePlaybackReads(on: controller, includeVolume: false)
         receive([0xA7, 0x20, 9], on: controller)
         XCTAssertEqual(controller.playback.volume, 9)
@@ -182,8 +185,7 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
     private func makeController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [0x01, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
         for payload: [UInt8] in [[0x07, 0, 2, 0x6B, 0, 0xA1, 0],
                                 [0x61, 0x17, 2, 0, 1, 20, 1, 1, 1, 20, 1],
@@ -205,7 +207,7 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
     }
 
     private func receive(_ payload: [UInt8], on controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload)
     }
 
     private func completePlaybackReads(on controller: SonyHeadphonesController, includeVolume: Bool = true,

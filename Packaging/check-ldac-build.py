@@ -4,10 +4,13 @@ import json, os, plistlib, subprocess, sys, tempfile
 packaging = Path(__file__).parent
 stub_source = '''#!/usr/bin/python3
 from pathlib import Path
-import json, os, sys
+import json, os, subprocess, sys
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 if name == 'xcrun':
+    if args[0] == 'xcstringstool':
+        subprocess.run(['/usr/bin/xcrun', *args], env={key: value for key, value in os.environ.items() if key != 'SDKROOT'}, check=True)
+        sys.exit(0)
     assert args == ['--find', 'clang'], args
     print(Path(sys.argv[0]).with_name('clang'))
 else:
@@ -41,15 +44,24 @@ with tempfile.TemporaryDirectory(prefix='acouplet-ldac-build-check-') as directo
                    'ACOUPLET_LDAC_CHECK_LOG': str(log)}
     subprocess.run(['/bin/sh', str(script)], env=environment, check=True)
     app = root / 'Fixture.app/Contents'
-    names = ['LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver']
+    names = ['LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver']
     assert all((app / 'Helpers' / name).exists() for name in names)
     audio_info = plistlib.loads((app / 'Helpers/Acouplet Audio.app/Contents/Info.plist').read_bytes())
     assert audio_info['CFBundleIdentifier'] == 'dev.baglayan.Acouplet.ldac-audio'
     assert audio_info['LSMinimumSystemVersion'] == '15.4' and audio_info['CFBundleVersion'] == '245'
+    for language in ('en', 'tr'):
+        main_path = app / 'Resources' / (language + '.lproj') / 'InfoPlist.strings'
+        audio_path = app / 'Helpers/Acouplet Audio.app/Contents/Resources' / (language + '.lproj') / 'InfoPlist.strings'
+        main_strings = json.loads(subprocess.check_output(['/usr/bin/plutil', '-convert', 'json', '-o', '-', str(main_path)]))
+        audio_strings = json.loads(subprocess.check_output(['/usr/bin/plutil', '-convert', 'json', '-o', '-', str(audio_path)]))
+        assert set(main_strings) == {'NSBluetoothAlwaysUsageDescription', 'NSAudioCaptureUsageDescription'}
+        assert set(audio_strings) == {'NSAudioCaptureUsageDescription'}
+        assert main_strings['NSAudioCaptureUsageDescription'] == audio_strings['NSAudioCaptureUsageDescription']
+        if language == 'en': assert audio_strings['NSAudioCaptureUsageDescription'] == audio_info['NSAudioCaptureUsageDescription']
     driver = app / 'Helpers/AcoupletLDACOutput.driver'
     driver_info = plistlib.loads((driver / 'Contents/Info.plist').read_bytes())
     assert driver_info['CFBundleIdentifier'] == 'dev.baglayan.Acouplet.LDACOutput'
-    assert driver_info['AcoupletLDACDriverRevision'] == 3
+    assert driver_info['AcoupletLDACDriverRevision'] == 5
     assert driver_info['CFBundleVersion'] == '245' and driver_info['CFBundleExecutable'] == 'AcoupletVirtualOutput'
     assert driver_info['AudioServerPlugIn_MachServices'] == ['com.apple.BTAudioHALPlugin.xpc']
     for name in ('NullAudio.c', 'LICENSE.txt'):
@@ -59,11 +71,22 @@ with tempfile.TemporaryDirectory(prefix='acouplet-ldac-build-check-') as directo
     commands = [json.loads(line) for line in log.read_text().splitlines()]
     compiles = [command for command in commands if command[0] == 'clang']
     signs = [command for command in commands if command[0] == 'codesign']
-    assert len(compiles) == len(signs) == 5
+    assert len(compiles) == len(signs) == 6
+    logger = compiles.pop(0)
+    logger_sign = signs.pop(0)
+    assert logger[-1] == str(app / 'Helpers/LDACLogObserver')
+    assert logger_sign[-1] == logger[-1] and '-Werror' in logger
+    assert [logger[i + 1] for i, arg in enumerate(logger) if arg == '-arch'] == ['arm64', 'x86_64']
+    assert '-mmacosx-version-min=15.4' in logger
+    assert logger_sign[logger_sign.index('--options') + 1] == 'runtime'
+    assert logger_sign[logger_sign.index('--sign') + 1] == 'fixture Apple certificate'
     for command in compiles:
         assert '-mmacosx-version-min=15.4' in command
     for command in compiles:
         assert [command[i + 1] for i, arg in enumerate(command) if arg == '-arch'] == ['arm64', 'x86_64']
+    for command in compiles[:2]:
+        assert '-DACOUPLET_LDAC_PROBE_ONLY=0' in command
+    assert '-DACOUPLET_LDAC_PROBE_ONLY=0' not in compiles[2]
     capture = compiles[3]
     assert '-DACOUPLET_AUDIO_HELPER_STREAM_ONLY=1' in capture
     assert '-DACOUPLET_AUDIO_HELPER_BUNDLE_ID="dev.baglayan.Acouplet.ldac-audio"' in capture
@@ -71,6 +94,7 @@ with tempfile.TemporaryDirectory(prefix='acouplet-ldac-build-check-') as directo
     assert '-framework' in compiles[2] and 'CoreAudio' in compiles[2]
     driver_compile = compiles[-1]
     assert '-bundle' in driver_compile and '-std=gnu11' in driver_compile and '-Werror' in driver_compile
+    assert 'Security' in [driver_compile[i + 1] for i, arg in enumerate(driver_compile) if arg == '-framework']
     assert any(arg.endswith('/VirtualOutput/AcoupletVirtualOutput.c') for arg in driver_compile)
     assert Path(signs[-1][-1]) == driver
     assert '--timestamp=none' in signs[-1]
@@ -91,10 +115,16 @@ with tempfile.TemporaryDirectory(prefix='acouplet-ldac-build-check-') as directo
             else: target.touch()
         for notice in ('LICENSE', 'NOTICE'): (app / 'Resources' / ('LDAC-' + notice + '.txt')).touch()
         (app / 'Resources/Acouplet LDAC Output.pkg').touch()
+        (app / 'Resources/Acouplet LDAC Removal.pkg').touch()
         (root / 'derived/LDAC').mkdir(parents=True, exist_ok=True)
         subprocess.run(['/bin/sh', str(script)], env={**environment, **exclusion}, check=True)
         assert log.read_bytes() == previous_log
+        for language in ('en', 'tr'):
+            path = app / 'Resources' / (language + '.lproj') / 'InfoPlist.strings'
+            strings = json.loads(subprocess.check_output(['/usr/bin/plutil', '-convert', 'json', '-o', '-', str(path)]))
+            assert set(strings) == {'NSBluetoothAlwaysUsageDescription'}
         assert all(not (app / 'Helpers' / name).exists() for name in names)
         assert not (app / 'Resources/Acouplet LDAC Output.pkg').exists()
+        assert not (app / 'Resources/Acouplet LDAC Removal.pkg').exists()
         assert not list((app / 'Resources').glob('LDAC-*')) and not (root / 'derived/LDAC').exists()
 print('LDAC universal helper and HAL driver flags, signing, unchanged Apple source/license and complete public-only exclusion: passed')

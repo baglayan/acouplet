@@ -16,10 +16,10 @@ struct EarbudFindingSession: Equatable, Sendable {
     let timeoutSeconds: UInt8
     private(set) var phase = Phase.idle
     private(set) var mayBeRinging = false
-    private(set) var rejection: FastPairRingRejection?
     private(set) var isRetryingStop = false
     private(set) var startedWithWearingOverride = false
-    private var ignoresWornReading = false
+    private(set) var wearingConfirmationStatus: Bool? = false
+    private var overriddenWornStatus: Bool? = false
     private var pendingCommand: FastPairRingCommand?
     private var stopRequested = false
     private var stopAttempted = false
@@ -47,8 +47,8 @@ struct EarbudFindingSession: Equatable, Sendable {
             phase = .stopping
             return [.send(.stop)]
         }
-        guard let worn else { return stop() }
-        if worn {
+        wearingConfirmationStatus = worn
+        if worn != false {
             phase = .awaitingWearingConfirmation
             return []
         }
@@ -57,18 +57,31 @@ struct EarbudFindingSession: Equatable, Sendable {
 
     mutating func confirmWearingOverride(worn: Bool?) -> [Effect] {
         guard phase == .awaitingWearingConfirmation else { return [] }
-        guard let worn else { return stop() }
-        startedWithWearingOverride = worn
-        ignoresWornReading = worn
+        guard worn == false || worn == wearingConfirmationStatus else {
+            wearingConfirmationStatus = worn
+            return []
+        }
+        startedWithWearingOverride = worn != false
+        wearingConfirmationStatus = worn
+        overriddenWornStatus = worn
         return start()
     }
 
     mutating func wearingChanged(_ worn: Bool?) -> [Effect] {
+        if phase == .awaitingWearingConfirmation { wearingConfirmationStatus = worn }
         guard phase == .starting || phase == .ringing else { return [] }
-        guard let worn else { return stop() }
-        if !worn { ignoresWornReading = false }
-        else if !ignoresWornReading { return stop() }
-        return []
+        if worn == false {
+            overriddenWornStatus = false
+            return []
+        }
+        if startedWithWearingOverride, worn == overriddenWornStatus { return [] }
+        if phase == .starting, !mayBeRinging, worn == nil {
+            pendingCommand = nil
+            wearingConfirmationStatus = nil
+            phase = .awaitingWearingConfirmation
+            return []
+        }
+        return stop()
     }
 
     private mutating func start() -> [Effect] {
@@ -84,11 +97,6 @@ struct EarbudFindingSession: Equatable, Sendable {
         if command == .stop { stopAttempted = true }
         else { mayBeRinging = true }
         return true
-    }
-
-    mutating func commandWasNotSent(_ command: FastPairRingCommand) -> [Effect] {
-        guard pendingCommand == command else { return [] }
-        return transportFailed()
     }
 
     mutating func receive(_ response: FastPairRingResponse) -> [Effect] {
@@ -107,8 +115,7 @@ struct EarbudFindingSession: Equatable, Sendable {
             status = value
         case .acknowledgement(nil):
             return []
-        case .rejection(let reason, let value):
-            rejection = reason
+        case .rejection(_, let value):
             status = value
             if status?.components != .stopped { return stop() }
         }
@@ -131,7 +138,7 @@ struct EarbudFindingSession: Equatable, Sendable {
 
     mutating func stop() -> [Effect] {
         guard !isFinished else { return [] }
-        if phase == .connecting, isRetryingStop { return transportFailed() }
+        if phase == .connecting, isRetryingStop { return [] }
         guard mayBeRinging else {
             pendingCommand = nil
             phase = .finished
@@ -163,11 +170,6 @@ struct EarbudFindingSession: Equatable, Sendable {
         default:
             return []
         }
-    }
-
-    mutating func deadlineExpired() -> [Effect] {
-        guard !isFinished, phase != .idle else { return [] }
-        return stop()
     }
 
     mutating func transportFailed() -> [Effect] {

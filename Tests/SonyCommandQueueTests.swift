@@ -2,6 +2,74 @@ import XCTest
 @testable import Acouplet
 
 final class SonyCommandQueueTests: XCTestCase {
+    @MainActor
+    func testSimulatedCancellationCannotGiveFragmentedACKToNextPlaybackRead() throws {
+        for split in 1..<9 {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            controller.simulateDeviceConnection(named: "WF-1000XM5")
+            defer { controller.simulateControlLoss() }
+            controller.defersSimulatedWrites = true
+            var current = true
+            controller.setPlaybackVolume(20) { current }
+            let cancelled = try XCTUnwrap(controller.simulatedPendingFrame)
+            XCTAssertTrue(controller.refreshMusicVolume())
+            let acknowledgment = SonyFrameCodec.encode(type: 0x01, sequence: 1 - cancelled.sequence, payload: [])
+            controller.simulateProtocolData(acknowledgment.prefix(split))
+            current = false
+            controller.completeSimulatedWrite()
+            controller.completeSimulatedWrite()
+            let status = try XCTUnwrap(controller.simulatedPendingFrame)
+            XCTAssertEqual(status.payload, [0xA2, 1])
+            controller.simulateProtocolData(acknowledgment.dropFirst(split))
+            XCTAssertEqual(controller.simulatedPendingFrame, status)
+            controller.simulateProtocolData(acknowledgment.prefix(split))
+            controller.simulateProtocolData(acknowledgment.dropFirst(split))
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xA6, 0x20])
+        }
+    }
+
+    @MainActor
+    func testACKsInOneCallbackCannotAcknowledgeTheNextCommand() throws {
+        for split in 1...9 {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            controller.simulateDeviceConnection(named: "WF-1000XM5")
+            defer { controller.simulateControlLoss() }
+            XCTAssertTrue(controller.refreshMusicVolume())
+            let first = try XCTUnwrap(controller.simulatedPendingFrame)
+            let acknowledgment = SonyFrameCodec.encode(type: 0x01, sequence: 1 - first.sequence, payload: [])
+            let nextAcknowledgment = SonyFrameCodec.encode(type: 0x01, sequence: first.sequence, payload: [])
+            controller.simulateProtocolData(acknowledgment + nextAcknowledgment.prefix(split))
+            controller.simulateProtocolData(nextAcknowledgment.dropFirst(split))
+            let second = try XCTUnwrap(controller.simulatedPendingFrame)
+            XCTAssertEqual(second.payload, [0xA6, 0x20])
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - second.sequence, payload: []))
+            XCTAssertNil(controller.simulatedPendingFrame)
+        }
+    }
+
+    @MainActor
+    func testFragmentedPayloadsSurviveUnsentVolumeCancellation() throws {
+        for payload: [UInt8] in [[0xA9, 0x20, 9], [0xA3, 1, 0, 2, 1]] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            controller.simulateDeviceConnection(named: "WF-1000XM5")
+            defer { controller.simulateControlLoss() }
+            controller.defersSimulatedWrites = true
+            var current = true
+            controller.setPlaybackVolume(20) { current }
+            XCTAssertTrue(controller.refreshMusicVolume())
+            let encoded = SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload)
+            controller.simulateProtocolData(encoded.prefix(5))
+            current = false
+            controller.completeSimulatedWrite()
+            controller.completeSimulatedWrite()
+            let status = try XCTUnwrap(controller.simulatedPendingFrame)
+            controller.simulateProtocolData(encoded.dropFirst(5))
+            XCTAssertEqual(controller.simulatedPendingFrame, status)
+            if payload[0] == 0xA9 { XCTAssertEqual(controller.playback.volume, 9) }
+            else { XCTAssertEqual(controller.playback.musicCallStatus, 1) }
+        }
+    }
+
     func testDiscardingUnsentCommandPreservesTheNextWireSequence() throws {
         var queue = SonyCommandQueue()
         let sent = try XCTUnwrap(queue.enqueue(payload: [0x56, 0]))
@@ -107,6 +175,143 @@ final class SonyCommandQueueTests: XCTestCase {
     }
 
     @MainActor
+    func testKnownBLERecoveryRetainsBackoffWhenClassicIsDisconnected() {
+        for attempt in [0, 1, 2, 4] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            controller.simulateBluetoothInitialization()
+            controller.simulateDeviceConnection(named: "WF-1000XM5")
+            XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: true, priorBluetoothLE: true,
+                classicConnected: false, retryAttempt: attempt))
+            controller.simulateBLEDisconnect("The headphone connection timed out.")
+            XCTAssertFalse(controller.isDeviceConnected)
+            XCTAssertEqual(controller.retrySecondsRemaining, Int(ReconnectBackoff.delay(forAttempt: attempt)))
+            controller.simulateAutomaticRefresh()
+            XCTAssertEqual(controller.linkState, .disconnected)
+            XCTAssertNotNil(controller.retrySecondsRemaining)
+            controller.setReconnectAutomatically(false)
+            XCTAssertNil(controller.retrySecondsRemaining)
+        }
+    }
+
+    @MainActor
+    func testDisconnectedFirstBLEFailureDoesNotScheduleKnownBLERecovery() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: false, priorBluetoothLE: false, classicConnected: false))
+        controller.simulateBLEDisconnect("The headphone connection timed out.")
+        XCTAssertFalse(controller.isDeviceConnected)
+        XCTAssertNil(controller.retrySecondsRemaining)
+    }
+
+    @MainActor
+    func testInitialProtocolReadRetriesOnceBeforeTheGenerationIsKnown() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateProtocolData(Data(), beginConnection: true)
+        let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+        let session = controller.simulatedControlSession
+        XCTAssertEqual(frame.payload, [0x00, 0x00])
+        XCTAssertNil(controller.protocolInformation)
+        controller.simulateAcknowledgmentTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.simulatedPendingFrame, frame)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, 2)
+        XCTAssertNil(controller.lastErrorMessage)
+        controller.simulateAcknowledgmentTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, 2)
+        XCTAssertEqual(controller.lastErrorMessage, "Headphones did not acknowledge a command.")
+    }
+
+    @MainActor
+    func testStartupDiscoveryAndNoiseReadsRetryWithoutReplacingTheirResponseDeadline() async throws {
+        for legacy in [true, false] {
+            let inquiry: UInt8 = legacy ? 0x02 : 0x17
+            var queries: [(payload: [UInt8], type: UInt8)] = [
+                ([0x04, 0x01], 0x0C), ([0x04, 0x03], 0x0C), ([0x06, 0x00], 0x0C),
+                ([0x60, inquiry], 0x0C), ([0x62, inquiry], 0x0C), ([0x66, inquiry], 0x0C),
+            ]
+            if !legacy { queries += [([0x10, 0x04], 0x0C), ([0x06, 0x00], 0x0E)] }
+            for query in queries {
+                let controller = try controllerWithPendingStartupRead(query.payload, type: query.type, legacy: legacy)
+                defer { controller.simulateControlLoss() }
+                let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+                let session = controller.simulatedControlSession
+                let discoveryDeadline = controller.simulatedDiscoveryReadTimeoutID(query.payload, type: query.type)
+                let noiseDeadline = controller.simulatedNoiseReadTimeoutID(query.payload)
+                if query.payload[0] == 0x04 || query.type == 0x0E { XCTAssertNotNil(discoveryDeadline) }
+                if [0x60, 0x62, 0x66].contains(query.payload[0]) { XCTAssertNotNil(noiseDeadline) }
+                let count = controller.simulatedTransmittedFrames.filter { $0 == frame }.count
+                controller.simulateAcknowledgmentTimeout()
+                for _ in 0..<4 { await Task.yield() }
+                XCTAssertEqual(controller.simulatedPendingFrame, frame)
+                XCTAssertEqual(controller.simulatedControlSession, session)
+                XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, count + 1)
+                XCTAssertEqual(controller.simulatedDiscoveryReadTimeoutID(query.payload, type: query.type), discoveryDeadline)
+                XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query.payload), noiseDeadline)
+                XCTAssertNil(controller.lastErrorMessage)
+                controller.simulateAcknowledgmentTimeout()
+                for _ in 0..<4 { await Task.yield() }
+                XCTAssertNil(controller.simulatedPendingFrame)
+                XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, count + 1)
+                XCTAssertEqual(controller.lastErrorMessage, "Headphones did not acknowledge a command.")
+            }
+        }
+    }
+
+    @MainActor
+    func testStartupNoiseReplyBeforeACKDoesNotReopenItsReadAfterBecomingReady() async throws {
+        let query: [UInt8] = [0x66, 0x17]
+        let controller = try controllerWithPendingStartupRead(query)
+        defer { controller.simulateControlLoss() }
+        let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+        controller.simulateProtocolMessage([0x67, 0x17, 1, 1, 1, 0, 12])
+        XCTAssertTrue(controller.isReady)
+        XCTAssertNil(controller.simulatedNoiseReadTimeoutID(query))
+        controller.simulateProtocolMessage([0x69, 0x17, 1, 1, 0, 0, 12])
+        let state = controller.noiseControlDisplayState
+        controller.simulateAcknowledgmentTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.simulatedPendingFrame, frame)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, 2)
+        XCTAssertNil(controller.simulatedNoiseReadTimeoutID(query))
+        controller.simulateProtocolMessage([0x67, 0x17, 1, 1, 1, 0, 12])
+        XCTAssertEqual(controller.noiseControlDisplayState, state)
+        XCTAssertTrue(controller.isReady)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        XCTAssertNotEqual(controller.simulatedPendingFrame, frame)
+    }
+
+    @MainActor
+    func testQueuedStartupACKTimeoutCannotRetryIntoAReplacementSession() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateProtocolData(Data(), beginConnection: true)
+        let oldFrame = try XCTUnwrap(controller.simulatedPendingFrame)
+        let oldSession = controller.simulatedControlSession
+        controller.simulateAcknowledgmentTimeout()
+        controller.simulateProtocolData(Data(), beginConnection: true)
+        let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+        let count = controller.simulatedTransmittedFrames.count
+        let session = controller.simulatedControlSession
+        XCTAssertNotEqual(session, oldSession)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - oldFrame.sequence, payload: []), session: oldSession)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.simulatedPendingFrame, frame)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.count, count)
+        XCTAssertNil(controller.lastErrorMessage)
+        controller.simulateAcknowledgmentTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.simulatedPendingFrame, frame)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.count, count + 1)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+    }
+
+    @MainActor
     func testObservedReadTimeoutRetriesIdenticalFrameOnceWithoutResettingSession() async throws {
         for query: [UInt8] in [[0xF6, 0x0F], [0xF6, 0x0C], [0x22, 0x05], [0xF2, 0x05], [0xA6, 0x01]] {
             let controller = try controllerWithPendingRead(query)
@@ -161,13 +366,13 @@ final class SonyCommandQueueTests: XCTestCase {
         let controller = try controllerWithPendingRead(query)
         defer { controller.simulateControlLoss() }
         let frame = try XCTUnwrap(controller.simulatedPendingFrame)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF7, 0x0F, 0]))
+        controller.simulateProtocolMessage([0xF7, 0x0F, 0])
         XCTAssertEqual(controller.systemFeatures[.headGestures]?.enabled, true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 1, payload: [0xF9, 0x0F, 1]))
+        controller.simulateProtocolMessage([0xF9, 0x0F, 1])
         XCTAssertEqual(controller.systemFeatures[.headGestures]?.enabled, false)
         controller.simulateAcknowledgmentTimeout()
         for _ in 0..<4 { await Task.yield() }
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF7, 0x0F, 0]))
+        controller.simulateProtocolMessage([0xF7, 0x0F, 0])
         XCTAssertEqual(controller.systemFeatures[.headGestures]?.enabled, false)
         controller.simulateSystemReadTimeout(query)
         for _ in 0..<4 { await Task.yield() }
@@ -222,19 +427,43 @@ final class SonyCommandQueueTests: XCTestCase {
     }
 
     @MainActor
+    private func controllerWithPendingStartupRead(_ query: [UInt8], type: UInt8 = 0x0C,
+                                                 legacy: Bool = false) throws -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateProtocolMessage(legacy ? [0x01, 0, 0x40, 0] : [0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+        for _ in 0..<40 {
+            let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+            if frame.payload == query, frame.type == type { return controller }
+            switch (frame.type, frame.payload) {
+            case (0x0C, [0x04, 0x01]):
+                let name = Array((legacy ? "WH-1000XM3" : "WF-1000XM5").utf8)
+                controller.simulateProtocolMessage([0x05, 1, UInt8(name.count)] + name)
+            case (0x0C, [0x04, 0x03]): controller.simulateProtocolMessage([0x05, 3, 0x30, 0])
+            case (0x0C, [0x06, 0x00]):
+                controller.simulateProtocolMessage(legacy ? [0x07, 0, 1, 0x62] : [0x07, 0, 2, 0x6B, 0, 0x14, 0])
+            case (0x0C, [0x60, 0x02]): controller.simulateProtocolMessage([0x61, 2, 0, 2, 1, 2, 0, 20, 1, 20])
+            case (0x0C, [0x62, 0x02]): controller.simulateProtocolMessage([0x63, 2, 0])
+            case (0x0C, [0x66, 0x17]): controller.simulateProtocolMessage([0x67, 0x17, 1, 1, 1, 0, 12])
+            default: replyToOrdinaryNoiseMetadata(frame, controller: controller)
+            }
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        }
+        XCTFail("Startup read was not transmitted: \(query)")
+        return controller
+    }
+
+    @MainActor
     private func controllerWithPendingRead(_ query: [UInt8]) throws -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
         if query == [0xF2, 0x05] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-                payload: [1, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+            controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
             acknowledgeSimulatedCommands(controller)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-                payload: [7, 0, 2, 0x6B, 1, 0xF5, 1]))
+            controller.simulateProtocolMessage([7, 0, 2, 0x6B, 1, 0xF5, 1])
             acknowledgeSimulatedCommands(controller)
             for payload: [UInt8] in [[0x61, 0x17, 1, 0, 1, 20, 1], [0x63, 0x17, 0],
                                     [0x67, 0x17, 1, 1, 1, 0, 8], [0xF3, 5, 0], [0xF7, 5, 1]] {
-                controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+                controller.simulateProtocolMessage(payload)
                 acknowledgeSimulatedCommands(controller)
             }
         }

@@ -5,20 +5,57 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    let environment = AppEnvironment.live()
+    lazy var environment = AppEnvironment.live()
+    private var backgroundServiceMigrationError: String?
+    private var retriesBackgroundServiceMigration = false
+    private var isSystemTerminating = false
 
+    private static let reopenNotification = Notification.Name("dev.baglayan.Acouplet.reopen")
     private var globalHotKeyController: GlobalHotKeyController?
     private var menuBarController: MenuBarController?
     private var cancellables = Set<AnyCancellable>()
     private var deviceAlertObservers: [ObjectIdentifier: AnyCancellable] = [:]
     private var testTerminationObserver: AnyCancellable?
-    var openSettings: (() -> Void)?
+    private var isDuplicateLaunch = false
+    private var pendingSettingsRequest = false
+    var openSettings: (() -> Void)? {
+        didSet {
+            if pendingSettingsRequest, openSettings != nil {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.pendingSettingsRequest else { return }
+                    self.showSettings()
+                }
+            }
+        }
+    }
     #if DEBUG
     private var uiTestWindow: NSWindow?
     #endif
 
     override init() {
         super.init()
+        #if !DEBUG && !ACOUPLET_PUBLIC_APIS_ONLY
+        if CommandLine.arguments.contains("--migrate-background-service") {
+            NSApplication.shared.setActivationPolicy(.prohibited)
+            do {
+                try LegacyBackgroundService.runMigration()
+            } catch {
+                NSLog("Background service migration failed: %@", error.localizedDescription)
+                exit(EXIT_FAILURE)
+            }
+            exit(EXIT_SUCCESS)
+        }
+        if CommandLine.arguments.contains("--service-migration-recovery") {
+            backgroundServiceMigrationError = Self.backgroundServiceMigrationMessage
+        } else {
+            do {
+                try LegacyBackgroundService.prepare()
+            } catch {
+                NSLog("Background service migration failed: %@", error.localizedDescription)
+                backgroundServiceMigrationError = Self.backgroundServiceMigrationMessage
+            }
+        }
+        #endif
         if #available(macOS 27.0, *) {
             AppDependencyManager.shared.add(dependency: HeadphoneIntentControls(
                 actions: { [self] in environment.devices.noiseControlActions },
@@ -42,14 +79,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if !isRunningTests,
            let existing = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
-            .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
-            existing.activate()
-            NSApp.terminate(nil)
+            .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && $0.activationPolicy != .prohibited }) {
+            isDuplicateLaunch = true
+            guard !CommandLine.arguments.contains("--background-service") else {
+                NSApp.terminate(nil)
+                return
+            }
+            existing.publisher(for: \.isFinishedLaunching, options: [.initial, .new])
+                .combineLatest(existing.publisher(for: \.isTerminated, options: [.initial, .new]))
+                .first { $0 || $1 }
+                .timeout(.seconds(5), scheduler: DispatchQueue.main)
+                .receive(on: DispatchQueue.main)
+                .sink(receiveCompletion: { _ in NSApp.terminate(nil) }, receiveValue: { finished, terminated in
+                    if finished, !terminated {
+                        DistributedNotificationCenter.default().postNotificationName(
+                            Self.reopenNotification, object: String(existing.processIdentifier), userInfo: nil, options: .deliverImmediately)
+                    }
+                })
+                .store(in: &cancellables)
             return
         }
-        #if MENU_BAR_APP
+        DistributedNotificationCenter.default().publisher(for: Self.reopenNotification,
+                                                          object: String(ProcessInfo.processInfo.processIdentifier) as NSString)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.showSettings() }
+            .store(in: &cancellables)
         NSApp.setActivationPolicy(.accessory)
-        #endif
         #if DEBUG
         if CommandLine.arguments.contains("-ui-testing") {
             if CommandLine.arguments.contains("--light-appearance") {
@@ -62,13 +117,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var isRunningTests: Bool {
+        #if DEBUG
         ProcessInfo.processInfo.environment["ACOUPLET_TESTING"] == "1" ||
             ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
             CommandLine.arguments.contains("-ui-testing") ||
             CommandLine.arguments.contains("--ui-test-host")
+        #else
+        false
+        #endif
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !isDuplicateLaunch else { return }
+        environment.settings.backgroundServiceMigrationError = backgroundServiceMigrationError
+        environment.settings.retryBackgroundServiceMigration = { [weak self] in
+            guard let self, self.backgroundServiceMigrationError != nil else { return }
+            self.retriesBackgroundServiceMigration = true
+            NSApp.terminate(nil)
+        }
         menuBarController = MenuBarController(
             environment: environment,
             showSettings: { [weak self] in self?.showSettings() }
@@ -121,7 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isRunningTests else { return }
         environment.settings.enableLaunchAtLoginByDefault()
         #if ACOUPLET_SPARKLE
-        environment.updater.start()
+        if backgroundServiceMigrationError == nil { environment.updater.start() }
         #endif
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         environment.notifications.start()
@@ -133,6 +199,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
         #endif
         let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        workspaceNotifications.publisher(for: NSWorkspace.willPowerOffNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.isSystemTerminating = true }
+            .store(in: &cancellables)
         workspaceNotifications.publisher(for: NSWorkspace.willSleepNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -147,7 +217,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.environment.devices.systemDidWake() }
             .store(in: &cancellables)
         environment.devices.start()
-        #if MENU_BAR_APP || HYBRID_APP
         globalHotKeyController = GlobalHotKeyController { [weak self] in
             self?.environment.headphones.toggleNoiseControl()
         }
@@ -158,7 +227,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.environment.settings.globalShortcutError = self.globalHotKeyController?.setEnabled(enabled)
             }
             .store(in: &cancellables)
-        #endif
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -170,6 +238,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        #if !DEBUG && !ACOUPLET_PUBLIC_APIS_ONLY
+        let quitReason = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: kAEQuitReason)?.enumCodeValue
+        if [kAEQuitAll, kAEShutDown, kAERestart, kAEReallyLogOut].contains(quitReason ?? 0) {
+            isSystemTerminating = true
+        }
+        if isSystemTerminating {
+            retriesBackgroundServiceMigration = false
+        } else if backgroundServiceMigrationError != nil, !retriesBackgroundServiceMigration {
+            let alert = NSAlert()
+            alert.messageText = Self.backgroundServiceMigrationMessage
+            alert.informativeText = String(localized: "Acouplet may reopen until its startup settings are updated.")
+            alert.addButton(withTitle: String(localized: "Retry"))
+            alert.addButton(withTitle: String(localized: "Cancel"))
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                isSystemTerminating = false
+                return .terminateCancel
+            }
+            retriesBackgroundServiceMigration = true
+        }
+        #endif
         if environment.devices.prepareEarbudFindingForTermination(completion: { [weak self] in
             guard let self else { sender.reply(toApplicationShouldTerminate: true); return }
             let reply = self.applicationShouldTerminate(sender)
@@ -191,7 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             $0.earTipFitTransition?.canDismiss == false || $0.headGesturePracticeTransition?.canDismiss == false
                 || $0.legacyOptimizerTransition?.canDismiss == false
         }
-        guard !controllers.isEmpty else { return .terminateNow }
+        guard !controllers.isEmpty else { return finishTermination() }
         testTerminationObserver = Publishers.MergeMany(controllers.map { $0.objectWillChange.eraseToAnyPublisher() })
             .receive(on: DispatchQueue.main)
             .first { _ in controllers.allSatisfy {
@@ -209,8 +297,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.environment.settings.selectedSettingsPane = "headphones"
                     self.showSettings()
                 }
-                sender.reply(toApplicationShouldTerminate: interrupted == nil)
                 self?.testTerminationObserver = nil
+                if interrupted != nil {
+                    self?.retriesBackgroundServiceMigration = false
+                    self?.isSystemTerminating = false
+                }
+                sender.reply(toApplicationShouldTerminate: interrupted == nil && (self?.finishTermination() ?? .terminateNow) == .terminateNow)
             }
         for headphones in controllers {
             if let transition = headphones.earTipFitTransition { headphones.cancelEarTipFit(id: transition.id) }
@@ -219,6 +311,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return .terminateLater
     }
+
+    private func finishTermination() -> NSApplication.TerminateReply {
+        #if !DEBUG && !ACOUPLET_PUBLIC_APIS_ONLY
+        if retriesBackgroundServiceMigration {
+            retriesBackgroundServiceMigration = false
+            environment.devices.systemWillSleep()
+            environment.noiseModeHUD.dismiss()
+            environment.settings.defaults.removeObject(forKey: LegacyBackgroundService.attemptKey)
+            do {
+                try LegacyBackgroundService.prepare(defaults: environment.settings.defaults)
+            } catch {
+                NSLog("Background service migration failed: %@", error.localizedDescription)
+                environment.settings.backgroundServiceMigrationError = Self.backgroundServiceMigrationMessage
+                environment.devices.resetEarbudFindingTermination()
+                environment.devices.systemDidWake()
+                environment.settings.selectedSettingsPane = "general"
+                showSettings()
+                isSystemTerminating = false
+                return .terminateCancel
+            }
+        }
+        #endif
+        return .terminateNow
+    }
+
+    #if !DEBUG && !ACOUPLET_PUBLIC_APIS_ONLY
+    private static var backgroundServiceMigrationMessage: String {
+        String(localized: "Acouplet couldn’t update its startup settings. Try again.")
+    }
+    #endif
 
     func applicationWillTerminate(_ notification: Notification) {
         menuBarController?.stop()
@@ -252,7 +374,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func showSettings() {
-        openSettings?()
+        guard let openSettings else {
+            pendingSettingsRequest = true
+            return
+        }
+        pendingSettingsRequest = false
+        openSettings()
         NSApp.activate(ignoringOtherApps: true)
     }
 }

@@ -60,8 +60,8 @@ final class SonyNotificationService: ObservableObject {
     }
 
     func updateLowBattery(deviceID: String, name: String, readings: [SonyLowBatteryPolicy.Reading],
-                          isConnected: Bool, isCurrent: () -> Bool = { true }, at date: Date = Date()) async {
-        let warnings = policy.warnings(for: deviceID, readings: readings, isConnected: isConnected, at: date)
+                          isCurrent: () -> Bool = { true }, at date: Date = Date()) async {
+        let warnings = policy.warnings(for: deviceID, readings: readings, at: date)
         persistPolicy()
         guard settings.lowBatteryNotificationsEnabled, let warning = warnings.first,
               !Task.isCancelled, warning.reading.isFresh(at: Date()), isCurrent() else { return }
@@ -148,7 +148,7 @@ final class SonyNotificationService: ObservableObject {
                   let address = controller.lowBatteryNotificationDeviceID else { return }
             let session = controller.notificationSession
             await updateLowBattery(deviceID: address, name: controller.deviceName,
-                                   readings: controller.lowBatteryReadings, isConnected: true) {
+                                   readings: controller.lowBatteryReadings) {
                 controller.notificationSession == session && controller.lowBatteryNotificationDeviceID == address
             }
         }

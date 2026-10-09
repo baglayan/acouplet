@@ -37,6 +37,8 @@ final class SettingsStore: ObservableObject {
     @Published private(set) var launchAtLogin: Bool
     @Published private(set) var launchAtLoginError: String?
     @Published private(set) var backgroundServiceStatus: SMAppService.Status = .notRegistered
+    @Published var backgroundServiceMigrationError: String?
+    var retryBackgroundServiceMigration: (() -> Void)?
     var hasBackgroundService: Bool {
         CommandLine.arguments.contains("--background-service")
     }
@@ -46,6 +48,7 @@ final class SettingsStore: ObservableObject {
     @Published var globalShortcutError: String?
     @Published var customEqualizerDraft: EqualizerSettings {
         didSet {
+            guard !isLoadingEqualizerDraft else { return }
             if let equalizerDeviceAddress {
                 equalizerDraftsByDevice[equalizerDeviceAddress] = customEqualizerDraft
                 persist(equalizerDraftsByDevice, forKey: Keys.equalizerDraftsByDevice)
@@ -61,6 +64,7 @@ final class SettingsStore: ObservableObject {
     let defaults: UserDefaults
     private var equalizerDeviceAddress: String?
     private var equalizerDraftsByDevice: [String: EqualizerSettings]
+    private var isLoadingEqualizerDraft = false
 
     private let managesLaunchService: Bool
 
@@ -90,7 +94,13 @@ final class SettingsStore: ObservableObject {
 
     static func migrateLegacyPreferences(from legacy: [String: Any], to defaults: UserDefaults, bundleIdentifier: String?) {
         let migrationKey = "migration.legacyPreferences"
-        guard bundleIdentifier == "dev.baglayan.Acouplet", !defaults.bool(forKey: migrationKey) else { return }
+        guard bundleIdentifier == "dev.baglayan.Acouplet" else { return }
+        if defaults.bool(forKey: migrationKey) {
+            if defaults.object(forKey: Keys.launchAtLoginDefaultApplied) == nil {
+                defaults.set(true, forKey: Keys.launchAtLoginDefaultApplied)
+            }
+            return
+        }
         let keys = ["headphones.verifiedIdentity", "headphones.verifiedIdentities", "notifications.lowBatteryHistory",
                     "SUEnableAutomaticChecks", "SUAutomaticallyUpdate"]
         for (key, value) in legacy where defaults.object(forKey: key) == nil {
@@ -101,12 +111,17 @@ final class SettingsStore: ObservableObject {
         defaults.set(true, forKey: migrationKey)
     }
 
-    func selectEqualizerDevice(address: String, defaultDraft: EqualizerSettings) {
+    func selectEqualizerDevice(address: String, defaultDraft: EqualizerSettings?) {
         let address = address.replacingOccurrences(of: "-", with: ":").uppercased()
-        guard !address.isEmpty, equalizerDeviceAddress != address else { return }
-        let draft = equalizerDraftsByDevice[address] ?? (equalizerDraftsByDevice.isEmpty ? customEqualizerDraft : defaultDraft)
+        guard !address.isEmpty,
+              equalizerDeviceAddress != address || (equalizerDraftsByDevice[address] == nil && defaultDraft != nil) else { return }
+        let legacyDraft = equalizerDeviceAddress == nil && equalizerDraftsByDevice.isEmpty
+            ? Self.decode(EqualizerSettings.self, from: defaults.data(forKey: Keys.customEqualizerDraft)) : nil
+        let draft = equalizerDraftsByDevice[address] ?? legacyDraft ?? defaultDraft
         equalizerDeviceAddress = address
-        customEqualizerDraft = draft
+        isLoadingEqualizerDraft = draft == nil
+        customEqualizerDraft = draft ?? .flat
+        isLoadingEqualizerDraft = false
     }
 
     func refreshLaunchStatus() {
@@ -118,11 +133,13 @@ final class SettingsStore: ObservableObject {
     }
 
     func enableLaunchAtLoginByDefault() {
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
         guard !hasBackgroundService, !defaults.bool(forKey: Keys.launchAtLoginDefaultApplied) else { return }
         defaults.set(true, forKey: Keys.launchAtLoginDefaultApplied)
         if !managesLaunchService || SMAppService.mainApp.status == .notRegistered {
             setLaunchAtLogin(true)
         }
+        #endif
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
@@ -159,7 +176,12 @@ final class SettingsStore: ObservableObject {
 
     func equalizerProfileName(for proposedName: String) -> String {
         let trimmed = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? String(localized: "My EQ \(equalizerProfiles.count + 1)") : String(trimmed.prefix(32))
+        if !trimmed.isEmpty { return String(trimmed.prefix(32)) }
+        var number = 1
+        while equalizerProfiles.contains(where: { $0.name.localizedCaseInsensitiveCompare(String(localized: "My EQ \(number)")) == .orderedSame }) {
+            number += 1
+        }
+        return String(localized: "My EQ \(number)")
     }
 
     func deleteEqualizerProfile(id: UUID) {
@@ -192,3 +214,195 @@ final class SettingsStore: ObservableObject {
         static let equalizerProfiles = "preferences.equalizerProfiles"
     }
 }
+
+#if !ACOUPLET_PUBLIC_APIS_ONLY
+enum LegacyBackgroundService {
+    static let label = "dev.baglayan.Acouplet.agent"
+    static let migrationLabel = "dev.baglayan.Acouplet.agent.migration"
+    static let policyKey = "ACOUPLET_SERVICE_POLICY"
+    static let policy = "successful-exit-v1"
+    static let attemptKey = "migration.backgroundService.successfulExitV1"
+    static let executablePath = "/Applications/Acouplet.app/Contents/MacOS/Acouplet"
+
+    static var domain: String { "gui/\(getuid())" }
+    static var plistURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Library/LaunchAgents/\(label).plist")
+    }
+
+    static func configuration(from data: Data, executablePath: String) throws -> [String: Any] {
+        let decoded = try PropertyListSerialization.propertyList(from: data, format: nil)
+        guard var plist = decoded as? [String: Any], plist["Label"] as? String == label,
+              plist["ProgramArguments"] as? [String] == [executablePath, "--background-service"],
+              plist["Program"] == nil,
+              plist["EnvironmentVariables"] == nil || plist["EnvironmentVariables"] is [String: String] else {
+            throw failure(1)
+        }
+        var environment = plist["EnvironmentVariables"] as? [String: String] ?? [:]
+        environment[policyKey] = policy
+        plist["EnvironmentVariables"] = environment
+        plist["KeepAlive"] = ["SuccessfulExit": false]
+        return plist
+    }
+
+    #if !DEBUG
+    static func prepare(defaults: UserDefaults = .standard) throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard Bundle.main.bundleIdentifier == "dev.baglayan.Acouplet",
+              Bundle.main.executableURL?.path == executablePath,
+              CommandLine.arguments.contains("--background-service"),
+              environment["XPC_SERVICE_NAME"] == label || CommandLine.arguments.contains("--service-migration-recovery") else { return }
+        let recovering = CommandLine.arguments.contains("--service-migration-recovery")
+        if !recovering, environment[policyKey] == policy {
+            defaults.removeObject(forKey: attemptKey)
+            return
+        }
+        guard !defaults.bool(forKey: attemptKey) else { throw failure(2) }
+        let contents = try configuration(from: ownedPlistData(), executablePath: executablePath)
+        let data = try PropertyListSerialization.data(fromPropertyList: contents, format: .xml, options: 0)
+        try data.write(to: plistURL, options: .atomic)
+        let token = UUID().uuidString
+        let directory = migrationDirectory(token: token)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { removeMigrationDirectory(directory) }
+        let fifo = directory.appending(path: "result")
+        guard mkfifo(fifo.path, 0o600) == 0 else { throw failure(3) }
+        let descriptor = open(fifo.path, O_RDWR | O_NONBLOCK)
+        guard descriptor >= 0 else { throw failure(4) }
+        let completion = DispatchSemaphore(value: 0)
+        let ready = DispatchSemaphore(value: 0)
+        let reader = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: .global())
+        reader.setEventHandler {
+            var result: UInt8 = 1
+            if read(descriptor, &result, 1) == 1, result == 0 { ready.signal() }
+            completion.signal()
+            reader.cancel()
+        }
+        reader.setCancelHandler { close(descriptor) }
+        reader.resume()
+        defer { reader.cancel() }
+        let migration: [String: Any] = [
+            "Label": migrationLabel, "ProgramArguments": [executablePath, "--migrate-background-service"],
+            "RunAtLoad": true, "LaunchOnlyOnce": true,
+            "EnvironmentVariables": ["ACOUPLET_MIGRATION_TOKEN": token,
+                                     "ACOUPLET_MIGRATION_RECOVERY": recovering ? "1" : "0",
+                                     "ACOUPLET_MIGRATION_PARENT": String(ProcessInfo.processInfo.processIdentifier)],
+        ]
+        let migrationData = try PropertyListSerialization.data(fromPropertyList: migration, format: .xml, options: 0)
+        let migrationURL = directory.appending(path: "agent.plist")
+        try migrationData.write(to: migrationURL, options: .atomic)
+        defaults.set(true, forKey: attemptKey)
+        try launchctl(["bootstrap", domain, migrationURL.path])
+        guard completion.wait(timeout: .now() + 15) == .success else { throw failure(5) }
+        guard ready.wait(timeout: .now()) == .success, recovering else { throw failure(5) }
+    }
+
+    static func runMigration() throws {
+        guard Bundle.main.bundleIdentifier == "dev.baglayan.Acouplet",
+              Bundle.main.executableURL?.path == executablePath,
+              ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == migrationLabel,
+              let token = ProcessInfo.processInfo.environment["ACOUPLET_MIGRATION_TOKEN"],
+              UUID(uuidString: token)?.uuidString == token else { throw failure(6) }
+        let directory = migrationDirectory(token: token)
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        guard attributes[.type] as? FileAttributeType == .typeDirectory,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700 else { throw failure(7) }
+        let descriptor = open(directory.appending(path: "result").path, O_WRONLY | O_NONBLOCK)
+        guard descriptor >= 0 else { throw failure(8) }
+        defer { close(descriptor) }
+        signal(SIGPIPE, SIG_IGN)
+        var oldJobRemoved = false
+        do {
+            try FileManager.default.removeItem(at: directory)
+            let data = try ownedPlistData()
+            let expected = try configuration(from: data, executablePath: executablePath)
+            let actual = try PropertyListSerialization.propertyList(from: data, format: nil) as? NSDictionary
+            guard actual == expected as NSDictionary else { throw failure(9) }
+            if ProcessInfo.processInfo.environment["ACOUPLET_MIGRATION_RECOVERY"] == "1" {
+                guard let rawPID = ProcessInfo.processInfo.environment["ACOUPLET_MIGRATION_PARENT"],
+                      let parentPID = Int32(rawPID), parentPID > 0 else { throw failure(13) }
+                let exited = DispatchSemaphore(value: 0)
+                let parent = DispatchSource.makeProcessSource(identifier: parentPID, eventMask: .exit, queue: .global())
+                parent.setEventHandler { exited.signal() }
+                parent.resume()
+                defer { parent.cancel() }
+                var result: UInt8 = 0
+                guard write(descriptor, &result, 1) == 1,
+                      exited.wait(timeout: .now() + 10) == .success else { throw failure(14) }
+                oldJobRemoved = true
+                try launchctl(["bootstrap", domain, plistURL.path])
+            } else {
+                try reload(plistURL: plistURL, domain: domain, label: label) { oldJobRemoved = true }
+            }
+        } catch {
+            NSLog("Background service migration failed: %@", error.localizedDescription)
+            var result: UInt8 = 1
+            let notified = write(descriptor, &result, 1) == 1
+            if oldJobRemoved {
+                try command("/usr/bin/open", ["-n", "/Applications/Acouplet.app", "--args",
+                                              "--background-service", "--service-migration-recovery"])
+            } else if !notified {
+                throw error
+            }
+        }
+    }
+
+    private static func ownedPlistData() throws -> Data {
+        let attributes = try FileManager.default.attributesOfItem(atPath: plistURL.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() else { throw failure(10) }
+        return try Data(contentsOf: plistURL)
+    }
+
+    private static func migrationDirectory(token: String) -> URL {
+        FileManager.default.temporaryDirectory.appending(path: "\(migrationLabel).\(token)")
+    }
+
+    private static func removeMigrationDirectory(_ directory: URL) {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: directory)
+        } catch {
+            NSLog("Background service migration cleanup failed: %@", error.localizedDescription)
+        }
+    }
+    #endif
+
+    static func reload(plistURL: URL, domain: String, label: String, didBootout: () -> Void = {}) throws {
+        try launchctl(["bootout", "\(domain)/\(label)"])
+        didBootout()
+        try launchctl(["bootstrap", domain, plistURL.path])
+    }
+
+    private static func launchctl(_ arguments: [String]) throws {
+        try command("/bin/launchctl", arguments)
+    }
+
+    private static func command(_ executable: String, _ arguments: [String]) throws {
+        let process = Process()
+        let completion = DispatchSemaphore(value: 0)
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.standardError
+        process.terminationHandler = { _ in completion.signal() }
+        try process.run()
+        if completion.wait(timeout: .now() + 5) == .timedOut {
+            process.terminate()
+            if completion.wait(timeout: .now() + 1) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                if completion.wait(timeout: .now() + 1) == .timedOut { throw failure(11) }
+            }
+            process.waitUntilExit()
+            throw failure(12)
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw failure(Int(process.terminationStatus)) }
+    }
+
+    private static func failure(_ code: Int) -> NSError {
+        NSError(domain: label, code: code)
+    }
+}
+#endif

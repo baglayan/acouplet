@@ -182,6 +182,19 @@ struct SonyTouchAssignments: Equatable, Sendable {
         return selectedPresets[index]
     }
 
+    mutating func invalidateRead(_ query: [UInt8]) {
+        guard query.count == 2, query[1] == inquiryType else { return }
+        switch query[0] {
+        case 0xF0:
+            keys = nil
+            limitation = nil
+        case 0xF2: statuses = nil
+        case 0xF6: selectedPresets = nil
+        case 0xFA: customizedActions = nil
+        default: break
+        }
+    }
+
     func keysUsingPreset(_ preset: UInt8) -> [SonyTouchKeyCapability] {
         guard let keys, let selectedPresets, keys.count == selectedPresets.count else { return [] }
         return zip(keys, selectedPresets).compactMap { $0.1 == preset ? $0.0 : nil }

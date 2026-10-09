@@ -153,7 +153,7 @@ enum SonySourceControlResult: Equatable, Sendable {
         case .success: nil
         case .failure: String(localized: "The headphones could not change the audio source.")
         case .callInProgress: String(localized: "Finish the phone call before changing the audio source.")
-        case .a2dpNotConnected: "The device is not connected for Bluetooth audio."
+        case .a2dpNotConnected: String(localized: "The device is not connected for Bluetooth audio.")
         case .voiceAssistantPriority: String(localized: "Finish using the voice assistant before changing the audio source.")
         case .unknown: String(localized: "The headphones reported an unknown audio source result.")
         }
@@ -302,11 +302,6 @@ struct SonyMultipoint: Equatable, Sendable {
         case .unpair: break
         }
         return [0x3C, 0x02, action.rawValue] + Array(address.utf8)
-    }
-
-    func pairingModeSetPayload(_ enabled: Bool) -> [UInt8]? {
-        guard canManageDevices else { return nil }
-        return [0x34, 0x02, enabled ? 0x01 : 0x00, 0x00]
     }
 
     @discardableResult

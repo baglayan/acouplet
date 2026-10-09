@@ -15,14 +15,26 @@ assert project['objects']['700000000000000000000003']['buildSettings']['ACOUPLET
 
 stub_source = r'''#!/usr/bin/python3
 from pathlib import Path
-import json, os, plistlib, shutil, subprocess, sys
+import json, os, plistlib, re, shutil, subprocess, sys
 root = Path(os.environ['ACOUPLET_PACKAGE_CHECK_ROOT'])
 mode = os.environ['ACOUPLET_PACKAGE_CHECK_MODE']
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 with (root / 'commands.jsonl').open('a') as log:
     log.write(json.dumps([name, *args]) + '\n')
-if name == 'xcrun':
+if name == 'release-source.py':
+    record = Path(args[2])
+    if args[0] == 'capture':
+        development = args[3:] == ['--development']
+        if mode == 'source-dirty' and not development: sys.exit('Production packaging requires clean source.')
+        record.write_text(json.dumps({'development': development}))
+    else:
+        development = json.loads(record.read_text())['development']
+        if not development and (mode == 'source-drift' or (mode == 'source-drift-archive' and (root / 'dist/Acouplet.zip.pending').exists())):
+            sys.exit('Release source changed during packaging.')
+        state = 'development (dirty)' if development else 'production clean'
+        print('Revision: ' + 'a' * 40 + '\nSource tree: ' + 'b' * 40 + '\nSource input SHA256: ' + 'c' * 64 + '\nWorktree: ' + state)
+elif name == 'xcrun':
     assert args[0] == 'xcodebuild' and args[-1] == 'build', args
     assert '-allowProvisioningUpdates' not in args, args
     if mode == 'build-failure': sys.exit(65)
@@ -42,7 +54,7 @@ if name == 'xcrun':
     ldac_audio.mkdir()
     ldac_driver = app / 'Contents/Helpers/AcoupletLDACOutput.driver'
     ldac_driver.mkdir()
-    ldac_codes = [app / 'Contents/Helpers' / name for name in ['LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver']]
+    ldac_codes = [app / 'Contents/Helpers' / name for name in ['LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver']]
     for bundle in sparkle_codes:
         if bundle.name == 'Autoupdate': bundle.touch()
         else: bundle.mkdir(parents=True, exist_ok=True)
@@ -52,9 +64,13 @@ if name == 'xcrun':
     adhoc = settings['CODE_SIGN_IDENTITY'] == '-'
     for bundle in (app, helper, hud, hud_check, *sparkle_codes, *ldac_codes):
         metadata = {'apple': not adhoc, 'team': 'not set' if adhoc else team,
+                    'developer_id': settings['CODE_SIGN_IDENTITY'].startswith('Developer ID Application') or bool(re.fullmatch(r'[0-9A-Fa-f]{40}', settings['CODE_SIGN_IDENTITY'])),
                     'runtime': settings.get('ENABLE_HARDENED_RUNTIME') == 'YES',
                     'debuggable': settings.get('CODE_SIGN_INJECT_BASE_ENTITLEMENTS') != 'NO'}
         if mode == 'adhoc-output': metadata['apple'] = False
+        if mode == 'development-output': metadata['developer_id'] = False
+        if mode == 'development-driver' and bundle == ldac_driver: metadata['developer_id'] = False
+        if mode == 'development-helper' and bundle == helper: metadata['developer_id'] = False
         if mode == 'wrong-team': metadata['team'] = 'OTHER67890'
         if mode == 'missing-team': metadata['team'] = 'not set'
         if mode == 'missing-runtime-app' and bundle == app: metadata['runtime'] = False
@@ -102,7 +118,7 @@ if name == 'xcrun':
                 'SUVerifyUpdateBeforeExtraction': True, 'SURequireSignedFeed': True, 'SUSignedFeedFailureExpirationInterval': 0,
                 'SUEnableInstallerLauncherService': False, 'SUEnableDownloaderService': False, 'SUEnableSystemProfiling': False,
                 'SUEnableAutomaticChecks': True, 'SUAutomaticallyUpdate': False}))
-    for relative in ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput'):
+    for relative in ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/LDACLogObserver', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput'):
         binary = app / relative
         binary.parent.mkdir(parents=True, exist_ok=True)
         binary.write_text(relative)
@@ -141,6 +157,7 @@ elif name == 'codesign':
     elif args[0] == '--force':
         assert '--preserve-metadata=entitlements' in args and '--options' in args and args[args.index('--options') + 1] == 'runtime'
         assert (target / 'Contents/Resources/Acouplet LDAC Output.pkg').is_file()
+        assert (target / 'Contents/Resources/Acouplet LDAC Removal.pkg').is_file()
         (target / 'Contents/MacOS/Acouplet').write_text('resigned app')
         (target / 'Contents/_CodeSignature').mkdir(exist_ok=True)
         (target / 'Contents/_CodeSignature/CodeResources').write_text('sealed installer')
@@ -148,6 +165,7 @@ elif name == 'codesign':
         assert args[0] == '--verify', args
         if mode == 'invalid-signature': sys.exit(1)
         if '--test-requirement==anchor apple generic' in args and not metadata['apple']: sys.exit(1)
+        if any('field.1.2.840.113635.100.6.1.13' in arg for arg in args) and not (metadata['apple'] and metadata['developer_id']): sys.exit(1)
 elif name == 'otool':
     if '-L' in args: print('@rpath/Sparkle.framework/Versions/B/Sparkle')
     else:
@@ -158,13 +176,21 @@ elif name == 'ditto':
     if args[0] == '-c': subprocess.run(['/usr/bin/ditto', *args], check=True)
     else: shutil.copytree(args[0], args[1])
 elif name == 'pkgbuild':
-    payload = Path(args[args.index('--root') + 1])
-    assert [path.name for path in payload.iterdir()] == ['AcoupletLDACOutput.driver']
-    assert args[args.index('--install-location') + 1] == '/Library/Audio/Plug-Ins/HAL'
-    assert args[args.index('--identifier') + 1] == 'dev.baglayan.Acouplet.LDACOutput'
-    components = plistlib.loads(Path(args[args.index('--component-plist') + 1]).read_bytes())
-    assert components[0]['BundleIsRelocatable'] is False and components[0]['BundleHasStrictIdentifier'] is True
-    Path(args[-1]).write_text('driver-only installer')
+    if '--nopayload' in args:
+        assert '--root' not in args and '--component-plist' not in args
+        assert args[args.index('--identifier') + 1] == 'dev.baglayan.Acouplet.LDACOutput.Removal'
+        scripts = Path(args[args.index('--scripts') + 1])
+        assert [path.name for path in scripts.iterdir()] == ['postinstall']
+        assert '@ACOUPLET_LDAC_SIGNING_TEAM_ID@' not in (scripts / 'postinstall').read_text()
+        Path(args[-1]).write_text('driver-only uninstaller')
+    else:
+        payload = Path(args[args.index('--root') + 1])
+        assert [path.name for path in payload.iterdir()] == ['AcoupletLDACOutput.driver']
+        assert args[args.index('--install-location') + 1] == '/Library/Audio/Plug-Ins/HAL'
+        assert args[args.index('--identifier') + 1] == 'dev.baglayan.Acouplet.LDACOutput'
+        components = plistlib.loads(Path(args[args.index('--component-plist') + 1]).read_bytes())
+        assert components[0]['BundleIsRelocatable'] is False and components[0]['BundleHasStrictIdentifier'] is True
+        Path(args[-1]).write_text('driver-only installer')
 elif name == 'pkgutil':
     assert args[0] == '--check-signature' and Path(args[-1]).is_file()
 else:
@@ -188,6 +214,7 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
         source = source.replace('/Applications/Acouplet.app/Contents/Info.plist', str(root / 'installed.plist'))
         script = scripts / 'package.sh'
         script.write_text(source)
+        (scripts / 'release-source.py').write_text(stub_source)
         for filename in ('Install.command', 'Uninstall Service.command', 'Uninstall LDAC Output.command', 'README.txt'):
             shutil.copy2(packaging / filename, scripts / filename)
         builder = (packaging / 'build-ldac-output-installer.sh').read_text()
@@ -195,6 +222,7 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
             builder = builder.replace(('/usr/sbin/' if tool == 'pkgutil' else '/usr/bin/') + tool, str(stubs / tool))
         (scripts / 'build-ldac-output-installer.sh').write_text(builder)
         shutil.copytree(packaging / 'LDACOutputInstaller', scripts / 'LDACOutputInstaller')
+        shutil.copytree(packaging / 'LDACOutputUninstaller', scripts / 'LDACOutputUninstaller')
         (scripts / 'fetch-sparkle.sh').write_text('exit 0\n')
         (scripts / 'check-sparkle-bundle.py').write_text((packaging / 'check-sparkle-bundle.py').read_text().replace('/usr/bin/otool', str(stubs / 'otool')))
         for filename in ('LICENSE', 'THIRD-PARTY-NOTICES.md'):
@@ -250,10 +278,13 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
         elif signing.get('CODE_SIGN_IDENTITY') == '':
             assert not commands, commands
             assert 'CODE_SIGN_IDENTITY is empty' in result.stderr, result.stderr
+        elif mode == 'source-dirty' and not local:
+            assert not builds and len(commands) == 1 and commands[0][1] == 'capture', commands
+            assert not (root / '.build/package-build-number').exists()
         else:
             assert len(builds) == 1, builds
             settings = dict(arg.split('=', 1) for arg in builds[0] if '=' in arg)
-            identity = signing.get('CODE_SIGN_IDENTITY', 'Apple Development')
+            identity = signing.get('CODE_SIGN_IDENTITY', 'Apple Development' if local else 'Developer ID Application')
             assert settings['CURRENT_PROJECT_VERSION'] == str(expected_build), settings
             assert settings['MARKETING_VERSION'] == signing.get('ACOUPLET_MARKETING_VERSION', '0.' + str(expected_build)), settings
             assert settings['ACOUPLET_DISTRIBUTION'] == ('development' if local else 'production'), settings
@@ -269,17 +300,22 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
             assert settings['CODE_SIGN_INJECT_BASE_ENTITLEMENTS'] == 'NO', settings
             assert settings['ENABLE_HARDENED_RUNTIME'] == 'YES', settings
             assert settings.get('DEVELOPMENT_TEAM') == signing.get('DEVELOPMENT_TEAM'), settings
-            manual = identity != '-' and ('CODE_SIGN_IDENTITY' in signing or not signing.get('DEVELOPMENT_TEAM'))
+            manual = identity != '-' and (not local or 'CODE_SIGN_IDENTITY' in signing or not signing.get('DEVELOPMENT_TEAM'))
             assert settings.get('CODE_SIGN_STYLE') == ('Manual' if manual else None), settings
             assert '-allowProvisioningUpdates' not in builds[0], builds[0]
             if succeeds and identity != '-':
                 checks = [command for command in commands if '--test-requirement==anchor apple generic' in command]
-                assert [Path(command[-1]).name for command in checks] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], checks
+                assert [Path(command[-1]).name for command in checks] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], checks
+                developer_id_checks = [command for command in commands if any('field.1.2.840.113635.100.6.1.13' in arg for arg in command)]
+                assert [Path(command[-1]).name for command in developer_id_checks] == ([] if local else [Path(command[-1]).name for command in checks]), developer_id_checks
+                assert all('--all-architectures' in command for command in developer_id_checks), developer_id_checks
         if succeeds:
+            assert commands[0][:2] == ['release-source.py', 'capture'], commands[0]
+            assert any(command[:2] == ['release-source.py', 'verify'] for command in commands)
             for notice in ('LICENSE', 'THIRD-PARTY-NOTICES.md'):
                 assert (root / '.build/Build/Products/Release/Acouplet.app/Contents/Resources' / notice).read_bytes() == (root / notice).read_bytes()
             entitlements = [command for command in commands if '--entitlements' in command]
-            assert [Path(command[-1]).name for command in entitlements] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], entitlements
+            assert [Path(command[-1]).name for command in entitlements] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], entitlements
             if local:
                 assert previous.read_text() == 'previous package'
                 assert archive.read_text() == 'previous archive'
@@ -299,6 +335,8 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
                     assert local_previous.read_text() == 'previous development package'
                     assert not any(command[:2] == ['ditto', '-c'] for command in commands)
             receipt = (package / ('Local Build Receipt.txt' if local else 'Build Receipt.txt')).read_text()
+            assert 'Revision: ' + 'a' * 40 in receipt and 'Source input SHA256: ' + 'c' * 64 in receipt
+            assert ('Worktree: development (dirty)' if local else 'Worktree: production clean') in receipt
             if local:
                 assert 'Release app: ' + str(root / '.build/Build/Products/Release/Acouplet.app') in receipt
             else:
@@ -311,8 +349,10 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
                 if not line.startswith('SHA256\t'): continue
                 _, digest, relative = line.split('\t')
                 assert hashlib.sha256((package / 'Acouplet.app' / relative).read_bytes()).hexdigest() == digest
-            assert receipt.count('SHA256\t') == 17
+            assert receipt.count('SHA256\t') == 19
             assert not (package / 'Acouplet LDAC Output.pkg').exists()
+            assert not (package / 'Acouplet LDAC Removal.pkg').exists()
+            assert (package / 'Acouplet.app/Contents/Resources/Acouplet LDAC Removal.pkg').read_text() == 'driver-only uninstaller'
             assert (package / 'Acouplet.app/Contents/Resources/Acouplet LDAC Output.pkg').read_text() == 'driver-only installer'
             assert (package / 'Acouplet.app/Contents/MacOS/Acouplet').read_text() == 'resigned app'
             assert (package / 'Uninstall LDAC Output.command').is_file()
@@ -325,9 +365,12 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
             assert not (package / 'PreferencePanes').exists()
             assert not list(package.rglob('*.prefPane'))
         else:
-            assert previous.read_text() == 'previous package'
+            if mode != 'source-drift-archive': assert previous.read_text() == 'previous package'
             assert archive.read_text() == 'previous archive'
-            assert not any(command[0] == 'ditto' for command in commands), commands
+            if mode not in ('source-drift', 'source-drift-archive'): assert not any(command[0] == 'ditto' for command in commands), commands
+            if mode == 'source-drift': assert not (package / 'Acouplet.app').exists()
+            if mode.startswith('source-'):
+                assert commands[-1][0] == 'release-source.py'
             if mode.startswith('missing-runtime-'): assert 'must enable hardened runtime' in result.stderr, result.stderr
             if mode.startswith('debuggable-'): assert 'must omit debugger access in Release' in result.stderr, result.stderr
             if mode == 'sandboxed-app': assert 'must omit the sandbox entitlement' in result.stderr, result.stderr
@@ -335,21 +378,32 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
         print(name + ': passed')
 
 
-check('default-apple-development', {})
+check('default-developer-id', {})
+check('production-rejects-dirty-source-before-build', {}, 'source-dirty', False)
+check('production-rejects-source-drift-before-staging', {}, 'source-drift', False)
+check('production-rejects-source-drift-before-archive-replacement', {}, 'source-drift-archive', False)
+check('local-allows-dirty-source', {}, 'source-dirty', local=True)
 check('default-missing-identity-no-fallback', {}, 'build-failure', False)
 check('default-rejects-ad-hoc-output', {}, 'adhoc-output', False)
-check('explicit-ad-hoc-with-team', {'CODE_SIGN_IDENTITY': '-', 'DEVELOPMENT_TEAM': 'ABCDE12345'})
+check('explicit-ad-hoc-with-team', {'CODE_SIGN_IDENTITY': '-', 'DEVELOPMENT_TEAM': 'ABCDE12345'}, local=True)
 check('automatic-team', {'DEVELOPMENT_TEAM': 'ABCDE12345'})
-check('apple-development', {'CODE_SIGN_IDENTITY': 'Apple Development', 'DEVELOPMENT_TEAM': 'ABCDE12345'})
+check('local-apple-development', {'CODE_SIGN_IDENTITY': 'Apple Development', 'DEVELOPMENT_TEAM': 'ABCDE12345'}, local=True)
 check('developer-id', {'CODE_SIGN_IDENTITY': 'Developer ID Application: Example (ABCDE12345)', 'DEVELOPMENT_TEAM': 'ABCDE12345'})
-check('existing-project-team', {'CODE_SIGN_IDENTITY': 'Apple Development'})
+check('developer-id-fingerprint', {'CODE_SIGN_IDENTITY': 'A' * 40})
+check('production-rejects-apple-development', {'CODE_SIGN_IDENTITY': 'Apple Development'}, succeeds=False)
+check('production-rejects-ad-hoc', {'CODE_SIGN_IDENTITY': '-'}, succeeds=False)
+check('fingerprint-cannot-bypass-developer-id', {'CODE_SIGN_IDENTITY': 'A' * 40}, 'development-output', False)
+check('production-rejects-development-driver', {}, 'development-driver', False)
+check('production-rejects-development-helper', {}, 'development-helper', False)
+check('local-development-fingerprint', {'CODE_SIGN_IDENTITY': 'A' * 40}, 'development-output', local=True)
+check('existing-project-team', {'CODE_SIGN_IDENTITY': 'Developer ID Application'})
 check('empty-identity', {'CODE_SIGN_IDENTITY': ''}, succeeds=False)
-check('missing-identity-no-fallback', {'CODE_SIGN_IDENTITY': 'Apple Development'}, 'build-failure', False)
-check('unexpected-ad-hoc-output', {'CODE_SIGN_IDENTITY': 'Apple Development'}, 'adhoc-output', False)
+check('missing-identity-no-fallback', {'CODE_SIGN_IDENTITY': 'Developer ID Application'}, 'build-failure', False)
+check('unexpected-ad-hoc-output', {'CODE_SIGN_IDENTITY': 'Developer ID Application'}, 'adhoc-output', False)
 check('requested-team-mismatch', {'DEVELOPMENT_TEAM': 'ABCDE12345'}, 'wrong-team', False)
-check('missing-team', {'CODE_SIGN_IDENTITY': 'Apple Development'}, 'missing-team', False)
-check('invalid-signature', {'CODE_SIGN_IDENTITY': 'Apple Development'}, 'invalid-signature', False)
-check('sandboxed-direct-app', {'CODE_SIGN_IDENTITY': 'Apple Development'}, 'sandboxed-app', False)
+check('missing-team', {'CODE_SIGN_IDENTITY': 'Developer ID Application'}, 'missing-team', False)
+check('invalid-signature', {'CODE_SIGN_IDENTITY': 'Developer ID Application'}, 'invalid-signature', False)
+check('sandboxed-direct-app', {'CODE_SIGN_IDENTITY': 'Developer ID Application'}, 'sandboxed-app', False)
 check('production-rejects-development-metadata', {}, 'wrong-distribution', False)
 check('local-rejects-production-metadata', {}, 'wrong-distribution', False, local=True)
 check('production-ignores-development-environment', {'ACOUPLET_DISTRIBUTION': 'development'})
@@ -359,15 +413,15 @@ check('missing-license', {}, 'missing-license', False)
 check('stale-notices', {}, 'stale-notices', False)
 check('missing-ldac-notice', {}, 'missing-ldac-notice', False)
 for failure in ('different-ldac-team', 'missing-runtime-ldac', 'debuggable-ldac', 'wrong-audio-build', 'wrong-driver-build', 'wrong-driver-identity', 'changed-apple-source'):
-    check(failure, {'CODE_SIGN_IDENTITY': 'Apple Development'}, failure, False)
+    check(failure, {'CODE_SIGN_IDENTITY': 'Developer ID Application'}, failure, False)
 for failure in ('missing-runtime-app', 'debuggable-app'):
-    check(failure, {'CODE_SIGN_IDENTITY': 'Apple Development'}, failure, False)
+    check(failure, {'CODE_SIGN_IDENTITY': 'Developer ID Application'}, failure, False)
 
 check('local-stage-receipt-without-archive', {}, local=True)
 check('local-ad-hoc-receipt-without-archive', {'CODE_SIGN_IDENTITY': '-'}, local=True)
 
 for failure in ('missing-helper', 'adhoc-helper', 'different-helper-team', 'missing-runtime-helper', 'debuggable-helper', 'sandboxed-helper', 'inherited-helper', 'extra-helper-entitlement', 'wrong-build', 'missing-hud', 'different-hud-team', 'missing-runtime-hud', 'missing-hud-check', 'different-hud-check-team', 'missing-runtime-hud-check', 'debuggable-hud-check', 'different-sparkle-team', 'missing-runtime-sparkle'):
-    check(failure, {'CODE_SIGN_IDENTITY': 'Apple Development'}, failure, False)
+    check(failure, {'CODE_SIGN_IDENTITY': 'Developer ID Application'}, failure, False)
 check('counter-restored-from-installed', {}, 'counter-restore', local=True)
 check('counter-keeps-larger-persisted-build', {}, 'counter-persisted', local=True)
 check('patch-version-with-increasing-build', {'ACOUPLET_MARKETING_VERSION': '0.24.5'}, 'counter-restore', local=True)

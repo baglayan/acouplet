@@ -3,6 +3,85 @@ import XCTest
 
 final class SonyHeadGesturePracticeControllerTests: XCTestCase {
     @MainActor
+    func testDismissingPracticeSheetRetainsOwnershipUntilConfirmedExit() throws {
+        for outcome in ["confirmed", "disconnected", "timeout"] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            let id = try practice(controller)
+            XCTAssertFalse(controller.simulatedHeadGesturePracticeTimeoutPending)
+            controller.cancelHeadGesturePractice(id: UUID(), dismissWhenFinished: true)
+            XCTAssertEqual(controller.headGesturePracticeTransition?.phase, .practicing)
+            controller.cancelHeadGesturePractice(id: id, dismissWhenFinished: true)
+            XCTAssertEqual(controller.headGesturePracticeTransition?.phase, .leaving)
+            XCTAssertTrue(controller.isRunningHeadphoneTest)
+            XCTAssertFalse(controller.beginEarTipFit())
+            try acknowledge(SonyHeadGesturePractice.exitPayload, on: controller)
+            if outcome == "confirmed" {
+                deliver(modeOut, to: controller)
+                XCTAssertNil(controller.headGesturePracticeTransition)
+                XCTAssertFalse(controller.simulatedHeadGesturePracticeTimeoutPending)
+                let replacement = try prepare(controller)
+                XCTAssertNotEqual(replacement, id)
+                controller.cancelHeadGesturePractice(id: id, dismissWhenFinished: true)
+                XCTAssertEqual(controller.headGesturePracticeTransition?.id, replacement)
+                XCTAssertEqual(controller.headGesturePracticeTransition?.phase, .ready)
+            } else {
+                if outcome == "disconnected" { controller.simulateControlLoss(deviceConnected: true) }
+                else { controller.simulateHeadGesturePracticeTimeout() }
+                XCTAssertEqual(controller.headGesturePracticeTransition?.phase, .interrupted)
+                XCTAssertTrue(controller.isRunningHeadphoneTest)
+                controller.simulateAutomaticRefresh()
+                XCTAssertEqual(controller.headGesturePracticeTransition?.id, id)
+                XCTAssertNil(controller.simulatedPendingFrame)
+                controller.connect()
+                XCTAssertNil(controller.headGesturePracticeTransition)
+            }
+            XCTAssertEqual(payloads(controller).filter { $0 == SonyHeadGesturePractice.exitPayload }.count, 1)
+        }
+    }
+
+    @MainActor
+    func testDismissingPracticeDiscoveryDrainsOwnedReplyOrConnectionBeforeRelease() throws {
+        for disconnect in [false, true] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            XCTAssertTrue(controller.beginHeadGesturePractice())
+            let id = try XCTUnwrap(controller.headGesturePracticeTransition?.id)
+            controller.cancelHeadGesturePractice(id: id, dismissWhenFinished: true)
+            XCTAssertEqual(controller.headGesturePracticeTransition?.phase, .checking)
+            if disconnect { controller.simulateControlLoss(deviceConnected: true) }
+            else {
+                try acknowledge(SonyHeadGesturePractice.queryPayload, on: controller)
+                deliver(available, to: controller)
+            }
+            XCTAssertNil(controller.headGesturePracticeTransition)
+            XCTAssertFalse(controller.simulatedHeadGesturePracticeTimeoutPending)
+            XCTAssertFalse(controller.isRunningHeadphoneTest)
+            XCTAssertFalse(payloads(controller).contains(SonyHeadGesturePractice.enterPayload))
+        }
+    }
+
+    @MainActor
+    func testControlLossBeforeStartReleasesPracticeAndAllowsAutomaticReconnect() throws {
+        for ready in [false, true] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            controller.setReconnectAutomatically(true)
+            if ready { _ = try prepare(controller) }
+            else { XCTAssertTrue(controller.beginHeadGesturePractice()) }
+            XCTAssertTrue(controller.isRunningHeadphoneTest)
+            controller.simulateControlLoss(deviceConnected: true)
+            XCTAssertEqual(controller.headGesturePracticeTransition?.phase, .finished)
+            XCTAssertFalse(controller.isRunningHeadphoneTest)
+            XCTAssertFalse(controller.simulatedHeadGesturePracticeTimeoutPending)
+            controller.simulateAutomaticRefresh()
+            XCTAssertEqual(controller.linkState, .handshaking)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0, 0])
+            XCTAssertFalse(payloads(controller).contains(SonyHeadGesturePractice.enterPayload))
+        }
+    }
+
+    @MainActor
     func testFreshAvailabilityIsOwnedAndStartWaitsForItsAcknowledgment() throws {
         let controller = readyController()
         defer { controller.simulateControlLoss() }
@@ -372,7 +451,8 @@ final class SonyHeadGesturePracticeControllerTests: XCTestCase {
             XCTAssertEqual(pending.payload, stallEntry ? SonyHeadGesturePractice.enterPayload : SonyHeadGesturePractice.queryPayload)
             XCTAssertFalse(controller.headGesturePracticeTransition?.commandTransmitted ?? true)
             controller.simulateHeadGesturePracticeTimeout()
-            XCTAssertEqual(controller.headGesturePracticeTransition?.phase, .interrupted)
+            XCTAssertEqual(controller.headGesturePracticeTransition?.phase, stallEntry ? .interrupted : .finished)
+            XCTAssertEqual(controller.isRunningHeadphoneTest, stallEntry)
             XCTAssertNil(controller.simulatedPendingFrame)
             XCTAssertNotEqual(controller.simulatedControlSession, session)
             XCTAssertNotNil(controller.lastErrorMessage)
@@ -380,7 +460,7 @@ final class SonyHeadGesturePracticeControllerTests: XCTestCase {
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - pending.sequence, payload: []), session: session)
             deliver(modeIn, session: session, to: controller)
             deliver(nod, session: session, to: controller)
-            XCTAssertEqual(controller.headGesturePracticeTransition?.phase, .interrupted)
+            XCTAssertEqual(controller.headGesturePracticeTransition?.phase, stallEntry ? .interrupted : .finished)
             XCTAssertEqual(controller.headGesturePractice.gestureRevision, 0)
             XCTAssertNil(controller.simulatedPendingFrame)
         }
@@ -485,7 +565,7 @@ final class SonyHeadGesturePracticeControllerTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, session: UInt64? = nil, to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), session: session)
+        controller.simulateProtocolMessage(payload, type: type, session: session)
     }
 
     @MainActor

@@ -1,8 +1,104 @@
+import Combine
+import CoreBluetooth
 import XCTest
 @testable import Acouplet
 
 @MainActor
 final class SonyDeviceCoordinatorLifecycleTests: XCTestCase {
+    func testBluetoothAuthorizationGrantResumesOnlyIdleRunningDiscovery() {
+        let devices = makeCoordinator()
+        defer { devices.stop() }
+        devices.isRunning = true
+        for authorization in [CBManagerAuthorization.notDetermined, .denied, .restricted] {
+            XCTAssertFalse(devices.reportBluetoothAuthorization(authorization))
+            XCTAssertFalse(devices.isDiscovering)
+            XCTAssertNil(devices.discoveryTimer)
+            XCTAssertTrue(devices.reportBluetoothAuthorization(.allowedAlways))
+            devices.isDiscovering = true
+            XCTAssertFalse(devices.reportBluetoothAuthorization(.allowedAlways))
+            devices.isDiscovering = false
+            devices.discoveryTimer = Timer(timeInterval: 3, repeats: true) { _ in }
+            XCTAssertFalse(devices.reportBluetoothAuthorization(.allowedAlways))
+        }
+        devices.systemWillSleep()
+        XCTAssertFalse(devices.reportBluetoothAuthorization(.allowedAlways))
+        devices.stop()
+        XCTAssertFalse(devices.reportBluetoothAuthorization(.allowedAlways))
+    }
+
+    func testBluetoothAuthorizationLossStopsDiscoveryAndRetainedControllers() throws {
+        let devices = makeCoordinator()
+        defer { devices.stop() }
+        devices.isRunning = true
+        devices.reconcileDiscoveredDevices([earbuds], connectedAddresses: [earbuds.address])
+        let controller = try XCTUnwrap(devices.controller(for: earbuds.address))
+        let generation = devices.discoveryGeneration
+        let session = controller.simulatedControlSession
+        devices.isDiscovering = true
+        let timer = Timer(timeInterval: 3, repeats: true) { _ in }
+        devices.discoveryTimer = timer
+
+        XCTAssertFalse(devices.reportBluetoothAuthorization(.denied))
+        XCTAssertGreaterThan(devices.discoveryGeneration, generation)
+        XCTAssertFalse(devices.isDiscovering)
+        XCTAssertNil(devices.discoveryTimer)
+        XCTAssertFalse(timer.isValid)
+        XCTAssertGreaterThan(controller.simulatedControlSession, session)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.isBluetoothAccessDenied)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertTrue(devices.reportBluetoothAuthorization(.allowedAlways))
+    }
+
+    func testInventoryRefreshRevocationInvalidatesControlsAndDiscovery() throws {
+        for authorization in [CBManagerAuthorization.denied, .restricted] {
+            let devices = makeCoordinator()
+            defer { devices.stop() }
+            devices.isRunning = true
+            devices.reconcileDiscoveredDevices([earbuds], connectedAddresses: [earbuds.address])
+            let controller = try XCTUnwrap(devices.controller(for: earbuds.address))
+            XCTAssertTrue(controller.isReady)
+            controller.setDSEE(.off)
+            XCTAssertNotNil(controller.pendingChanges[.dsee])
+            XCTAssertNotNil(controller.simulatedPendingFrame)
+            let session = controller.simulatedControlSession
+            let timer = Timer(timeInterval: 3, repeats: true) { _ in }
+            devices.discoveryTimer = timer
+
+            devices.refreshPairedInventory(authorization: authorization)
+
+            XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isBluetoothAccessDenied)
+            XCTAssertTrue(controller.pendingChanges.isEmpty)
+            XCTAssertNil(controller.simulatedPendingFrame)
+            XCTAssertNil(devices.discoveryTimer)
+            XCTAssertFalse(timer.isValid)
+            XCTAssertTrue(devices.reportBluetoothAuthorization(.allowedAlways))
+        }
+    }
+
+    func testInventoryRefreshCannotReactivateStoppedOrSleepingDiscovery() throws {
+        for sleeping in [false, true] {
+            let devices = makeCoordinator()
+            defer { devices.stop() }
+            devices.isRunning = true
+            devices.reconcileDiscoveredDevices([earbuds], connectedAddresses: [earbuds.address])
+            let controller = try XCTUnwrap(devices.controller(for: earbuds.address))
+            if sleeping { devices.systemWillSleep() }
+            else { devices.stop() }
+            let session = controller.simulatedControlSession
+            let generation = devices.discoveryGeneration
+
+            devices.refreshPairedInventory(authorization: .denied)
+
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertEqual(devices.discoveryGeneration, generation)
+            XCTAssertFalse(controller.isBluetoothAccessDenied)
+            XCTAssertNil(devices.discoveryTimer)
+        }
+    }
+
     func testManagedControllersShareDiscoveryInventoryWithoutRepeatingScans() throws {
         let devices = makeCoordinator()
         defer { devices.stop() }
@@ -30,6 +126,66 @@ final class SonyDeviceCoordinatorLifecycleTests: XCTestCase {
         XCTAssertEqual(scans, 2)
         XCTAssertTrue(controller.pairedDevices(automatically: true, discover: { scans += 1; return [] }).isEmpty)
         XCTAssertEqual(scans, 2)
+    }
+
+    func testDisconnectedPollingCleansPendingHandshakeOnceAndDoesNotPublishUnchangedState() async throws {
+        for reconnect in [false, true] {
+            let devices = makeCoordinator()
+            defer { devices.stop() }
+            devices.isRunning = true
+            devices.setReconnectAutomatically(reconnect)
+            devices.reconcileDiscoveredDevices([earbuds], connectedAddresses: [earbuds.address])
+            let controller = try XCTUnwrap(devices.controller(for: earbuds.address))
+            controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+            XCTAssertNotNil(controller.simulatedPendingFrame)
+            XCTAssertTrue(controller.simulatedHandshakeTimeoutPending)
+            let openingSession = controller.simulatedControlSession
+
+            controller.simulateAutomaticRefresh(deviceConnected: false)
+            XCTAssertEqual(controller.linkState, .disconnected)
+            XCTAssertGreaterThan(controller.simulatedControlSession, openingSession)
+            XCTAssertNil(controller.simulatedPendingFrame)
+            XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
+            for _ in 0..<4 { await Task.yield() }
+
+            let disconnectedSession = controller.simulatedControlSession
+            var controllerPublications = 0
+            var coordinatorPublications = 0
+            let controllerObservation = controller.objectWillChange.sink { controllerPublications += 1 }
+            let coordinatorObservation = devices.objectWillChange.sink { coordinatorPublications += 1 }
+            for _ in 0..<10 { controller.simulateAutomaticRefresh() }
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertEqual(controller.simulatedControlSession, disconnectedSession)
+            XCTAssertEqual(controllerPublications, 0)
+            XCTAssertEqual(coordinatorPublications, 0)
+            XCTAssertEqual(controller.linkState, .disconnected)
+            XCTAssertNil(controller.simulatedPendingFrame)
+            controllerObservation.cancel()
+            coordinatorObservation.cancel()
+        }
+    }
+
+    func testDisconnectedPollingPreservesPendingManualTransportConnections() throws {
+        for bluetoothLE in [false, true] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+            controller.setReconnectAutomatically(false)
+            if bluetoothLE {
+                XCTAssertTrue(controller.simulateBLEReconnectWait(automatic: false, priorBluetoothLE: false, classicConnected: false))
+            } else {
+                XCTAssertNotNil(controller.simulateClassicConnection())
+            }
+            let openingSession = controller.simulatedControlSession
+            var publications = 0
+            let observation = controller.objectWillChange.sink { publications += 1 }
+            for _ in 0..<10 { controller.simulateAutomaticRefresh() }
+            XCTAssertEqual(controller.simulatedControlSession, openingSession)
+            XCTAssertEqual(controller.linkState, .opening)
+            XCTAssertNil(controller.simulatedPendingFrame)
+            XCTAssertEqual(publications, 0)
+            observation.cancel()
+        }
     }
 
     func testDiscoveryStartsPinnedControllersWithSharedPreferenceAndRetainsActiveRecovery() throws {
@@ -68,7 +224,8 @@ final class SonyDeviceCoordinatorLifecycleTests: XCTestCase {
         devices.reconcileDiscoveredDevices([headphones], connectedAddresses: [headphones.address])
         let sessions = devices.controllers.map(\.simulatedControlSession)
         devices.systemWillSleep()
-        XCTAssertEqual(first.earTipFitTransition?.phase, .interrupted)
+        XCTAssertEqual(first.earTipFitTransition?.phase, .finished)
+        XCTAssertFalse(first.isRunningHeadphoneTest)
         XCTAssertTrue(second.pendingChanges.isEmpty)
         for (index, controller) in devices.controllers.enumerated() {
             XCTAssertGreaterThan(controller.simulatedControlSession, sessions[index])
@@ -130,7 +287,7 @@ final class SonyDeviceCoordinatorLifecycleTests: XCTestCase {
             devices.select(address: earbuds.address)
             let controller = try XCTUnwrap(devices.controller(for: earbuds.address))
             let session = controller.simulatedControlSession
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x15, 0x01] + connections))
+            controller.simulateProtocolMessage([0x15, 0x01] + connections)
             controller.simulateAutomaticRefresh()
             devices.reconcileDiscoveredDevices([headphones], connectedAddresses: [headphones.address])
             XCTAssertTrue(controller.hasOpenControlTransport)

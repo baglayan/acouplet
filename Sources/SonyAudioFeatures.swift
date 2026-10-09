@@ -190,6 +190,10 @@ struct SonyAudioFeatures: Equatable, Sendable {
         return [0xE8, 0x01, value]
     }
 
+    mutating func invalidateDSEERead() {
+        dseeMode = nil
+    }
+
     @discardableResult
     mutating func update(_ payload: [UInt8]) -> Bool {
         guard payload.count >= 3 else { return false }

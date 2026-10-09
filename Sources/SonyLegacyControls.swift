@@ -108,6 +108,21 @@ struct SonyLegacyDSEE: Equatable, Sendable {
         return setPayload(SonyDSEEMode(rawValue: payload[3])) == payload
     }
 
+    mutating func invalidateRead(_ query: [UInt8]) {
+        switch query[0] {
+        case 0xE0:
+            rawType = nil
+            settingType = nil
+        case 0xE2:
+            available = nil
+        case 0xE6:
+            parameterSettingType = nil
+            mode = nil
+        default:
+            break
+        }
+    }
+
     @discardableResult
     mutating func update(_ payload: [UInt8]) -> Bool {
         guard isSupported, payload.count >= 3, payload[1] == 0x02 else { return false }
@@ -211,6 +226,17 @@ struct SonyLegacyWearingControl: Equatable, Sendable {
         isSupported && settingType == 0 && parameterSettingType == 0 && available == true && enabled != nil
     }
 
+    mutating func invalidateRead(_ query: [UInt8]) {
+        switch query {
+        case [0xF0, 0x03]: settingType = nil
+        case [0xF2, 0x03]: status = nil
+        case [0xF6, 0x03]:
+            parameterSettingType = nil
+            value = nil
+        default: break
+        }
+    }
+
     func setPayload(enabled: Bool) -> [UInt8]? {
         guard canSet else { return nil }
         return [0xF8, 0x03, 0x00, enabled ? 0x01 : 0x00]
@@ -252,6 +278,11 @@ struct SonyLegacyControls: Equatable, Sendable {
     private(set) var connectionQuality: SonyLegacyConnectionQuality
     private(set) var wearingControl: SonyLegacyWearingControl
     private(set) var automaticPowerOff: SonyAutomaticPowerOffState?
+
+    mutating func invalidateSystemRead(_ query: [UInt8]) {
+        wearingControl.invalidateRead(query)
+        automaticPowerOff?.invalidateRead(query)
+    }
 
     init?(supportPayload: [UInt8]) {
         guard supportPayload.count >= 3, supportPayload.prefix(2) == [0x07, 0x00],
@@ -314,6 +345,10 @@ struct SonyLegacyControls: Equatable, Sendable {
         if mode == .ambient, !range.contains(ambientLevel) { return nil }
         return [0x68, 0x02, 0x01, capability.noiseType, noiseValue, capability.ambientType,
                 focusOnVoice ? 1 : 0, mode == .ambient ? UInt8(ambientLevel) : 0]
+    }
+
+    mutating func invalidateDSEERead(_ query: [UInt8]) {
+        dsee.invalidateRead(query)
     }
 
     @discardableResult

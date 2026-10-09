@@ -8,8 +8,8 @@ source = (pathlib.Path(__file__).resolve().parents[2] / "Sources/LDACController.
 
 
 def method(name):
-    match = re.search(r"^    (?:private )?func " + name + r"\(", source, re.MULTILINE)
-    end = re.search(r"^    (?:private )?(?:func|struct) ", source[match.end():], re.MULTILINE)
+    match = re.search(r"^    (?:private )?(?:func|var) " + name + r"\b", source, re.MULTILINE)
+    end = re.search(r"^    (?:(?:private )?(?:func|var|struct) |#(?:if|endif)\b)", source[match.end():], re.MULTILINE)
     return source[match.start():match.end() + end.start()]
 
 
@@ -54,6 +54,7 @@ struct EarbudFinder {
 final class Device: ObservableObject {
     var deviceModel: Model
     @Published var isReady: Bool
+    var notificationSession: UInt64 = 1
     @Published var isDeviceConnected = true
     var localSource = true
     var playback: Playback
@@ -144,11 +145,13 @@ final class Controller: ObservableObject {
     var didAttemptAutomaticDriverUpdate = false
     let bundle = Bundle.main
     let inspectDriver: (Bundle) -> LDACDriverInstaller.State = { LDACDriverInstaller.inspect(bundle: $0) }
+    var isClassicConnected: (String) -> Bool = { _ in true }
     var devices: Devices? = Devices()
     var requestedConfiguration = LDACConfiguration()
     var audioRoute: MacAudioRouteObserver? = MacAudioRouteObserver()
     var resumeOutputUID: String? = "fixture-headphones"
     var suspensionRequested = false
+    var pendingConnectionModes: [String: UUID] = [:]
     var deferredConnectionModes: [String: UUID] = [:]
     var preferenceRestoreTasks: [String: Task<Void, Never>] = [:]
     var sessionID = UUID()
@@ -157,6 +160,8 @@ final class Controller: ObservableObject {
     var requestedAddress: String? = "02:00:00:00:00:01"
     var isSessionRunning = true
     var isRecovering = true
+    var recoveryPaused = false
+    var recoveryResumeContext: (controller: ObjectIdentifier, observedConnected: Bool, observedDisconnect: Bool)?
     var restoreAudioOnStop = true
     var nativeOutput: Output?
     var session: Session?
@@ -178,7 +183,6 @@ final class Controller: ObservableObject {
     var pendingVolume: Int?
     var initialReadbackID: UUID?
     var stableSince: Date?
-    var actualOutputGain = 0.0
     var requestedOutputGain = 0.0
     var usable = false
     var volumeError: String?
@@ -204,7 +208,7 @@ final class Controller: ObservableObject {
         finish(message, targetDisconnected: targetDisconnected)
     }
     func availabilityChanged() { resumeIfReady() }
-    func launch(_ address: String, priority: Int?, restoringOnly: Bool) { restores.append(address) }
+    func launch(_ address: String, restoringOnly: Bool) { restores.append(address) }
     func start(_ address: String) {
         starts.append(address)
         targetAddress = address
@@ -424,6 +428,17 @@ enum LDACControllerCleanupCheck {
         await waitUntil { pending.cleanupTask == nil }
         precondition(pending.starts == ["02:00:00:00:00:03"] && pending.isSessionRunning)
 
+        let blockedOutput = Output()
+        let blocked = Controller(output: blockedOutput)
+        blocked.sessionFinished()
+        await waitUntil { blockedOutput.continuation != nil }
+        blocked.setEnabled(true, forAddress: next)
+        precondition(blocked.starts.isEmpty && blocked.requestedAddress == next)
+        blockedOutput.continuation?.resume(returning: "The previous Mac audio output did not return.")
+        await waitUntil { blocked.cleanupTask == nil }
+        precondition(blocked.starts.isEmpty && blocked.requestedAddress == nil)
+        if case .failed = blocked.state {} else { preconditionFailure("Unresolved restoration admitted next target") }
+
         let cancelledOutput = Output()
         let cancelled = Controller(output: cancelledOutput)
         cancelled.sessionFinished()
@@ -574,6 +589,18 @@ enum LDACControllerCleanupCheck {
         parked.availabilityChanged()
         precondition(parked.starts == [address], "Ready reconnect did not resume exactly once")
 
+        let retry = Controller()
+        let retryDevice = retry.devices!.controller(for: address)!
+        retry.requestedAddress = address
+        retry.targetAddress = address
+        retry.state = .waitingForDevice
+        retry.recoveryPaused = true
+        retry.recoveryResumeContext = (ObjectIdentifier(retryDevice), true, false)
+        retry.availabilityChanged()
+        precondition(retry.starts.isEmpty, "Exhausted recovery resumed before a new request")
+        retry.setEnabled(true, forAddress: address)
+        precondition(retry.starts == [address], "Explicit Retry did not resume remembered LDAC intent")
+
         let blockers: [(String, (Controller) -> Void)] = [
             ("sleep", { $0.devices!.isSystemSleeping = true }),
             ("controls", { $0.devices!.controller(for: address)!.isReady = false }),
@@ -686,7 +713,7 @@ enum LDACControllerCleanupCheck {
         print("PASS actual finder admission: active finding and unconfirmed Stop block LDAC and manual installation; absent or idle finder allows admission")
     }
 }
-'''.replace("__METHODS__", "\n".join(method(name) for name in ["deviceUnavailableReason", "canEnable", "refreshDriverState", "updateInstalledDriverIfNeeded", "installDriver", "openDriverInstaller", "setEnabled", "stop", "suspend", "resumeIfReady", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))
+'''.replace("__METHODS__", "\n".join(method(name) for name in ["needsStopBeforeTermination", "canResumeRecovery", "deviceUnavailableReason", "canEnable", "refreshDriverState", "updateInstalledDriverIfNeeded", "installDriver", "openDriverInstaller", "setEnabled", "stop", "suspend", "resumeIfReady", "reconcileConnectionPreferences", "forgetConnectionPreference", "scheduleConnectionPreferenceRestoration", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))
 
 with tempfile.TemporaryDirectory(prefix="acouplet-ldac-controller-cleanup-") as directory:
     directory = pathlib.Path(directory)

@@ -343,7 +343,7 @@ final class SonyLegacyOptimizerControllerTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, session: UInt64? = nil, to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), session: session)
+        controller.simulateProtocolMessage(payload, type: type, session: session)
     }
 
     @MainActor

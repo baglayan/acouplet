@@ -78,10 +78,18 @@ struct SonyLegacySoundEffect: Equatable, Sendable {
         payload.count == 3 && setPayload(payload[2]) == payload
     }
 
-    func confirmsSetPayload(_ payload: [UInt8], response: [UInt8]) -> Bool {
-        payload.count == 3 && payload.prefix(2) == [0x48, kind.rawValue]
-            && response.count == 3 && [0x47, 0x49].contains(response[0])
-            && response.dropFirst() == payload.dropFirst()
+    mutating func invalidateRead(_ query: [UInt8]) {
+        switch query[0] {
+        case 0x40:
+            presets = nil
+            positionType = nil
+        case 0x42:
+            status = nil
+        case 0x46:
+            presetID = nil
+        default:
+            break
+        }
     }
 
     @discardableResult

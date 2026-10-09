@@ -10,6 +10,7 @@ final class EarbudFinderController: ObservableObject {
         let id: UUID
         let accountName: String
         let accountID: UInt32
+        let wearingStatus: Bool?
         var expiresAt: ContinuousClock.Instant
     }
 
@@ -53,6 +54,7 @@ final class EarbudFinderController: ObservableObject {
     private var authenticationContext: LAContext?
     private var authenticationSessionID: UUID?
     private var authenticationRequestID: UUID?
+    private var authenticationWearingStatus: Bool?
     private var pendingAuthorizationSave: (id: UUID, authorization: WearingAuthorization)?
     private lazy var transport = FastPairTransport(
         closeCompletion: transportCloseCompletion,
@@ -82,7 +84,10 @@ final class EarbudFinderController: ObservableObject {
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
                      NSWorkspace.sessionDidResignActiveNotification] {
             NSWorkspace.shared.notificationCenter.publisher(for: name)
-                .sink { [weak self] _ in self?.dismiss(retiringTransport: true) }
+                .sink { [weak self] _ in
+                    self?.requestTransportRetirement()
+                    self?.stop()
+                }
                 .store(in: &observations)
         }
         NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
@@ -113,11 +118,13 @@ final class EarbudFinderController: ObservableObject {
     var simulatesAuthorizationSaveDelay = false
     var simulatedAuthenticationRequestID: UUID? { authenticationRequestID }
     var simulatedAuthorizationSaveRequestID: UUID? { pendingAuthorizationSave?.id }
+    var simulatedRingingTimeoutPending: Bool { ringingTimeout != nil }
     func simulateConnectionOpened() { if isSimulated { opened() } }
     func simulateProtocolData(_ data: Data) { if isSimulated { receive(data) } }
     func simulateTransportFailure() { if isSimulated { failed("Simulated connection loss.") } }
     func simulateWearingTimeout() { if isSimulated { wearingTimeout?.perform() } }
     func simulateAcknowledgementTimeout() { if isSimulated { acknowledgementTimeout?.perform() } }
+    func simulateRingingTimeout() { if isSimulated { ringingTimeout?.perform() } }
     func simulateAuthorizationCompletion(sessionID: UUID, succeeded: Bool, requestID: UUID? = nil) {
         if isSimulated, let requestID = requestID ?? authenticationRequestID {
             authenticationCompleted(sessionID: sessionID, requestID: requestID, succeeded: succeeded)
@@ -161,7 +168,9 @@ final class EarbudFinderController: ObservableObject {
             return String(localized: "Playing a locating sound isn’t available for these earbuds yet.")
         }
         guard headphones.hasCurrentTable2Capabilities else {
-            return String(localized: "Checking the earbuds…")
+            return headphones.hasFailedTable2Discovery
+                ? String(localized: "Couldn’t finish checking the earbuds.")
+                : String(localized: "Checking the earbuds…")
         }
         guard headphones.powerOffState == nil, !headphones.isCheckingEarTipFit,
               !headphones.isPracticingHeadGestures, headphones.legacyOptimizerTransition?.blocksCommands != true,
@@ -201,6 +210,7 @@ final class EarbudFinderController: ObservableObject {
         let requestID = UUID()
         authenticationSessionID = sessionID
         authenticationRequestID = requestID
+        authenticationWearingStatus = session?.wearingConfirmationStatus
         isAuthenticating = true
         message = nil
         #if DEBUG
@@ -221,7 +231,7 @@ final class EarbudFinderController: ObservableObject {
             return
         }
         context.evaluatePolicy(.deviceOwnerAuthentication,
-            localizedReason: String(localized: "Authorize playing a loud locating sound despite the in-ear warning.")) { [weak self] succeeded, error in
+            localizedReason: String(localized: "Authorize playing a loud locating sound despite the earbud wear warning.")) { [weak self] succeeded, error in
             let cancelled = (error as? LAError)?.code == .userCancel || (error as? LAError)?.code == .systemCancel
             Task { @MainActor [weak self] in
                 self?.authenticationCompleted(sessionID: sessionID, requestID: requestID, succeeded: succeeded, cancelled: cancelled)
@@ -232,18 +242,19 @@ final class EarbudFinderController: ObservableObject {
     private func authenticationCompleted(sessionID: UUID, requestID: UUID, succeeded: Bool, cancelled: Bool = false) {
         guard authenticationSessionID == sessionID, authenticationRequestID == requestID, isAuthenticating,
               session?.id == sessionID, session?.phase == .awaitingWearingConfirmation else { return }
+        let worn = authenticationWearingStatus
         invalidateAuthorization()
         guard succeeded else {
             if !cancelled { message = String(localized: "Couldn’t authorize playback. No sound was started.") }
             return
         }
         guard availabilityMessage == nil, let headphones, let target = session?.target,
-              isConnected(target, headphones: headphones), selectedWornStatus(headphones.wearingStatus) != nil else {
+              isConnected(target, headphones: headphones) else {
             stop()
             return
         }
         wearingAuthorization = WearingAuthorization(id: sessionID, accountName: accountName,
-            accountID: isSimulated ? 501 : getuid(), expiresAt: .now.advanced(by: .seconds(60)))
+            accountID: isSimulated ? 501 : getuid(), wearingStatus: worn, expiresAt: .now.advanced(by: .seconds(60)))
     }
 
     func cancelWearingAuthorization() {
@@ -259,7 +270,7 @@ final class EarbudFinderController: ObservableObject {
             return
         }
         guard availabilityMessage == nil, let headphones, let target = session?.target,
-              isConnected(target, headphones: headphones), selectedWornStatus(headphones.wearingStatus) != nil,
+              isConnected(target, headphones: headphones),
               isSimulated || NSApplication.shared.isActive else {
             stop()
             return
@@ -307,9 +318,16 @@ final class EarbudFinderController: ObservableObject {
             return
         }
         guard availabilityMessage == nil, let headphones, let target = session?.target,
-              isConnected(target, headphones: headphones), selectedWornStatus(headphones.wearingStatus) != nil,
+              isConnected(target, headphones: headphones),
               isSimulated || NSApplication.shared.isActive else {
             stop()
+            return
+        }
+        let worn = selectedWornStatus(headphones.wearingStatus)
+        guard worn == false || worn == authorization.wearingStatus else {
+            invalidateAuthorization()
+            let effects = session!.wearingChanged(worn)
+            apply(effects)
             return
         }
         #if DEBUG
@@ -318,18 +336,19 @@ final class EarbudFinderController: ObservableObject {
         #else
         logAuthorization(authorization, target: target)
         #endif
-        let effects = session!.confirmWearingOverride(worn: selectedWornStatus(headphones.wearingStatus))
+        let effects = session!.confirmWearingOverride(worn: worn)
         apply(effects)
     }
 
     private func logAuthorization(_ authorization: WearingAuthorization, target: FastPairRingTarget) {
         let side = target == .left ? "left" : "right"
-        Self.authorizationLogger.notice("In-ear locating sound override authorized after device-owner authentication and final confirmation: account_uid=\(authorization.accountID) account=\(authorization.accountName, privacy: .private) side=\(side, privacy: .public) session=\(authorization.id.uuidString, privacy: .public)")
+        Self.authorizationLogger.notice("Earbud wear locating sound override authorized after device-owner authentication and final confirmation: account_uid=\(authorization.accountID) account=\(authorization.accountName, privacy: .private) side=\(side, privacy: .public) session=\(authorization.id.uuidString, privacy: .public)")
     }
 
     private func invalidateAuthorization() {
         authenticationSessionID = nil
         authenticationRequestID = nil
+        authenticationWearingStatus = nil
         pendingAuthorizationSave = nil
         isSavingAuthorization = false
         isAuthenticating = false
@@ -343,10 +362,7 @@ final class EarbudFinderController: ObservableObject {
         requiresWearingCheck = requiresWearingCheck || headphones.wearingStatus.isSupported
         if requiresWearingCheck {
             guard let request = headphones.refreshWearingStatus() else {
-                message = headphones.hasPendingWearingStatusRead
-                    ? String(localized: "The earbud wear check hasn’t finished. Reconnect the earbuds to try again.")
-                    : String(localized: "Couldn’t check whether the earbuds are being worn. Try again.")
-                stop()
+                prepared(worn: nil)
                 return
             }
             pendingTarget = target
@@ -354,13 +370,12 @@ final class EarbudFinderController: ObservableObject {
             isCheckingWearing = true
             let timeout = DispatchWorkItem { [weak self] in
                 guard let self, self.wearingRequest == request else { return }
-                self.stop()
-                self.message = String(localized: "The earbud wear check hasn’t finished. Reconnect the earbuds to try again.")
+                self.prepared(worn: nil)
             }
             wearingTimeout = timeout
             DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: timeout)
         } else {
-            prepared()
+            prepared(worn: nil)
         }
     }
 
@@ -380,6 +395,7 @@ final class EarbudFinderController: ObservableObject {
         guard !needsNewControlSession else { return }
         dismissed = false
         retiresTransport = false
+        message = nil
         objectWillChange.send()
     }
 
@@ -452,11 +468,7 @@ final class EarbudFinderController: ObservableObject {
             wearingRequest = nil
             pendingTarget = nil
             isCheckingWearing = false
-            guard let worn = selectedWornStatus(headphones.wearingStatus) else {
-                message = String(localized: "Couldn’t check whether the earbuds are being worn. Try again.")
-                stop()
-                return
-            }
+            let worn = selectedWornStatus(headphones.wearingStatus)
             if session?.target == target { prepared(worn: worn) }
         }
         if isBusy, session?.isRetryingStop != true {
@@ -485,11 +497,15 @@ final class EarbudFinderController: ObservableObject {
         }
         guard requiresWearingCheck else { return }
         let worn = selectedWornStatus(status)
-        if session?.phase == .awaitingWearingConfirmation, worn == nil {
-            stop()
-            return
+        if session?.phase == .awaitingWearingConfirmation, worn != false,
+           session?.wearingConfirmationStatus != worn {
+            invalidateAuthorization()
         }
         let effects = session!.wearingChanged(worn)
+        if session?.phase == .awaitingWearingConfirmation {
+            acknowledgementTimeout?.cancel()
+            acknowledgementTimeout = nil
+        }
         apply(effects)
     }
 
@@ -508,10 +524,15 @@ final class EarbudFinderController: ObservableObject {
         checkWearingBeforeStarting()
     }
 
-    private func prepared(worn: Bool = false) {
+    private func prepared(worn: Bool?) {
         guard !dismissed, availabilityMessage == nil, session?.phase == .connecting,
               let headphones, let target = session?.target else { stop(); return }
         guard isConnected(target, headphones: headphones) else { stop(); return }
+        wearingTimeout?.cancel()
+        wearingTimeout = nil
+        wearingRequest = nil
+        pendingTarget = nil
+        isCheckingWearing = false
         let effects = session!.connectionOpened(worn: worn)
         apply(effects)
     }
@@ -589,7 +610,7 @@ final class EarbudFinderController: ObservableObject {
                         guard let self, self.session?.id == id, self.session?.phase == .connecting else { return }
                         self.opened()
                         if self.isCheckingWearing {
-                            self.headphones?.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0xF3, 0, 0]))
+                            self.headphones?.simulateProtocolMessage([0xF3, 0, 0], type: 0x0E)
                         }
                     }
                 }
@@ -598,7 +619,11 @@ final class EarbudFinderController: ObservableObject {
                 let id = session!.id
                 scheduleAcknowledgementTimeout()
                 guard send(command.message.encoded!, isStopping: command == .stop, willSend: { [weak self] in
-                    guard let self, self.session?.id == id, self.session?.commandWillSend(command) == true else { return false }
+                    guard let self, self.session?.id == id else { return false }
+                    if command != .stop, let headphones = self.headphones {
+                        self.wearingStatusChanged(headphones.wearingStatus)
+                    }
+                    guard self.session?.commandWillSend(command) == true else { return false }
                     Self.logger.notice("Sending locating sound command; stop=\(command == .stop)")
                     if command == .stop {
                         self.stopWriteCount += 1
@@ -698,9 +723,9 @@ final class EarbudFinderController: ObservableObject {
 
     private func failed(_ error: String) {
         Self.logger.notice("Locating sound connection failed; phase=\(String(describing: self.session?.phase), privacy: .public)")
-        message = error
         closeTransport()
-        guard session != nil else { return }
+        guard session?.isFinished == false else { return }
+        message = error
         let effects = session!.transportFailed()
         apply(effects)
     }

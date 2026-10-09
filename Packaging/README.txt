@@ -9,7 +9,8 @@ Install or update
 3. Open Acouplet from Applications.
 
 The installer preserves settings and adds a login service that restarts the app
-if it crashes. Manage background access in System Settings > General > Login
+if it crashes. A normal quit leaves it stopped until you open it or log in again.
+Manage background access in System Settings > General > Login
 Items & Extensions. If installation fails, keep any recovery files named in
 the error.
 
@@ -21,9 +22,11 @@ under your device's name, for example WF-1000XM5 LDAC.
 
 Remove
 
-Run Uninstall Service.command, then move the app to Trash. Preferences are kept.
-To remove the audio driver, stop LDAC, quit the app and run Uninstall LDAC
-Output.command. Authorize removal, then restart the Mac.
+1. Stop LDAC and quit Acouplet.
+2. If the audio driver is installed, run Uninstall LDAC Output.command and
+   authorize removal while Acouplet is still in Applications.
+3. Run Uninstall Service.command, then move the app to Trash.
+4. Restart the Mac if you removed the audio driver. Preferences are kept.
 
 Licenses
 

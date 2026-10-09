@@ -155,8 +155,7 @@ final class HeadphoneIntentsTests: XCTestCase {
         } catch {
             XCTAssertEqual(error.localizedDescription, "The headphone connection changed before the action was confirmed.")
         }
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [0x69] + payload.dropFirst()), session: session)
+        controller.simulateProtocolMessage([0x69] + payload.dropFirst(), session: session)
         XCTAssertNil(controller.noiseControlMode)
         XCTAssertTrue(controller.noiseControlActions.isEmpty)
     }
@@ -347,7 +346,7 @@ final class HeadphoneIntentsTests: XCTestCase {
                 XCTAssertNotNil(controller.pendingChanges[.system(.speakToChat)])
                 acknowledgeAll(controller)
             }
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF9, 0x0C, 0, 1]), session: session)
+            controller.simulateProtocolMessage([0xF9, 0x0C, 0, 1], session: session)
             if cancel { XCTAssertEqual(controller.systemFeatureState(.speakToChat)?.enabled, true) }
             else { XCTAssertNil(controller.systemFeatureState(.speakToChat)) }
         }
@@ -453,7 +452,7 @@ final class HeadphoneIntentsTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload)
     }
 
 }

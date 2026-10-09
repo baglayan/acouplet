@@ -231,13 +231,12 @@ final class SonyAudioFeaturesTests: XCTestCase {
     func testBLESessionCannotBecomeReadyBeforeMatchingIdentity() {
         for hash in ["ABCDEF12", "ABCDEF13"] {
             let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
-            controller.simulateProtocolData(
-                SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x01, 0x00, 0x03, 0x00, 0x30, 0x18, 0x00, 0x00]),
+            controller.simulateProtocolMessage([0x01, 0x00, 0x03, 0x00, 0x30, 0x18, 0x00, 0x00],
                 beginConnection: true, expectedBLEHash: "ABCDEF12"
             )
             acknowledgeSimulatedCommands(controller)
             func deliver(_ payload: [UInt8]) {
-                controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+                controller.simulateProtocolMessage(payload)
                 acknowledgeSimulatedCommands(controller)
             }
             deliver([0x07, 0x00, 0x02, 0x6B, 0x00, 0x14, 0x00])
@@ -263,7 +262,7 @@ final class SonyAudioFeaturesTests: XCTestCase {
     func testControllerReadsFullProtocolVersionAndBLEHashOnlyFromSupportedTableOne() {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, begin: Bool = false) {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), beginConnection: begin)
+            controller.simulateProtocolMessage(payload, type: type, beginConnection: begin)
         }
         deliver([0x01, 0x00, 0x03, 0x00, 0x30, 0x18, 0x00, 0x00], begin: true)
         XCTAssertEqual(controller.protocolVersion, 0x03003018)
@@ -291,7 +290,7 @@ final class SonyAudioFeaturesTests: XCTestCase {
     func testControllerNegotiatesBothTablesAndDispatchesCodecAndDSEE() {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, beginConnection: Bool = false) {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), beginConnection: beginConnection)
+            controller.simulateProtocolMessage(payload, type: type, beginConnection: beginConnection)
             acknowledgeSimulatedCommands(controller)
         }
         deliver([0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00], beginConnection: true)
@@ -300,7 +299,7 @@ final class SonyAudioFeaturesTests: XCTestCase {
         deliver([0x07, 0x00, 0x05, 0x6B, 0x00, 0x12, 0x00, 0xE2, 0x00, 0xFF, 0x00, 0xE7, 0x00])
         XCTAssertEqual(controller.supportedFunctions, [0x6B, 0x12, 0xE2, 0xFF, 0xE7])
         deliver([0xE1, 0x01, 0x02])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x67, 0x17, 0x01, 0x01, 0x00, 0x00, 0x0A]))
+        controller.simulateProtocolMessage([0x67, 0x17, 0x01, 0x01, 0x00, 0x00, 0x0A])
         var queries: [[UInt8]] = []
         while let frame = controller.simulatedPendingFrame {
             queries.append(frame.payload)
@@ -331,6 +330,9 @@ final class SonyAudioFeaturesTests: XCTestCase {
         XCTAssertEqual(controller.pendingChanges[.dsee], [0x00])
         deliver([0xE7, 0x01, 0x01])
         XCTAssertEqual(controller.pendingChanges[.dsee], [0x00])
+        deliver([0xE7, 0x01, 0x00])
+        XCTAssertEqual(controller.pendingChanges[.dsee], [0x00])
+        XCTAssertEqual(controller.audioFeatures.dseeMode, .automatic)
         deliver([0xE9, 0x01, 0x00])
         XCTAssertEqual(controller.audioFeatures.dseeMode, .off)
         XCTAssertNil(controller.pendingChanges[.dsee])
@@ -357,16 +359,125 @@ final class SonyAudioFeaturesTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(3200))
         XCTAssertNil(controller.pendingChanges[.dsee])
         XCTAssertNotNil(controller.settingErrors[.dsee])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 0x01, 0x00]))
+        controller.simulateProtocolMessage([0xE9, 0x01, 0x00])
         XCTAssertEqual(controller.audioFeatures.dseeMode, .off)
         XCTAssertNil(controller.settingErrors[.dsee])
         controller.setDSEE(.automatic)
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 0x01, 0x00]))
+        controller.simulateProtocolMessage([0xE9, 0x01, 0x00])
         XCTAssertEqual(controller.pendingChanges[.dsee], [0x01])
         controller.simulateDeviceConnection(named: nil)
         XCTAssertTrue(controller.pendingChanges.isEmpty)
         XCTAssertTrue(controller.settingErrors.isEmpty)
+    }
+
+    @MainActor
+    func testModernDSEETimeoutRequiresFreshOwnedReadAndPreservesFailedChange() async {
+        for (hasOldPoll, expires) in [(false, false), (true, false), (false, true)] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            controller.simulateDeviceConnection(named: "WF-1000XM5")
+            defer { controller.simulateControlLoss() }
+            if hasOldPoll {
+                controller.refresh()
+                acknowledgeSimulatedCommands(controller)
+            }
+            controller.setDSEE(.off)
+            acknowledgeSimulatedCommands(controller)
+            controller.simulateSettingTimeout(.dsee)
+            for _ in 0..<4 { await Task.yield() }
+            acknowledgeSimulatedCommands(controller)
+            let issue = controller.settingErrors[.dsee]
+            XCTAssertNotNil(issue)
+            XCTAssertNil(controller.pendingChanges[.dsee])
+            XCTAssertFalse(controller.canSetDSEE)
+            let writes = controller.simulatedTransmittedFrames.filter { $0.payload == [0xE8, 0x01, 0] }.count
+            controller.setDSEE(.off)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xE8, 0x01, 0] }.count, writes)
+            if expires {
+                controller.simulateSystemReadTimeout([0xE6, 0x01])
+                for _ in 0..<4 { await Task.yield() }
+            }
+            if hasOldPoll || expires {
+                controller.simulateProtocolMessage([0xE7, 0x01, 0])
+                XCTAssertEqual(controller.dseeMode, expires ? nil : .automatic)
+                XCTAssertFalse(controller.canSetDSEE)
+                XCTAssertEqual(controller.settingErrors[.dsee], issue)
+                acknowledgeSimulatedCommands(controller)
+            }
+            controller.simulateProtocolMessage([0xE7, 0x01, 0xFF])
+            XCTAssertFalse(controller.canSetDSEE)
+            controller.simulateProtocolMessage([0xE7, 0x01, 1])
+            XCTAssertEqual(controller.dseeMode, .automatic)
+            XCTAssertTrue(controller.canSetDSEE)
+            XCTAssertEqual(controller.settingErrors[.dsee], issue)
+            controller.simulateProtocolMessage([0xE7, 0x01, 0])
+            XCTAssertEqual(controller.dseeMode, .automatic)
+            XCTAssertEqual(controller.settingErrors[.dsee], issue)
+            controller.setDSEE(.off)
+            XCTAssertEqual(controller.pendingChanges[.dsee], [0])
+        }
+    }
+
+    @MainActor
+    func testModernDSEEReadExpiryReleasesFailedHoldOnlyWhileModeIsUnavailable() async {
+        for expiresBeforeWriteTimeout in [false, true] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            controller.simulateDeviceConnection(named: "WF-1000XM5")
+            defer { controller.simulateControlLoss() }
+            controller.refresh()
+            acknowledgeSimulatedCommands(controller)
+            controller.setDSEE(.off)
+            acknowledgeSimulatedCommands(controller)
+            if expiresBeforeWriteTimeout {
+                controller.simulateSystemReadTimeout([0xE6, 1])
+                for _ in 0..<4 { await Task.yield() }
+                XCTAssertEqual(controller.pendingChanges[.dsee], [0])
+            }
+            controller.simulateSettingTimeout(.dsee)
+            for _ in 0..<4 { await Task.yield() }
+            let issue = controller.settingErrors[.dsee]
+            if !expiresBeforeWriteTimeout {
+                controller.simulateSystemReadTimeout([0xE6, 1])
+                for _ in 0..<4 { await Task.yield() }
+            }
+            XCTAssertNotNil(issue)
+            XCTAssertNil(controller.dseeMode)
+            XCTAssertFalse(controller.canSetDSEE)
+            XCTAssertTrue(controller.canPerformConfirmedSettingChange(.dsee))
+            XCTAssertEqual(controller.settingErrors[.dsee], issue)
+            controller.simulateProtocolMessage([0xE7, 1, 0])
+            XCTAssertNil(controller.dseeMode)
+            XCTAssertFalse(controller.canSetDSEE)
+            acknowledgeSimulatedCommands(controller)
+            controller.simulateProtocolMessage([0xE7, 1, 1])
+            XCTAssertTrue(controller.canSetDSEE)
+            XCTAssertEqual(controller.settingErrors[.dsee], issue)
+        }
+    }
+
+    @MainActor
+    func testSameTransportHandshakeKeepsOnlyErrorsForRetainedExpiredReads() async {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        defer { controller.simulateControlLoss() }
+        controller.setDSEE(.off)
+        acknowledgeSimulatedCommands(controller)
+        controller.simulateSettingTimeout(.dsee)
+        for _ in 0..<4 { await Task.yield() }
+        acknowledgeSimulatedCommands(controller)
+        controller.simulateSystemReadTimeout([0xE6, 1])
+        for _ in 0..<4 { await Task.yield() }
+        let issue = controller.settingErrors[.dsee]
+        controller.setPlaybackVolume(20)
+        acknowledgeSimulatedCommands(controller)
+        controller.simulateSettingTimeout(.playbackVolume)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertNotNil(issue)
+        XCTAssertNotNil(controller.settingErrors[.playbackVolume])
+        controller.simulateSameTransportHandshake()
+        XCTAssertEqual(controller.linkState, .handshaking)
+        XCTAssertEqual(controller.settingErrors[.dsee], issue)
+        XCTAssertNil(controller.settingErrors[.playbackVolume])
     }
 
     @MainActor
@@ -387,14 +498,14 @@ final class SonyAudioFeaturesTests: XCTestCase {
         controller.refreshEqualizer()
         controller.setDSEE(.off)
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x56, 0x00])
-        let reply = SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 0x01, 0x00])
-        controller.simulateProtocolData(reply)
+        let reply: [UInt8] = [0xE9, 0x01, 0x00]
+        controller.simulateProtocolMessage(reply)
         XCTAssertEqual(controller.pendingChanges[.dsee], [0x00])
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 0x05, 0x02, 0x01]))
+        controller.simulateProtocolMessage([0xE9, 0x05, 0x02, 0x01])
         XCTAssertEqual(controller.audioFeatures.connectionMode, .lowLatency)
         XCTAssertEqual(controller.pendingChanges[.dsee], [0x00])
-        controller.simulateProtocolData(reply)
+        controller.simulateProtocolMessage(reply)
         XCTAssertNil(controller.pendingChanges[.dsee])
     }
 }

@@ -50,8 +50,8 @@ def bundle_files(directory):
             else ('directory', stat.S_IMODE(path.stat().st_mode)) for path in directory.rglob('*')}
 
 
-def inspect_installer(app, team):
-    installer = app / 'Contents/Resources/Acouplet LDAC Output.pkg'
+def inspect_installer(app, team, removal=False):
+    installer = app / 'Contents/Resources' / ('Acouplet LDAC Removal.pkg' if removal else 'Acouplet LDAC Output.pkg')
     checks = {'embedded_installer': installer.is_file() and not installer.is_symlink()}
     if not checks['embedded_installer']: return checks
     status, stdout, stderr = command(['/usr/sbin/pkgutil', '--check-signature', str(installer)])
@@ -68,6 +68,17 @@ def inspect_installer(app, team):
         try:
             info = ET.parse(expanded / 'PackageInfo').getroot()
             app_info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+            if removal:
+                checks['package_identity'] = info.get('identifier') == 'dev.baglayan.Acouplet.LDACOutput.Removal'
+                checks['package_version'] = info.get('version') == app_info['CFBundleShortVersionString']
+                payload = expanded / 'Payload'
+                checks['no_payload'] = not payload.is_symlink() and (not payload.exists() or (payload.is_dir() and not list(payload.iterdir())))
+                checks['no_bundles'] = not info.findall('bundle')
+                script = Path(__file__).with_name('LDACOutputUninstaller') / 'postinstall'
+                expected_scripts = {'postinstall': ('file', hashlib.sha256(script.read_bytes().replace(b'@ACOUPLET_LDAC_SIGNING_TEAM_ID@', team.encode())).hexdigest(), 0o755)} if team else {}
+                checks['installer_scripts'] = bool(team) and bundle_files(expanded / 'Scripts') == expected_scripts
+                checks['installer_script_entries'] = [(entry.tag, entry.get('file')) for entry in info.findall('scripts/*')] == [('postinstall', './postinstall')]
+                return checks
             driver = app / 'Contents/Helpers/AcoupletLDACOutput.driver'
             payload = expanded / 'Payload/AcoupletLDACOutput.driver'
             driver_info = plistlib.loads((driver / 'Contents/Info.plist').read_bytes())
@@ -98,12 +109,13 @@ def inspect_package(package, signatures_only=False, dmg=None):
     match = re.search(r'^TeamIdentifier=([A-Z0-9]{10})$', signature.decode(errors='replace'), re.MULTILINE)
     team = match[1] if match else None
     targets = [app, app / 'Contents/Helpers/Acouplet Battery Publisher', app / 'Contents/Frameworks/SonyNativeHUD.dylib', app / 'Contents/Helpers/SonyNativeHUDCheck', *sparkle['code_targets'](app),
-               *[app / 'Contents/Helpers' / name for name in ['LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver']], *panes]
+               *[app / 'Contents/Helpers' / name for name in ['LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver']], *panes]
     code = {str(path.relative_to(package)): inspect_code(path, team) for path in targets}
     installer = inspect_installer(app, team)
+    uninstaller = inspect_installer(app, team, removal=True)
     if dmg: code[str(dmg)] = inspect_code(dmg, team, executable=False)
     staples = {}
-    staple_targets = [] if signatures_only else [app / 'Contents/Resources/Acouplet LDAC Output.pkg', *([dmg] if dmg else [app, *panes])]
+    staple_targets = [] if signatures_only else [app / 'Contents/Resources/Acouplet LDAC Output.pkg', app / 'Contents/Resources/Acouplet LDAC Removal.pkg', *([dmg] if dmg else [app, *panes])]
     for path in staple_targets:
         status, stdout, stderr = command(['/usr/bin/xcrun', 'stapler', 'validate', str(path)])
         message = (stdout + stderr).decode(errors='replace')
@@ -116,6 +128,7 @@ def inspect_package(package, signatures_only=False, dmg=None):
     controls = app / 'Contents/PlugIns/Acouplet Controls.appex'
     blockers = [name + ': ' + check for name, checks in code.items() for check, passed in checks.items() if not passed]
     blockers += ['Embedded LDAC installer: ' + check for check, passed in installer.items() if not passed]
+    blockers += ['Embedded LDAC uninstaller: ' + check for check, passed in uninstaller.items() if not passed]
     try:
         info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
         if info.get('AcoupletDistribution') != 'production': blockers.append('Website release must declare production distribution')
@@ -127,12 +140,13 @@ def inspect_package(package, signatures_only=False, dmg=None):
     return {
         'checked_utc': datetime.now(timezone.utc).isoformat(),
         'package': str(package),
-        'scope': 'App, battery helper, native HUD, Sparkle framework and nested tools, LDAC transport/audio helpers, HAL driver and embedded installer, separately packaged panes and optional DMG. No notarization upload or installed-app modification.',
+        'scope': 'App, battery helper, native HUD, Sparkle framework and nested tools, LDAC transport/audio helpers, HAL driver and embedded installer/uninstaller, separately packaged panes and optional DMG. No notarization upload or installed-app modification.',
         'signing_team': team,
-        'signing_prerequisites_pass': all(all(checks.values()) for checks in code.values()) and all(installer.values()),
+        'signing_prerequisites_pass': all(all(checks.values()) for checks in code.values()) and all(installer.values()) and all(uninstaller.values()),
         'stapled_tickets_verified': bool(staples) and all(check['verified'] for check in staples.values()),
         'code': code,
         'installer': installer,
+        'uninstaller': uninstaller,
         'staples': staples,
         'blockers': blockers,
         'limits': 'A missing staple does not prove absence of server-side notarization. Stapler validation may contact Apple’s ticket service. This is not App Review, Apple accessory certification, or a clean-machine Gatekeeper test.',

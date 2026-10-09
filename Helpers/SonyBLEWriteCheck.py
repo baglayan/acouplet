@@ -44,6 +44,7 @@ final class TransportFixture {
     var sessionID: UUID? = UUID()
     var writeTimeout: Task<Void, Never>?
     var onDisconnect: ((String?) -> Void)?
+    var diagnosticError: String?
 
     init(_ peripheral: FakePeripheral) { self.peripheral = peripheral }
 
@@ -119,7 +120,7 @@ struct Check {
         let blocked = TransportFixture(blockedPeripheral)
         var blockedFailures = 0
         blocked.onDisconnect = { message in
-            precondition(message == "Sony BLE control writes timed out.")
+            precondition(message == String(localized: "Sending the headphone command timed out. Try again."))
             blockedFailures += 1
         }
         precondition(blocked.write(frame, completion: { preconditionFailure("Blocked frame completed") }))
@@ -162,6 +163,7 @@ struct Check {
         precondition(cancelled == 1 && completed == 0 && failures == 0 && revoked.isReady && revoked.writeTimeout == nil)
         print("PASS revoked unsent frame: real five-second timeout, no readiness callback, no writes, one cancellation, no disconnect")
         precondition(blockedFailures == 1 && blockedPeripheral.chunks.isEmpty && !blocked.isReady)
+        precondition(blocked.diagnosticError == String(localized: "Sending the headphone command timed out. Try again."))
         print("PASS valid blocked frame: real five-second timeout still disconnects exactly once")
         precondition(replacementCancelled == 1 && replacementFailures == 0 && replacement.isReady && !replacement.writes.isEmpty)
         print("PASS cancellation callback: blocked replacement survives the old timeout")

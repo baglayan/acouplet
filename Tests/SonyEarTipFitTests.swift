@@ -129,7 +129,6 @@ final class SonyEarTipFitTests: XCTestCase {
         XCTAssertEqual(SonyEarTipFit.capabilityQueryPayload, [0xF0, 6])
         XCTAssertEqual(SonyEarTipFit.statusQueryPayload, [0xF2, 6])
         XCTAssertEqual(SonyEarTipFit.operationQueryPayload, [0xF6, 6])
-        XCTAssertEqual(SonyEarTipFit.resultQueryPayload, [0xFA, 6])
         XCTAssertEqual(SonyEarTipFit.enterModePayload, [0xF4, 6, 1, 1])
         XCTAssertEqual(SonyEarTipFit.exitModePayload, [0xF4, 6, 0, 1])
         for series: SonyEarTipFit.Series in [.other, .polyurethane, .hybrid, .softFitting] {

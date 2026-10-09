@@ -58,7 +58,7 @@ struct SonyLowBatteryPolicy: Codable, Equatable {
 
     private var records: [String: [Group: Record]] = [:]
 
-    mutating func warnings(for deviceID: String, readings: [Reading], isConnected: Bool, at date: Date) -> [Warning] {
+    mutating func warnings(for deviceID: String, readings: [Reading], at date: Date) -> [Warning] {
         guard !deviceID.isEmpty else { return [] }
         var deviceRecords = records[deviceID, default: [:]].filter { !$0.value.isExpired(at: date) }
         let fresh = readings.filter { $0.isFresh(at: date) }
@@ -72,7 +72,7 @@ struct SonyLowBatteryPolicy: Codable, Equatable {
                 deviceRecords[group] = nil
                 continue
             }
-            guard isConnected, let lowest = discharging.min(by: { $0.level < $1.level }),
+            guard let lowest = discharging.min(by: { $0.level < $1.level }),
                   lowest.level <= (deviceRecords[group]?.threshold(for: group) ?? group.initialThreshold) else { continue }
             warnings.append(Warning(deviceID: deviceID, group: group, reading: lowest, evaluatedAt: date))
         }
@@ -84,9 +84,5 @@ struct SonyLowBatteryPolicy: Codable, Equatable {
         guard warning.reading.isFresh(at: date) else { return }
         records[warning.deviceID, default: [:]][warning.group] = Record(
             level: warning.reading.level, lastSeenAt: warning.evaluatedAt, reportedAt: date)
-    }
-
-    mutating func forget(deviceID: String) {
-        records[deviceID] = nil
     }
 }

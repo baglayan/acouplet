@@ -25,6 +25,8 @@ struct SonyMultipointTransition: Equatable, Sendable {
     private var requestAcknowledged = false
     private var confirmationReply: [UInt8]?
     private var cancellationRequested = false
+    private var receivedAlertCount = 0
+    private var soundQualityWarningConfirmed = false
 
     init?(enabled: Bool, model: SonySystemFeatures, session: UInt64, requestID: UUID = UUID()) {
         guard let slot = model.multipointSlot, let original = model.multipoint?.enabled,
@@ -121,14 +123,23 @@ struct SonyMultipointTransition: Equatable, Sendable {
     mutating func receiveAlert(_ alert: SonyConnectionAlert, session: UInt64) -> Bool {
         guard session == self.session, alert.isMultipointChange,
               phase == .awaitingResponse || phase == .queuedReadback || phase == .verifying else { return false }
+        let warningConfirmed = soundQualityWarningConfirmed
+        soundQualityWarningConfirmed = false
+        receivedAlertCount += 1
         if case .unknown = alert.actionType { return false }
-        phase = .awaitingUser(alert)
+        if warningConfirmed, alert.format == .fixed, alert.messageID == 0x70, alert.actionType == .positiveNegative {
+            phase = .replyQueued(alert, .positive)
+        } else {
+            phase = .awaitingUser(alert)
+        }
         return true
     }
 
-    mutating func respond(to alert: SonyConnectionAlert, action: SonyConnectionAlertAction) -> [UInt8]? {
+    mutating func respond(to alert: SonyConnectionAlert, action: SonyConnectionAlertAction, confirmsSoundQualityWarning: Bool = false) -> [UInt8]? {
         guard phase == .awaitingUser(alert), let payload = alert.replyPayload(action) else { return nil }
         cancellationRequested = action == .negative
+        soundQualityWarningConfirmed = confirmsSoundQualityWarning && receivedAlertCount == 1 && targetEnabled
+            && action == .positive && alert.format == .fixed && alert.messageID == 0x07 && alert.actionType == .positiveNegative
         phase = .replyQueued(alert, action)
         return payload
     }
@@ -176,6 +187,7 @@ struct SonyMultipointTransition: Equatable, Sendable {
     @discardableResult
     mutating func controlLost(session: UInt64) -> Bool {
         guard session == self.session, !isFinished else { return false }
+        soundQualityWarningConfirmed = false
         if phase == .queued {
             fail(String(localized: "The control connection was lost before the multipoint request was sent."))
         } else {
@@ -189,6 +201,7 @@ struct SonyMultipointTransition: Equatable, Sendable {
         guard session > self.session, phase == .recovering, let slot = model.multipointSlot else { return false }
         self.session = session
         self.slot = slot
+        soundQualityWarningConfirmed = false
         phase = .queuedReadback
         return true
     }

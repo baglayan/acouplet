@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import XCTest
 @testable import Acouplet
 
@@ -36,24 +37,51 @@ final class EarbudFindingSessionTests: XCTestCase {
         }
     }
 
-    func testConfirmationUsesTheCurrentWearingStatus() throws {
+    func testConfirmationRequiresFreshConsentForAnUnsafeChangeAndAllowsRemoval() throws {
         for target in [FastPairRingTarget.left, .right] {
             for worn in [false, nil] as [Bool?] {
                 var session = EarbudFindingSession(target: target, timeoutSeconds: 30)
                 let command = try XCTUnwrap(FastPairRingCommand.ring(target, timeoutSeconds: 30))
                 _ = session.begin()
                 _ = session.connectionOpened(worn: true)
-                XCTAssertEqual(session.confirmWearingOverride(worn: worn), worn == false ? [.send(command)] : [.close])
-                XCTAssertFalse(session.startedWithWearingOverride)
+                if worn == nil {
+                    XCTAssertEqual(session.confirmWearingOverride(worn: worn), [])
+                    XCTAssertEqual(session.phase, .awaitingWearingConfirmation)
+                    XCTAssertNil(session.wearingConfirmationStatus)
+                    XCTAssertFalse(session.commandWillSend(command))
+                    XCTAssertFalse(session.mayBeRinging)
+                }
+                XCTAssertEqual(session.confirmWearingOverride(worn: worn), [.send(command)])
+                XCTAssertEqual(session.startedWithWearingOverride, worn != false)
+                XCTAssertTrue(session.commandWillSend(command))
                 if worn == false {
-                    XCTAssertTrue(session.commandWillSend(command))
                     XCTAssertEqual(session.wearingChanged(true), [.send(.stop)])
                 } else {
-                    XCTAssertEqual(session.phase, .finished)
-                    XCTAssertFalse(session.commandWillSend(command))
+                    XCTAssertEqual(session.wearingChanged(nil), [])
+                    XCTAssertEqual(session.wearingChanged(true), [.send(.stop)])
                 }
                 XCTAssertEqual(session.confirmWearingOverride(worn: true), [])
             }
+        }
+    }
+
+    func testUnknownConsentCannotStartAWornOverrideWithoutFreshConfirmation() throws {
+        for target in [FastPairRingTarget.left, .right] {
+            var session = EarbudFindingSession(target: target, timeoutSeconds: 30)
+            let command = try XCTUnwrap(FastPairRingCommand.ring(target, timeoutSeconds: 30))
+            _ = session.begin()
+            _ = session.connectionOpened(worn: nil)
+
+            XCTAssertEqual(session.confirmWearingOverride(worn: true), [])
+
+            XCTAssertEqual(session.phase, .awaitingWearingConfirmation)
+            XCTAssertEqual(session.wearingConfirmationStatus, true)
+            XCTAssertFalse(session.startedWithWearingOverride)
+            XCTAssertFalse(session.mayBeRinging)
+            XCTAssertFalse(session.commandWillSend(command))
+            XCTAssertEqual(session.confirmWearingOverride(worn: true), [.send(command)])
+            XCTAssertTrue(session.startedWithWearingOverride)
+            XCTAssertTrue(session.commandWillSend(command))
         }
     }
 
@@ -81,16 +109,21 @@ final class EarbudFindingSessionTests: XCTestCase {
         }
     }
 
-    func testMissingWearingStatusClosesBeforeStartButNeverBlocksStopRetry() throws {
+    func testMissingWearingStatusRequiresOverrideButNeverBlocksStopRetry() throws {
         for target in [FastPairRingTarget.left, .right] {
             let command = try XCTUnwrap(FastPairRingCommand.ring(target, timeoutSeconds: 30))
             var unknown = EarbudFindingSession(target: target, timeoutSeconds: 30)
             _ = unknown.begin()
-            XCTAssertEqual(unknown.connectionOpened(worn: nil), [.close])
-            XCTAssertEqual(unknown.phase, .finished)
+            XCTAssertEqual(unknown.connectionOpened(worn: nil), [])
+            XCTAssertEqual(unknown.phase, .awaitingWearingConfirmation)
             XCTAssertFalse(unknown.startedWithWearingOverride)
-            XCTAssertEqual(unknown.confirmWearingOverride(worn: true), [])
             XCTAssertFalse(unknown.commandWillSend(command))
+            XCTAssertEqual(unknown.confirmWearingOverride(worn: nil), [.send(command)])
+            XCTAssertTrue(unknown.startedWithWearingOverride)
+            XCTAssertTrue(unknown.commandWillSend(command))
+            XCTAssertEqual(unknown.wearingChanged(nil), [])
+            XCTAssertEqual(unknown.wearingChanged(false), [])
+            XCTAssertEqual(unknown.wearingChanged(nil), [.send(.stop)])
             for worn in [true, nil] as [Bool?] {
                 var retry = EarbudFindingSession(target: target, timeoutSeconds: 30)
                 _ = retry.begin()
@@ -105,6 +138,36 @@ final class EarbudFindingSessionTests: XCTestCase {
                 XCTAssertTrue(retry.commandWillSend(.stop))
             }
         }
+    }
+
+    func testAwaitingConfirmationRetainsUnknownWornAndRemovedReadings() {
+        var session = EarbudFindingSession(target: .left, timeoutSeconds: 30)
+        _ = session.begin()
+        _ = session.connectionOpened(worn: nil)
+        XCTAssertNil(session.wearingConfirmationStatus)
+        XCTAssertEqual(session.wearingChanged(true), [])
+        XCTAssertEqual(session.wearingConfirmationStatus, true)
+        XCTAssertEqual(session.wearingChanged(false), [])
+        XCTAssertEqual(session.wearingConfirmationStatus, false)
+        XCTAssertEqual(session.phase, .awaitingWearingConfirmation)
+        XCTAssertFalse(session.mayBeRinging)
+    }
+
+    func testUnknownWearingStatusBeforeStartRevokesPendingCommandUntilConfirmed() throws {
+        var session = EarbudFindingSession(target: .left, timeoutSeconds: 30)
+        let command = try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30))
+        _ = session.begin()
+        XCTAssertEqual(session.connectionOpened(worn: false), [.send(command)])
+        XCTAssertEqual(session.wearingChanged(nil), [])
+        XCTAssertEqual(session.phase, .awaitingWearingConfirmation)
+        XCTAssertFalse(session.commandWillSend(command))
+        XCTAssertFalse(session.mayBeRinging)
+        XCTAssertEqual(session.wearingChanged(false), [])
+        XCTAssertEqual(session.phase, .awaitingWearingConfirmation)
+        XCTAssertFalse(session.commandWillSend(command))
+        XCTAssertEqual(session.confirmWearingOverride(worn: false), [.send(command)])
+        XCTAssertFalse(session.startedWithWearingOverride)
+        XCTAssertTrue(session.commandWillSend(command))
     }
 
     func testCancelledOrFailedConfirmationCannotStartLater() throws {
@@ -235,7 +298,7 @@ final class EarbudFindingSessionTests: XCTestCase {
             for report in [nil, status(0), status(2, timeout: 20)] {
                 var session = try startedSession()
                 XCTAssertEqual(session.receive(.rejection(reason, report)), [.send(.stop)])
-                XCTAssertEqual(session.rejection, reason)
+                XCTAssertEqual(session.phase, .stopping)
                 XCTAssertTrue(session.mayBeRinging)
                 XCTAssertTrue(session.commandWillSend(.stop))
                 XCTAssertEqual(session.receive(.rejection(reason, status(0))), [.close])
@@ -251,7 +314,6 @@ final class EarbudFindingSessionTests: XCTestCase {
         XCTAssertEqual(session.receive(.status(status(0))), [.close])
         XCTAssertEqual(session.phase, .finished)
         XCTAssertFalse(session.mayBeRinging)
-        XCTAssertEqual(session.deadlineExpired(), [])
         XCTAssertEqual(session.transportFailed(), [])
     }
 
@@ -269,32 +331,6 @@ final class EarbudFindingSessionTests: XCTestCase {
         }
     }
 
-    func testDeadlineAllowsStopAcknowledgementBeforeClosing() throws {
-        var session = try startedSession()
-        XCTAssertEqual(session.receive(.acknowledgement(status(2, timeout: 20))), [])
-        XCTAssertEqual(session.deadlineExpired(), [.send(.stop)])
-        XCTAssertEqual(session.phase, .stopping)
-        XCTAssertTrue(session.mayBeRinging)
-        XCTAssertTrue(session.commandWillSend(.stop))
-        XCTAssertFalse(session.commandWillSend(.stop))
-        XCTAssertEqual(session.deadlineExpired(), [])
-        XCTAssertEqual(session.acknowledgementExpired(), [.close])
-        XCTAssertEqual(session.phase, .unconfirmed)
-        XCTAssertTrue(session.mayBeRinging)
-        XCTAssertEqual(session.begin(), [])
-    }
-
-    func testDeadlineDoesNotRepeatPreviouslyRequestedStop() throws {
-        var session = try startedSession()
-        XCTAssertEqual(session.stop(), [.send(.stop)])
-        XCTAssertTrue(session.commandWillSend(.stop))
-        XCTAssertEqual(session.deadlineExpired(), [])
-        XCTAssertTrue(session.mayBeRinging)
-        XCTAssertEqual(session.phase, .stopping)
-        XCTAssertEqual(session.receive(.status(status(0))), [.close])
-        XCTAssertFalse(session.mayBeRinging)
-    }
-
     func testTransportFailureBeforeAndAfterWriteHaveDifferentCertainty() throws {
         var before = EarbudFindingSession(target: .left, timeoutSeconds: 20)
         _ = before.begin()
@@ -309,38 +345,11 @@ final class EarbudFindingSessionTests: XCTestCase {
         XCTAssertEqual(after.transportFailed(), [])
     }
 
-    func testPreWriteRefusalCannotBeUsedToClearAPreviouslyAttemptedCommand() throws {
-        let command = try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 20))
-        var before = EarbudFindingSession(target: .left, timeoutSeconds: 20)
-        _ = before.begin()
-        _ = before.connectionOpened()
-        XCTAssertEqual(before.commandWasNotSent(command), [.close])
-        XCTAssertEqual(before.phase, .failed)
-        XCTAssertFalse(before.mayBeRinging)
-        XCTAssertFalse(before.commandWillSend(command))
-        var after = try startedSession()
-        XCTAssertEqual(after.commandWasNotSent(command), [])
-        XCTAssertTrue(after.mayBeRinging)
-        XCTAssertEqual(after.transportFailed(), [.close])
-        XCTAssertEqual(after.phase, .unconfirmed)
-    }
-
-    func testRefusedStopPreservesUncertaintyAndSessionIdentityIsDistinct() throws {
-        var session = try startedSession()
-        XCTAssertNotEqual(session.id, try startedSession().id)
-        XCTAssertEqual(session.stop(), [.send(.stop)])
-        XCTAssertEqual(session.commandWasNotSent(.stop), [.close])
-        XCTAssertEqual(session.phase, .unconfirmed)
-        XCTAssertTrue(session.mayBeRinging)
-        XCTAssertFalse(session.commandWillSend(.stop))
-    }
-
     func testExplicitRetryReconnectsOnlyToStopAndCanConfirmSilence() throws {
         var session = try startedSession()
         let id = session.id
         XCTAssertEqual(session.transportFailed(), [.close])
         XCTAssertEqual(session.stop(), [])
-        XCTAssertEqual(session.deadlineExpired(), [])
         XCTAssertEqual(session.retryStop(), [.connect])
         XCTAssertEqual(session.id, id)
         XCTAssertEqual(session.phase, .connecting)
@@ -385,19 +394,20 @@ final class EarbudFindingSessionTests: XCTestCase {
         XCTAssertFalse(session.mayBeRinging)
     }
 
-    func testCancellingRetryConnectionRetainsUncertaintyAndPreventsDelayedWrites() throws {
-        for useDeadline in [false, true] {
-            var session = try startedSession()
-            _ = session.transportFailed()
-            _ = session.retryStop()
-            XCTAssertEqual(useDeadline ? session.deadlineExpired() : session.stop(), [.close])
-            XCTAssertEqual(session.phase, .unconfirmed)
-            XCTAssertTrue(session.mayBeRinging)
-            XCTAssertFalse(session.isRetryingStop)
-            XCTAssertEqual(session.connectionOpened(), [])
-            XCTAssertFalse(session.commandWillSend(.stop))
-            XCTAssertEqual(session.begin(), [])
-        }
+    func testRepeatedStopPreservesTheStopRetryConnection() throws {
+        var session = try startedSession()
+        _ = session.transportFailed()
+        _ = session.retryStop()
+        XCTAssertEqual(session.stop(), [])
+        XCTAssertEqual(session.phase, .connecting)
+        XCTAssertTrue(session.mayBeRinging)
+        XCTAssertTrue(session.isRetryingStop)
+        XCTAssertEqual(session.begin(), [])
+        XCTAssertEqual(session.connectionOpened(), [.send(.stop)])
+        XCTAssertTrue(session.commandWillSend(.stop))
+        XCTAssertEqual(session.receive(.acknowledgement(status(0))), [.close])
+        XCTAssertEqual(session.phase, .finished)
+        XCTAssertFalse(session.mayBeRinging)
     }
 
     func testRetryConnectionFailureRemainsUnconfirmedWithoutAutomaticRetry() throws {
@@ -409,7 +419,6 @@ final class EarbudFindingSessionTests: XCTestCase {
         XCTAssertTrue(session.mayBeRinging)
         XCTAssertFalse(session.isRetryingStop)
         XCTAssertEqual(session.stop(), [])
-        XCTAssertEqual(session.deadlineExpired(), [])
         XCTAssertEqual(session.acknowledgementExpired(), [])
         XCTAssertEqual(session.connectionOpened(), [])
         XCTAssertEqual(session.retryStop(), [.connect])
@@ -460,7 +469,7 @@ final class EarbudFinderEligibilityTests: XCTestCase {
             let finder = EarbudFinderController(headphones: headphones)
             XCTAssertTrue(finder.canPlay(.left))
             if isCall {
-                headphones.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xA5, 1, 0, 1, 1]))
+                headphones.simulateProtocolMessage([0xA5, 1, 0, 1, 1])
                 headphones.setCallVolume(15)
             } else {
                 headphones.setPlaybackVolume(15)
@@ -529,7 +538,7 @@ final class EarbudFinderEligibilityTests: XCTestCase {
         setFirmware("6.1.0", on: headphones)
         let finder = EarbudFinderController(headphones: headphones)
         XCTAssertTrue(finder.canPlay(.left))
-        headphones.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x15, 1, 0, 1]))
+        headphones.simulateProtocolMessage([0x15, 1, 0, 1])
         XCTAssertFalse(finder.canPlay(.left))
         XCTAssertTrue(finder.canPlay(.right))
         finder.dismiss()
@@ -548,12 +557,189 @@ final class EarbudFinderEligibilityTests: XCTestCase {
 
     private func setFirmware(_ firmware: String, on headphones: SonyHeadphonesController) {
         let bytes = Array(firmware.utf8)
-        headphones.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x05, 2, UInt8(bytes.count)] + bytes))
+        headphones.simulateProtocolMessage([0x05, 2, UInt8(bytes.count)] + bytes)
     }
 }
 
 @MainActor
 final class EarbudFinderControllerTests: XCTestCase {
+    func testExhaustedTable2DiscoveryPublishesUnavailableWithoutRestartingOnRefreshOrReopen() async throws {
+        let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let finder = try finderAwaitingTable2(on: headphones)
+        defer { finish(finder, headphones: headphones) }
+        XCTAssertEqual(finder.availabilityMessage, String(localized: "Checking the earbuds…"))
+        XCTAssertFalse(headphones.hasFailedTable2Discovery)
+        XCTAssertFalse(headphones.canRetryDeviceDiscovery)
+        headphones.simulateDiscoveryReadTimeout([0x06, 0], type: 0x0E)
+        for _ in 0..<8 { await Task.yield() }
+        acknowledgeAll(headphones)
+        XCTAssertEqual(finder.availabilityMessage, String(localized: "Checking the earbuds…"))
+        XCTAssertFalse(headphones.hasFailedTable2Discovery)
+        let unavailable = expectation(description: "Finder publishes exhausted discovery")
+        var observedFailure = false
+        let observation = finder.objectWillChange.sink {
+            if headphones.hasFailedTable2Discovery, !observedFailure {
+                observedFailure = true
+                unavailable.fulfill()
+            }
+        }
+        defer { observation.cancel() }
+        headphones.simulateDiscoveryReadTimeout([0x06, 0], type: 0x0E)
+        await fulfillment(of: [unavailable], timeout: 1)
+        XCTAssertEqual(finder.availabilityMessage, String(localized: "Couldn’t finish checking the earbuds."))
+        XCTAssertTrue(headphones.canRetryDeviceDiscovery)
+        XCTAssertFalse(finder.canPlay(.left))
+        XCTAssertFalse(finder.canPlay(.right))
+        finder.play(.left)
+        XCTAssertNil(finder.session)
+        for _ in 0..<10 {
+            headphones.refresh()
+            acknowledgeAll(headphones)
+        }
+        finder.dismiss()
+        XCTAssertTrue(headphones.beginEarbudFinder())
+        XCTAssertTrue(headphones.earbudFinder === finder)
+        XCTAssertEqual(finder.availabilityMessage, String(localized: "Couldn’t finish checking the earbuds."))
+        XCTAssertEqual(headphones.simulatedTransmittedFrames.filter {
+            $0.type == 0x0E && $0.payload == [0x06, 0]
+        }.count, 2)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
+    func testLateTable2ReplyRestoresFinderWithoutStartingAnUnauthorizedSound() async throws {
+        let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let finder = try finderAwaitingTable2(on: headphones)
+        defer { finish(finder, headphones: headphones) }
+        await exhaustTable2Discovery(on: headphones)
+        XCTAssertTrue(headphones.hasFailedTable2Discovery)
+        headphones.simulateProtocolMessage([0x07, 0, 0], type: 0x0E)
+        await receiveQueuedUpdates()
+        XCTAssertFalse(headphones.hasFailedTable2Discovery)
+        XCTAssertFalse(headphones.canRetryDeviceDiscovery)
+        XCTAssertNil(finder.availabilityMessage)
+        XCTAssertTrue(finder.canPlay(.left))
+        XCTAssertNil(finder.session)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+        let sessionID = try XCTUnwrap(finder.session?.id)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        finder.authenticateWearingOverride(sessionID: sessionID)
+        finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        XCTAssertEqual(finder.simulatedAuthorizationEvents, [sessionID])
+        XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left)])
+    }
+
+    func testExplicitDiscoveryRetryUsesAFreshSessionAndRejectsTheOldReply() async throws {
+        let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let finder = try finderAwaitingTable2(on: headphones)
+        defer { finish(finder, headphones: headphones) }
+        await exhaustTable2Discovery(on: headphones)
+        XCTAssertTrue(headphones.canRetryDeviceDiscovery)
+        let oldSession = headphones.simulatedControlSession
+        headphones.retryDeviceDiscovery()
+        XCTAssertGreaterThan(headphones.simulatedControlSession, oldSession)
+        XCTAssertFalse(headphones.hasCurrentTable2Capabilities)
+        XCTAssertFalse(headphones.canRetryDeviceDiscovery)
+        XCTAssertTrue(finder.needsNewControlSession)
+        headphones.simulateProtocolMessage([0x07, 0, 0], type: 0x0E, session: oldSession)
+        XCTAssertFalse(headphones.hasCurrentTable2Capabilities)
+        XCTAssertFalse(finder.canPlay(.left))
+        let replacement = try finderAwaitingTable2(on: headphones, beginConnection: false)
+        defer { finish(replacement, headphones: headphones) }
+        XCTAssertFalse(replacement === finder)
+        XCTAssertEqual(replacement.availabilityMessage, String(localized: "Checking the earbuds…"))
+        XCTAssertFalse(replacement.canPlay(.right))
+        headphones.simulateProtocolMessage([0x07, 0, 0], type: 0x0E, session: oldSession)
+        XCTAssertFalse(headphones.hasCurrentTable2Capabilities)
+        XCTAssertTrue(replacement.simulatedSentMessages.isEmpty)
+        headphones.simulateProtocolMessage([0x07, 0, 0], type: 0x0E)
+        await receiveQueuedUpdates()
+        XCTAssertTrue(headphones.hasCurrentTable2Capabilities)
+        XCTAssertTrue(replacement.canPlay(.right))
+        XCTAssertNil(replacement.session)
+        XCTAssertTrue(replacement.simulatedSentMessages.isEmpty)
+        replacement.play(.right)
+        replacement.simulateConnectionOpened()
+        XCTAssertEqual(replacement.session?.phase, .awaitingWearingConfirmation)
+        replacement.confirmWearingOverride(sessionID: try XCTUnwrap(replacement.session?.id))
+        XCTAssertTrue(replacement.simulatedSentMessages.isEmpty)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
+    func testDiscoveryRetryRetiresFailedMultipointWithoutRepeatingTheSetter() async throws {
+        let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let finder = try finderAwaitingTable2(on: headphones, supportedFunctions: [0x11, 0x90, 0xD2])
+        defer { finish(finder, headphones: headphones) }
+        let title = Array("MULTIPOINT_SETTING".utf8)
+        headphones.simulateProtocolMessage([0xD1, 0xD2, 0, 1, UInt8(title.count)] + title + [0])
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0xD3, 0xD2, 0])
+        headphones.simulateProtocolMessage([0xD7, 0xD2, 0, 0])
+        acknowledgeAll(headphones)
+        await exhaustTable2Discovery(on: headphones)
+        XCTAssertNil(headphones.multipointUnavailableReason)
+        headphones.setMultipointEnabled(false)
+        acknowledgeAll(headphones)
+        XCTAssertEqual(headphones.multipointTransition?.phase, .awaitingResponse)
+        let session = headphones.simulatedControlSession
+        XCTAssertFalse(headphones.canRetryDeviceDiscovery)
+        headphones.retryDeviceDiscovery()
+        XCTAssertEqual(headphones.simulatedControlSession, session)
+        headphones.simulateMultipointTimeout()
+        acknowledgeAll(headphones)
+        XCTAssertEqual(headphones.multipointTransition?.phase, .verifying)
+        headphones.simulateMultipointTimeout()
+        XCTAssertEqual(headphones.multipointTransition?.phase, .failed)
+        XCTAssertTrue(headphones.isReady)
+        XCTAssertTrue(headphones.canRetryDeviceDiscovery)
+
+        headphones.retryDeviceDiscovery()
+        XCTAssertGreaterThan(headphones.simulatedControlSession, session)
+        XCTAssertNil(headphones.multipointTransition)
+        XCTAssertNil(headphones.simulatedMultipointRecoveryUsesBLE)
+        XCTAssertEqual(headphones.linkState, .handshaking)
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0, 0])
+        XCTAssertEqual(headphones.simulatedTransmittedFrames.filter { $0.payload == [0xD8, 0xD2, 0, 1] }.count, 1)
+        XCTAssertTrue(finder.needsNewControlSession)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
+    func testDiscoveryRetryResumesFailedConnectionVerificationWithoutRepeatingTheSetter() async throws {
+        let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let finder = try finderAwaitingTable2(on: headphones, supportedFunctions: [0x11, 0x90, 0xE7])
+        defer { finish(finder, headphones: headphones) }
+        for payload: [UInt8] in [[0xE1, 5, 3, 0, 1, 2, 1, 0], [0xE3, 5, 0, 0], [0xE7, 5, 0]] {
+            headphones.simulateProtocolMessage(payload)
+        }
+        acknowledgeAll(headphones)
+        await exhaustTable2Discovery(on: headphones)
+        XCTAssertNil(headphones.connectionModeUnavailableReason(.stableConnection))
+        headphones.setConnectionMode(.stableConnection)
+        acknowledgeAll(headphones)
+        XCTAssertEqual(headphones.connectionTransition?.phase, .awaitingResponse)
+        let session = headphones.simulatedControlSession
+        XCTAssertFalse(headphones.canRetryDeviceDiscovery)
+        headphones.retryDeviceDiscovery()
+        XCTAssertEqual(headphones.simulatedControlSession, session)
+        headphones.simulateConnectionModeTimeout()
+        XCTAssertEqual(headphones.connectionTransition?.phase, .failed)
+        XCTAssertTrue(headphones.isReady)
+        XCTAssertTrue(headphones.canRetryDeviceDiscovery)
+
+        headphones.retryDeviceDiscovery()
+        XCTAssertGreaterThan(headphones.simulatedControlSession, session)
+        XCTAssertEqual(headphones.connectionTransition?.phase, .recovering)
+        XCTAssertNil(headphones.connectionModeError)
+        XCTAssertEqual(headphones.simulatedTransmittedFrames.filter { $0.payload == [0xE8, 5, 1, 0] }.count, 1)
+        XCTAssertTrue(finder.needsNewControlSession)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
     func testFindingWaitsForAValidCurrentTable2Reply() {
         let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
         headphones.simulateDeviceConnection(named: "WF-1000XM5")
@@ -583,7 +769,7 @@ final class EarbudFinderControllerTests: XCTestCase {
         }
     }
 
-    func testConfirmedEmptyTable2AllowsFindingWithoutAWearingQuery() throws {
+    func testConfirmedEmptyTable2RequiresAuthenticatedConfirmationWithoutAWearingQuery() throws {
         let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
         headphones.simulateDeviceConnection(named: "WF-1000XM5")
         completeFinderHandshake(on: headphones)
@@ -604,10 +790,22 @@ final class EarbudFinderControllerTests: XCTestCase {
         XCTAssertFalse(headphones.simulatedTransmittedFrames.contains {
             $0.type == 0x0E && $0.payload == SonyWearingStatus.queryPayload
         })
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+        XCTAssertNil(finder.session?.wearingConfirmationStatus)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        let sessionID = try XCTUnwrap(finder.session?.id)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        finder.authenticateWearingOverride(sessionID: sessionID)
+        finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        XCTAssertEqual(finder.session?.startedWithWearingOverride, true)
         XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left)])
+        XCTAssertEqual(finder.simulatedAuthorizationEvents, [sessionID])
     }
 
-    func testWearingCapabilityAppearingAfterStartStopsTheSound() async throws {
+    func testUnownedWearingCapabilityReplyCannotMutateAnActiveFinder() async throws {
         let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
         headphones.simulateDeviceConnection(named: "WF-1000XM5")
         completeFinderHandshake(on: headphones)
@@ -616,17 +814,23 @@ final class EarbudFinderControllerTests: XCTestCase {
         defer { finish(finder, headphones: headphones) }
         finder.play(.left)
         finder.simulateConnectionOpened()
+        let sessionID = try XCTUnwrap(finder.session?.id)
+        finder.authenticateWearingOverride(sessionID: sessionID)
+        finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+        finder.confirmWearingOverride(sessionID: sessionID)
         XCTAssertEqual(finder.session?.phase, .starting)
         XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left)])
         deliver([0x07, 0, 1, 0xF0, 0], to: headphones)
-        XCTAssertTrue(headphones.wearingStatus.isSupported)
+        XCTAssertFalse(headphones.wearingStatus.isSupported)
         XCTAssertNil(headphones.wearingStatus.leftWorn)
-        XCTAssertFalse(finder.wearingDetectionIsUnavailable)
+        XCTAssertTrue(finder.wearingDetectionIsUnavailable)
+        XCTAssertEqual(finder.session?.phase, .starting)
+        await receiveQueuedUpdates()
+        XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left)])
+        XCTAssertFalse(headphones.hasPendingWearingStatusRead)
+        finder.stop()
         XCTAssertEqual(finder.session?.phase, .stopping)
         XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
-        await receiveQueuedUpdates()
-        XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
-        XCTAssertFalse(headphones.hasPendingWearingStatusRead)
     }
 
     func testDelayedWearingCapabilityRequiresAFreshReadBeforeFinding() async throws {
@@ -808,6 +1012,50 @@ final class EarbudFinderControllerTests: XCTestCase {
         finder.confirmWearingOverride(sessionID: sessionID)
         XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left)])
         XCTAssertEqual(finder.simulatedAuthorizationEvents, [sessionID])
+    }
+
+    func testUnknownWearStatusRequiresAuthenticationFinalConfirmationAndSuccessfulLog() async throws {
+        for target in [FastPairRingTarget.left, .right] {
+            for saved in [false, true] {
+                let (headphones, finder) = readyFinder()
+                defer { finish(finder, headphones: headphones) }
+                finder.simulatesAuthorizationSaveDelay = true
+                finder.play(target)
+                finder.simulateConnectionOpened()
+                acknowledgeAll(headphones)
+                deliver([0xF3, 0, 0xFF], to: headphones)
+                await receiveQueuedUpdates()
+                XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+                XCTAssertNil(finder.session?.wearingConfirmationStatus)
+                let sessionID = try XCTUnwrap(finder.session?.id)
+                finder.confirmWearingOverride(sessionID: sessionID)
+                finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+                XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+                finder.authenticateWearingOverride(sessionID: sessionID)
+                finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: false)
+                finder.confirmWearingOverride(sessionID: sessionID)
+                XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+                finder.authenticateWearingOverride(sessionID: sessionID)
+                finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+                XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+                XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+                finder.confirmWearingOverride(sessionID: sessionID)
+                XCTAssertTrue(finder.isSavingAuthorization)
+                XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+                XCTAssertTrue(finder.simulatedAuthorizationEvents.isEmpty)
+                finder.simulateAuthorizationSaveCompletion(succeeded: saved)
+                XCTAssertEqual(finder.session?.phase, saved ? .starting : .finished)
+                XCTAssertEqual(finder.mayBeRinging, saved)
+                XCTAssertEqual(finder.simulatedSentMessages, saved ? [try ringData(target)] : [])
+                XCTAssertEqual(finder.simulatedAuthorizationEvents, saved ? [sessionID] : [])
+                if saved {
+                    XCTAssertEqual(finder.session?.startedWithWearingOverride, true)
+                    deliver([0xF5, 0, 0xFF], to: headphones)
+                    await receiveQueuedUpdates()
+                    XCTAssertEqual(finder.simulatedSentMessages, [try ringData(target)])
+                }
+            }
+        }
     }
 
     func testUncheckingInvalidatesAuthenticationAndRejectsItsResultAfterRechecking() async throws {
@@ -1143,7 +1391,7 @@ final class EarbudFinderControllerTests: XCTestCase {
             finder.confirmWearingOverride(sessionID: sessionID)
             XCTAssertEqual(finder.simulatedSentMessages, [try ringData(target)])
             let removed = SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0xF5, 0, target == .left ? 2 : 3])
-            let worn = SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0xF5, 0, 0])
+            let worn = SonyFrameCodec.encode(type: 0x0E, sequence: 1, payload: [0xF5, 0, 0])
             headphones.simulateProtocolData(removed + worn)
             XCTAssertEqual(finder.session?.phase, .stopping)
             XCTAssertEqual(finder.simulatedSentMessages, [try ringData(target), try stopData()])
@@ -1176,7 +1424,7 @@ final class EarbudFinderControllerTests: XCTestCase {
         }
     }
 
-    func testUnknownOrMalformedWearStatusCancelsConfirmationAndRejectsLateConfirmation() async throws {
+    func testUnknownOrMalformedWearStatusRequiresFreshAuthenticatedConfirmation() async throws {
         for payload: [UInt8] in [[0xF5, 0, 0xFF], [0xF5, 0, 4, 0]] {
             let (headphones, finder) = readyFinder()
             defer { finish(finder, headphones: headphones) }
@@ -1191,14 +1439,99 @@ final class EarbudFinderControllerTests: XCTestCase {
             finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
             deliver(payload, to: headphones)
             finder.confirmWearingOverride(sessionID: sessionID)
-            XCTAssertEqual(finder.session?.phase, .finished)
+            XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
             XCTAssertFalse(finder.mayBeRinging)
             XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
             XCTAssertTrue(finder.simulatedAuthorizationEvents.isEmpty)
+            XCTAssertNil(finder.wearingAuthorization)
+            finder.authenticateWearingOverride(sessionID: sessionID)
+            finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+            XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+            finder.confirmWearingOverride(sessionID: sessionID)
+            XCTAssertEqual(finder.session?.startedWithWearingOverride, true)
+            XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left)])
+            XCTAssertEqual(finder.simulatedAuthorizationEvents, [sessionID])
         }
     }
 
-    func testWearTimeoutDoesNotSendAnotherAmbiguousQuery() async {
+    func testChangedUnsafeWearStatusRequiresNewAuthenticationAndConfirmationAtEveryStage() async throws {
+        for target in [FastPairRingTarget.left, .right] {
+            for removedBetweenReadings in [false, true] {
+                for stage in 0..<3 {
+                    let (headphones, finder) = readyFinder()
+                    defer { finish(finder, headphones: headphones) }
+                    finder.simulatesAuthorizationSaveDelay = true
+                    finder.play(target)
+                    finder.simulateConnectionOpened()
+                    acknowledgeAll(headphones)
+                    deliver([0xF3, 0, removedBetweenReadings ? 0 : 0xFF], to: headphones)
+                    await receiveQueuedUpdates()
+                    let sessionID = try XCTUnwrap(finder.session?.id)
+                    finder.authenticateWearingOverride(sessionID: sessionID)
+                    let requestID = try XCTUnwrap(finder.simulatedAuthenticationRequestID)
+                    if stage > 0 { finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true) }
+                    if stage == 2 { finder.confirmWearingOverride(sessionID: sessionID) }
+                    let saveID = finder.simulatedAuthorizationSaveRequestID
+                    if removedBetweenReadings {
+                        deliver([0xF5, 0, target == .left ? 2 : 3], to: headphones)
+                        XCTAssertEqual(finder.session?.wearingConfirmationStatus, false)
+                    }
+
+                    deliver([0xF5, 0, 0], to: headphones)
+
+                    XCTAssertEqual(finder.session?.wearingConfirmationStatus, true)
+                    XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+                    XCTAssertFalse(finder.isAuthenticating)
+                    XCTAssertFalse(finder.isSavingAuthorization)
+                    XCTAssertNil(finder.wearingAuthorization)
+                    finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true, requestID: requestID)
+                    if let saveID { finder.simulateAuthorizationSaveCompletion(succeeded: true, requestID: saveID) }
+                    finder.confirmWearingOverride(sessionID: sessionID)
+                    XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+                    XCTAssertTrue(finder.simulatedAuthorizationEvents.isEmpty)
+                    XCTAssertFalse(finder.mayBeRinging)
+
+                    finder.authenticateWearingOverride(sessionID: sessionID)
+                    XCTAssertNotEqual(finder.simulatedAuthenticationRequestID, requestID)
+                    finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+                    finder.confirmWearingOverride(sessionID: sessionID)
+                    XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+                    finder.simulateAuthorizationSaveCompletion(succeeded: true)
+                    XCTAssertEqual(finder.simulatedSentMessages, [try ringData(target)])
+                    XCTAssertEqual(finder.simulatedAuthorizationEvents, [sessionID])
+                    XCTAssertEqual(finder.session?.startedWithWearingOverride, true)
+                }
+            }
+        }
+    }
+
+    func testWearStatusBecomingUnknownDuringLogSaveRejectsTheOldAuthorization() async throws {
+        let (headphones, finder) = readyFinder()
+        defer { finish(finder, headphones: headphones) }
+        finder.simulatesAuthorizationSaveDelay = true
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 0], to: headphones)
+        await receiveQueuedUpdates()
+        let sessionID = try XCTUnwrap(finder.session?.id)
+        finder.authenticateWearingOverride(sessionID: sessionID)
+        finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        let requestID = try XCTUnwrap(finder.simulatedAuthorizationSaveRequestID)
+        deliver([0xF5, 0, 4], to: headphones)
+        deliver([0xF5, 0, 0xFF], to: headphones)
+        finder.simulateAuthorizationSaveCompletion(succeeded: true, requestID: requestID)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+        XCTAssertFalse(finder.isSavingAuthorization)
+        XCTAssertNil(finder.wearingAuthorization)
+        XCTAssertFalse(finder.mayBeRinging)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        XCTAssertTrue(finder.simulatedAuthorizationEvents.isEmpty)
+    }
+
+    func testWearTimeoutRequiresConfirmationWithoutAnotherAmbiguousQueryOrAutomaticStart() async {
         let (headphones, finder) = readyFinder()
         defer { finish(finder, headphones: headphones) }
         finder.play(.left)
@@ -1206,13 +1539,14 @@ final class EarbudFinderControllerTests: XCTestCase {
         acknowledgeAll(headphones)
         XCTAssertTrue(finder.isCheckingWearing)
         finder.simulateWearingTimeout()
-        XCTAssertEqual(finder.session?.phase, .finished)
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
         XCTAssertTrue(headphones.hasPendingWearingStatusRead)
-        XCTAssertNotNil(finder.message)
+        XCTAssertNil(finder.session?.wearingConfirmationStatus)
+        finder.stop()
         finder.play(.right)
         finder.simulateConnectionOpened()
         await receiveQueuedUpdates()
-        XCTAssertEqual(finder.session?.phase, .finished)
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
         XCTAssertTrue(headphones.hasPendingWearingStatusRead)
         XCTAssertEqual(headphones.simulatedTransmittedFrames.filter {
             $0.type == 0x0E && $0.payload == SonyWearingStatus.queryPayload
@@ -1220,7 +1554,60 @@ final class EarbudFinderControllerTests: XCTestCase {
         XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
         deliver([0xF3, 0, 4], to: headphones)
         await receiveQueuedUpdates()
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
         XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
+    func testRetainedWearQueryCannotUpgradeUnknownAuthorizationToAWornOverride() async throws {
+        for worn in [false, true] {
+            let (headphones, finder) = readyFinder()
+            defer { finish(finder, headphones: headphones) }
+            finder.simulatesAuthorizationSaveDelay = true
+            finder.play(.left)
+            finder.simulateConnectionOpened()
+            acknowledgeAll(headphones)
+            finder.simulateWearingTimeout()
+            finder.stop()
+            XCTAssertTrue(headphones.hasPendingWearingStatusRead)
+            deliver([0xF5, 0, worn ? 0 : 4], to: headphones)
+            await receiveQueuedUpdates()
+            XCTAssertEqual(headphones.wearingStatus.rightWorn, worn)
+            finder.play(.right)
+            finder.simulateConnectionOpened()
+            XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+            XCTAssertNil(finder.session?.wearingConfirmationStatus)
+            XCTAssertTrue(headphones.hasPendingWearingStatusRead)
+            let sessionID = try XCTUnwrap(finder.session?.id)
+            finder.authenticateWearingOverride(sessionID: sessionID)
+            finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+            XCTAssertNil(finder.wearingAuthorization?.wearingStatus)
+            finder.confirmWearingOverride(sessionID: sessionID)
+            let saveID = try XCTUnwrap(finder.simulatedAuthorizationSaveRequestID)
+
+            finder.simulateAuthorizationSaveCompletion(succeeded: true, requestID: saveID)
+
+            if worn {
+                XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+                XCTAssertEqual(finder.session?.wearingConfirmationStatus, true)
+                XCTAssertFalse(finder.isSavingAuthorization)
+                XCTAssertNil(finder.wearingAuthorization)
+                XCTAssertFalse(finder.mayBeRinging)
+                XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+                XCTAssertTrue(finder.simulatedAuthorizationEvents.isEmpty)
+                finder.simulateAuthorizationSaveCompletion(succeeded: true, requestID: saveID)
+                finder.confirmWearingOverride(sessionID: sessionID)
+                XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+                finder.authenticateWearingOverride(sessionID: sessionID)
+                finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+                XCTAssertEqual(finder.wearingAuthorization?.wearingStatus, true)
+                finder.confirmWearingOverride(sessionID: sessionID)
+                finder.simulateAuthorizationSaveCompletion(succeeded: true)
+            }
+            XCTAssertEqual(finder.session?.phase, .starting)
+            XCTAssertEqual(finder.session?.startedWithWearingOverride, worn)
+            XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.right)])
+            XCTAssertEqual(finder.simulatedAuthorizationEvents, [sessionID])
+        }
     }
 
     func testCoalescedStoppedRepliesCannotConfirmANewlySentStop() async throws {
@@ -1322,7 +1709,7 @@ final class EarbudFinderControllerTests: XCTestCase {
             XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left)])
             finder.simulateProtocolData(rejection)
             XCTAssertEqual(finder.session?.phase, .stopping)
-            XCTAssertEqual(finder.session?.rejection, .disallowed)
+            XCTAssertTrue(finder.mayBeRinging)
             XCTAssertEqual(finder.message, String(localized: "The earbuds declined the locating-sound request."))
             XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
             finder.simulateProtocolData(stopResponse)
@@ -1388,6 +1775,93 @@ final class EarbudFinderControllerTests: XCTestCase {
         XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.right), try stopData()])
     }
 
+    func testStopRetrySurvivesRepeatedStopDismissalAndLifecycleChanges() async throws {
+        for opened in [false, true] {
+            for interruption in ["stop", "dismiss", "retire", "resign", "hide", "sleep", "displaySleep", "sessionResign", "controlLoss"] {
+                let (headphones, finder) = readyFinder()
+                defer { finish(finder, headphones: headphones) }
+                finder.play(.left)
+                finder.simulateConnectionOpened()
+                acknowledgeAll(headphones)
+                deliver([0xF3, 0, 4], to: headphones)
+                await receiveQueuedUpdates()
+                finder.simulateTransportFailure()
+                let sessionID = try XCTUnwrap(finder.session?.id)
+                finder.retryStop()
+                if opened { finder.simulateConnectionOpened() }
+                switch interruption {
+                case "stop": finder.stop()
+                case "dismiss": finder.dismiss()
+                case "retire": finder.dismiss(retiringTransport: true)
+                case "resign": NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: nil)
+                case "hide": NotificationCenter.default.post(name: NSApplication.didHideNotification, object: nil)
+                case "sleep": NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+                case "displaySleep": NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+                case "sessionResign": NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+                default: headphones.simulateControlLoss(deviceConnected: false)
+                }
+                await receiveQueuedUpdates()
+                XCTAssertEqual(finder.session?.id, sessionID)
+                XCTAssertEqual(finder.session?.phase, opened ? .stopping : .connecting, interruption)
+                XCTAssertTrue(finder.session?.isRetryingStop == true, interruption)
+                XCTAssertTrue(finder.mayBeRinging, interruption)
+                XCTAssertTrue(finder.isBusy, interruption)
+                finder.simulateConnectionOpened()
+                XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()], interruption)
+                finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded))
+                XCTAssertEqual(finder.session?.phase, .finished, interruption)
+                XCTAssertFalse(finder.mayBeRinging, interruption)
+                finder.simulateConnectionOpened()
+                finder.retryStop()
+                XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()], interruption)
+            }
+        }
+    }
+
+    func testDisplaySleepAndSessionChangeStopWithoutDismissingThePresentedFinder() async throws {
+        for notification in [NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
+            let (headphones, finder) = readyFinder()
+            defer { finish(finder, headphones: headphones) }
+            finder.play(.left)
+            finder.simulateConnectionOpened()
+            acknowledgeAll(headphones)
+            deliver([0xF3, 0, 4], to: headphones)
+            await receiveQueuedUpdates()
+            NSWorkspace.shared.notificationCenter.post(name: notification, object: nil)
+            XCTAssertEqual(finder.session?.phase, .stopping)
+            XCTAssertTrue(finder.mayBeRinging)
+            XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
+            finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded))
+            XCTAssertEqual(finder.session?.phase, .finished)
+            XCTAssertEqual(finder.simulatedTransportCloseCount, 1)
+            XCTAssertNil(finder.availabilityMessage)
+            XCTAssertTrue(finder.canPlay(.right))
+            XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
+        }
+    }
+
+    func testScheduledRingingDeadlineSendsOneStopAndRequiresConfirmation() async throws {
+        let (headphones, finder) = readyFinder()
+        defer { finish(finder, headphones: headphones) }
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 4], to: headphones)
+        await receiveQueuedUpdates()
+        finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 2, 30]).encoded))
+        XCTAssertEqual(finder.session?.phase, .ringing)
+        XCTAssertEqual(finder.session?.timeoutSeconds, 30)
+        finder.simulateRingingTimeout()
+        XCTAssertEqual(finder.session?.phase, .stopping)
+        XCTAssertTrue(finder.mayBeRinging)
+        XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
+        finder.simulateRingingTimeout()
+        XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
+        finder.simulateAcknowledgementTimeout()
+        XCTAssertEqual(finder.session?.phase, .unconfirmed)
+        XCTAssertTrue(finder.mayBeRinging)
+    }
+
     func testAcknowledgementTimeoutStopsThenKeepsUnconfirmedSilenceWithoutReplay() async throws {
         let (headphones, finder) = readyFinder()
         defer { finish(finder, headphones: headphones) }
@@ -1444,6 +1918,50 @@ final class EarbudFinderControllerTests: XCTestCase {
         XCTAssertFalse(headphones.showsMenuBarIcon)
         finder.retryStop()
         XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left), try stopData()])
+    }
+
+    func testReopeningClearsThePriorErrorAndFinishedTransportFailureCannotReplaceIt() async throws {
+        let (headphones, finder) = readyFinder()
+        defer { finish(finder, headphones: headphones) }
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 0], to: headphones)
+        await receiveQueuedUpdates()
+        finder.simulateTransportFailure()
+        XCTAssertEqual(finder.session?.phase, .failed)
+        XCTAssertNotNil(finder.message)
+        finder.dismiss()
+
+        finder.prepareForPresentation()
+
+        XCTAssertNil(finder.message)
+        XCTAssertTrue(finder.canPlay(.left))
+        finder.simulateTransportFailure()
+        XCTAssertNil(finder.message)
+        XCTAssertTrue(finder.canPlay(.left))
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+    }
+
+    func testConfirmedSilenceCancelsTheActualRingingDeadline() async throws {
+        let (headphones, finder) = readyFinder()
+        defer { finish(finder, headphones: headphones) }
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 4], to: headphones)
+        await receiveQueuedUpdates()
+        XCTAssertTrue(finder.simulatedRingingTimeoutPending)
+        finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 2, 30]).encoded))
+        XCTAssertEqual(finder.session?.phase, .ringing)
+        finder.stop()
+        finder.simulateProtocolData(try XCTUnwrap(FastPairMessage(group: 0xFF, code: 1, payload: [4, 1, 0]).encoded))
+        XCTAssertEqual(finder.session?.phase, .finished)
+        XCTAssertFalse(finder.simulatedRingingTimeoutPending)
+        let sent = finder.simulatedSentMessages
+        finder.simulateRingingTimeout()
+        XCTAssertEqual(finder.simulatedSentMessages, sent)
+        XCTAssertFalse(finder.mayBeRinging)
     }
 
     func testReopeningReusesTheFinderAndRequiresFreshWearingChecks() async throws {
@@ -1744,6 +2262,49 @@ final class EarbudFinderControllerTests: XCTestCase {
         XCTAssertFalse(finder.mayBeRinging)
     }
 
+    func testQueuedSafeStartBecomingUnknownRequiresNewAuthenticatedConfirmation() async throws {
+        let (headphones, finder) = readyFinder()
+        defer { finish(finder, headphones: headphones) }
+        let started = expectation(description: "Preceding write started")
+        let release = DispatchSemaphore(value: 0)
+        let channel = RFCOMMChannelIOTests.TestChannel(onFirstWrite: {
+            started.fulfill()
+            XCTAssertEqual(release.wait(timeout: .now() + 5), .success)
+        })
+        let io = RFCOMMChannelIO(channel: channel)
+        io.write(Data([1])) { _ in }
+        await fulfillment(of: [started], timeout: 2)
+        finder.simulatedChannelIO = io
+        finder.play(.left)
+        finder.simulateConnectionOpened()
+        acknowledgeAll(headphones)
+        deliver([0xF3, 0, 4], to: headphones)
+        await receiveQueuedUpdates()
+        XCTAssertEqual(finder.session?.phase, .starting)
+        XCTAssertFalse(finder.mayBeRinging)
+        deliver([0xF5, 0, 0xFF], to: headphones)
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+        finder.simulateAcknowledgementTimeout()
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+        release.signal()
+        let drained = expectation(description: "Cancelled start queue drained")
+        io.write(Data([2]), willSend: { false }) { _ in drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertEqual(channel.writes, [Data([1])])
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        finder.simulatedChannelIO = nil
+        let sessionID = try XCTUnwrap(finder.session?.id)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        finder.authenticateWearingOverride(sessionID: sessionID)
+        finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+        XCTAssertTrue(finder.simulatedSentMessages.isEmpty)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        XCTAssertEqual(finder.session?.startedWithWearingOverride, true)
+        XCTAssertEqual(finder.simulatedSentMessages, [try ringData(.left)])
+        XCTAssertEqual(finder.simulatedAuthorizationEvents, [sessionID])
+    }
+
     func testBlockedNativeStartRetiresQueuedStopOnTimeout() async throws {
         let (headphones, finder) = readyFinder()
         defer { finish(finder, headphones: headphones) }
@@ -1783,9 +2344,36 @@ final class EarbudFinderControllerTests: XCTestCase {
         XCTAssertEqual(finder.session?.phase, .unconfirmed)
     }
 
+    private func finderAwaitingTable2(on headphones: SonyHeadphonesController, beginConnection: Bool = true,
+                                     supportedFunctions: [UInt8] = [0x11]) throws -> EarbudFinderController {
+        if beginConnection { headphones.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true) }
+        headphones.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: beginConnection)
+        acknowledgeAll(headphones)
+        let name = Array("WF-1000XM5".utf8)
+        let firmware = Array("6.1.0".utf8)
+        let capabilities: [UInt8] = [0x07, 0, UInt8(supportedFunctions.count)] + supportedFunctions.flatMap { [$0, 0] }
+        for payload: [UInt8] in [[0x05, 1, UInt8(name.count)] + name, [0x05, 3, 0, 1],
+                                capabilities, [0x05, 2, UInt8(firmware.count)] + firmware, [0x13, 1, 1, 1]] {
+            headphones.simulateProtocolMessage(payload)
+            acknowledgeAll(headphones)
+        }
+        XCTAssertTrue(headphones.isReady)
+        XCTAssertFalse(headphones.hasCurrentTable2Capabilities)
+        XCTAssertNotNil(headphones.simulatedDiscoveryReadTimeoutID([0x06, 0], type: 0x0E))
+        XCTAssertTrue(headphones.beginEarbudFinder())
+        return try XCTUnwrap(headphones.earbudFinder)
+    }
+
+    private func exhaustTable2Discovery(on headphones: SonyHeadphonesController) async {
+        for _ in 0..<2 {
+            headphones.simulateDiscoveryReadTimeout([0x06, 0], type: 0x0E)
+            for _ in 0..<8 { await Task.yield() }
+            acknowledgeAll(headphones)
+        }
+    }
+
     private func completeFinderHandshake(on headphones: SonyHeadphonesController) {
-        headphones.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [0x01, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        headphones.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeAll(headphones)
         let name = Array("WF-1000XM5".utf8)
         let firmware = Array("6.1.0".utf8)
@@ -1803,11 +2391,10 @@ final class EarbudFinderControllerTests: XCTestCase {
 
     private func readyFinder() -> (SonyHeadphonesController, EarbudFinderController) {
         let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
-        headphones.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
+        headphones.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5,
+                                            simulatedTable2Functions: [0xF0])
         let firmware = Array("6.1.0".utf8)
-        headphones.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-                                                             payload: [0x05, 2, UInt8(firmware.count)] + firmware))
-        deliver([0x07, 0, 1, 0xF0, 0], to: headphones)
+        headphones.simulateProtocolMessage([0x05, 2, UInt8(firmware.count)] + firmware)
         acknowledgeAll(headphones)
         let finder = EarbudFinderController(headphones: headphones, simulated: true)
         XCTAssertTrue(headphones.wearingStatus.isSupported)
@@ -1845,6 +2432,6 @@ final class EarbudFinderControllerTests: XCTestCase {
     }
 
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0E, session: UInt64? = nil, to headphones: SonyHeadphonesController) {
-        headphones.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), session: session)
+        headphones.simulateProtocolMessage(payload, type: type, session: session)
     }
 }

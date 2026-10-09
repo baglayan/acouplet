@@ -31,8 +31,8 @@ final class FastPairTransportTests: XCTestCase {
         XCTAssertNil(retainedDelegate?.owner)
         XCTAssertNil(retainedDelegate?.channel)
         let replacement = FastPairTransport.ChannelDelegate(owner: replacementOwner, session: UUID())
-        retainedDelegate?.rfcommChannelOpenComplete(channel, status: kIOReturnSuccess)
-        retainedDelegate?.rfcommChannelClosed(channel)
+        retainedDelegate?.didOpen(channel, status: kIOReturnSuccess)
+        retainedDelegate?.didClose(channel)
         let callbacksDrained = expectation(description: "Stale callbacks drained")
         DispatchQueue.main.async { callbacksDrained.fulfill() }
         await fulfillment(of: [callbacksDrained], timeout: 2)
@@ -91,6 +91,37 @@ final class FastPairTransportTests: XCTestCase {
     }
 
     @MainActor
+    func testOpenTimeoutFailsWithoutAdmittingReplacementWhileNativeCloseIsBlocked() async {
+        let started = expectation(description: "Channel close started")
+        let finished = expectation(description: "Channel close returned")
+        let release = DispatchSemaphore(value: 0)
+        let channel = DelayedChannel(started: started, finished: finished, release: release)
+        var failures = 0
+        let owner = FastPairTransport(onOpen: { XCTFail("Replacement opened while closing") }, onData: { _ in },
+                                      onFailure: { _ in failures += 1 })
+        let delegate = FastPairTransport.ChannelDelegate(owner: owner, session: UUID())
+        delegate.channel = channel
+        delegate.channelIO = RFCOMMChannelIO(channel: channel)
+        delegate.retire(completion: owner.closeCompletion)
+        await fulfillment(of: [started], timeout: 2)
+
+        owner.open(address: "invalid")
+        owner.simulateOpenTimeout()
+        XCTAssertEqual(failures, 1)
+        XCTAssertEqual(owner.closeCompletion.wait(timeout: .now()), .timedOut)
+        let responsive = expectation(description: "Main queue responsive after timeout")
+        DispatchQueue.main.async { responsive.fulfill() }
+        await fulfillment(of: [responsive], timeout: 2)
+        XCTAssertEqual(failures, 1)
+        release.signal()
+        await fulfillment(of: [finished], timeout: 2)
+        let closed = expectation(description: "Native cleanup completed")
+        owner.closeCompletion.notify(queue: .main) { closed.fulfill() }
+        await fulfillment(of: [closed], timeout: 2)
+        XCTAssertEqual(failures, 1)
+    }
+
+    @MainActor
     func testHealthyReuseDeliversOnlyTheLatestOpenNotification() async {
         var openings = 0
         let owner = FastPairTransport(onOpen: { openings += 1 }, onData: { _ in },
@@ -114,12 +145,12 @@ final class FastPairTransportTests: XCTestCase {
         XCTAssertEqual(openings, 1)
     }
 
-    private final class ConnectedDevice: IOBluetoothDevice, @unchecked Sendable {
-        override func isPaired() -> Bool { true }
-        override func isConnected() -> Bool { true }
+    private final class ConnectedDevice: FastPairDevice, @unchecked Sendable {
+        func isPaired() -> Bool { true }
+        func isClassicConnected() -> Bool { true }
     }
 
-    private final class DelayedChannel: IOBluetoothRFCOMMChannel, @unchecked Sendable {
+    private final class DelayedChannel: FastPairChannel, @unchecked Sendable {
         let started: XCTestExpectation
         let finished: XCTestExpectation
         let release: DispatchSemaphore
@@ -128,15 +159,19 @@ final class FastPairTransportTests: XCTestCase {
             self.started = started
             self.finished = finished
             self.release = release
-            super.init()
         }
 
-        override func setDelegate(_ delegate: Any!) -> IOReturn {
+        func isOpen() -> Bool { true }
+        func isTransmissionPaused() -> Bool { false }
+        func getMTU() -> BluetoothRFCOMMMTU { 127 }
+        func writeSync(_ data: UnsafeMutableRawPointer!, length: UInt16) -> IOReturn { kIOReturnSuccess }
+
+        func setDelegate(_ delegate: Any!) -> IOReturn {
             XCTAssertFalse(Thread.isMainThread)
             return kIOReturnSuccess
         }
 
-        override func close() -> IOReturn {
+        func close() -> IOReturn {
             XCTAssertFalse(Thread.isMainThread)
             started.fulfill()
             XCTAssertEqual(release.wait(timeout: .now() + 5), .success)

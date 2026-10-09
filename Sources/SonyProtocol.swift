@@ -109,12 +109,9 @@ enum EqualizerPreset: UInt8, CaseIterable, Identifiable, Sendable {
         case .user5: String(localized: "User 5")
         }
     }
-
-    static var selectableCases: [Self] { allCases.filter { $0 != .manual } }
 }
 
 struct EqualizerSettings: Codable, Equatable, Sendable {
-    static let bandLabels = ["400 Hz", "1 kHz", "2.5 kHz", "6.3 kHz", "16 kHz"]
     static let flat = EqualizerSettings(clearBass: 0, bands: [0, 0, 0, 0, 0])
 
     let layout: [SonyEqualizerBand]
@@ -205,12 +202,6 @@ struct EqualizerSettings: Codable, Equatable, Sendable {
         set { self[layout.indices.filter { layout[$0] != .clearBass }[index]] = newValue }
     }
 
-    var sonySetPayload: [UInt8] {
-        precondition(layout == SonyEqualizerBand.legacy && levelSteps == 21 && values.count == 6)
-        return [0x58, 0x00, EqualizerPreset.manual.rawValue, 0x06]
-            + values.map { UInt8(Self.clamp($0) + 10) }
-    }
-
     init?(sonyPayload: [UInt8]) {
         guard sonyPayload.count == 10,
               sonyPayload[1] == 0x00,
@@ -285,15 +276,23 @@ enum SonyFrameCodec {
 struct SonyFrameStream: Sendable {
     static let maximumFrameLength = 65_536
     private var buffer = Data()
+    private var transmissionID: UUID?
 
     mutating func append(_ data: Data) -> [SonyFrame] {
-        var frames: [SonyFrame] = []
+        append(data, transmissionID: nil).map(\.frame)
+    }
+
+    mutating func append(_ data: Data, transmissionID: UUID?) -> [(frame: SonyFrame, transmissionID: UUID?)] {
+        var frames: [(frame: SonyFrame, transmissionID: UUID?)] = []
         for byte in data {
-            if byte == SonyFrameCodec.header { buffer.removeAll(keepingCapacity: true) }
+            if byte == SonyFrameCodec.header {
+                buffer.removeAll(keepingCapacity: true)
+                self.transmissionID = transmissionID
+            }
             guard byte == SonyFrameCodec.header || !buffer.isEmpty else { continue }
             buffer.append(byte)
             if byte == SonyFrameCodec.trailer {
-                if let frame = SonyFrameCodec.decode(buffer) { frames.append(frame) }
+                if let frame = SonyFrameCodec.decode(buffer) { frames.append((frame, self.transmissionID)) }
                 buffer.removeAll(keepingCapacity: true)
             } else if buffer.count == Self.maximumFrameLength {
                 buffer.removeAll(keepingCapacity: true)
@@ -822,7 +821,7 @@ struct SonyBatteries: Equatable, Sendable {
             right = payload[4] == 0 ? nil : BatteryReading(level: payload[4], charging: payload[5])
         case 0x02, 0x0A:
             guard payload.count == 4 || (payload[1] == 0x0A && payload.count == 5) else { return false }
-            caseBattery = BatteryReading(level: payload[2], charging: payload[3])
+            caseBattery = payload[2] == 0 ? nil : BatteryReading(level: payload[2], charging: payload[3])
         default:
             return false
         }

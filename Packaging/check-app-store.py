@@ -1,6 +1,6 @@
 from pathlib import Path
 from unittest.mock import patch
-import json, os, plistlib, runpy, shutil, subprocess, tempfile
+import json, os, plistlib, runpy, shutil, subprocess, sys, tempfile
 
 packaging = Path(__file__).parent
 checker = runpy.run_path(str(packaging / 'check-store-bundle.py'))
@@ -67,7 +67,7 @@ check('raster-resource', lambda artifact, app, names: (app / 'Contents/Resources
 check('stale-notices', lambda artifact, app, names: (app / 'Contents/Resources/THIRD-PARTY-NOTICES.md').write_text('old'), rejects=True)
 check('missing-privacy-manifest', lambda artifact, app, names: (app / 'Contents/Resources/PrivacyInfo.xcprivacy').unlink(), rejects=True)
 check('stale-privacy-manifest', lambda artifact, app, names: (app / 'Contents/Resources/PrivacyInfo.xcprivacy').write_bytes(plistlib.dumps({})), rejects=True)
-for name in ['Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Sparkle.framework', 'Sparkle-LICENSE.txt', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletAudio', 'AcoupletLDACOutput.driver', 'Acouplet LDAC Output.pkg', 'LDAC-LICENSE.txt', 'LDAC-NOTICE.txt', 'libldacBT_enc.dylib', 'Install.command', 'Uninstall Service.command', 'Uninstall LDAC Output.command']:
+for name in ['Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Sparkle.framework', 'Sparkle-LICENSE.txt', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletAudio', 'AcoupletLDACOutput.driver', 'Acouplet LDAC Output.pkg', 'Acouplet LDAC Removal.pkg', 'LDAC-LICENSE.txt', 'LDAC-NOTICE.txt', 'libldacBT_enc.dylib', 'Install.command', 'Uninstall Service.command', 'Uninstall LDAC Output.command']:
     check('excluded-file-' + name, lambda artifact, app, names, name=name: (app / name).touch(), rejects=True)
 check('non-mach-main', lambda artifact, app, names: (app / 'Contents/MacOS/Acouplet').write_bytes(b'placeholder'), rejects=True)
 check('updater-link', lambda artifact, app, names: (b'@rpath/Sparkle.framework/Versions/B/Sparkle', b''), rejects=True)
@@ -102,9 +102,14 @@ from pathlib import Path
 import json, os, sys
 root = Path(os.environ['ACOUPLET_STORE_CHECK_ROOT'])
 args = sys.argv[1:]
+if args == ['-p']:
+    (root / 'selected-developer-dir').touch()
+    print('/Applications/Selected Xcode.app/Contents/Developer')
+    sys.exit(0)
 with (root / 'commands.jsonl').open('a') as log:
     log.write(json.dumps(args) + '\\n')
 if args[0] == 'xcodebuild':
+    assert os.environ['DEVELOPER_DIR'] == os.environ['ACOUPLET_STORE_CHECK_DEVELOPER_DIR']
     assert '-allowProvisioningUpdates' not in args
     assert args[-1] == 'archive'
     archive = Path(args[args.index('-archivePath') + 1])
@@ -116,10 +121,10 @@ elif args[0].endswith('check-store-bundle.py'):
     if os.environ['ACOUPLET_STORE_CHECK_MODE'] == 'audit-failure': sys.exit(1)
 else:
     assert args[:3] == ['--verify', '--deep', '--strict']
-''')
+'''.replace('#!/usr/bin/python3', '#!' + sys.executable))
         stub.chmod(0o755)
         source = (packaging / 'app-store.sh').read_text()
-        for tool in ['xcrun', 'python3', 'codesign']:
+        for tool in ['xcrun', 'python3', 'codesign', 'xcode-select']:
             source = source.replace('/usr/bin/' + tool, str(stub))
         script = scripts / 'app-store.sh'
         script.write_text(source)
@@ -127,11 +132,13 @@ else:
         previous.mkdir(parents=True)
         (previous / 'old-artifact').write_text('old')
         environment = {key: value for key, value in os.environ.items()
-                       if key not in {'CODE_SIGN_IDENTITY', 'PROVISIONING_PROFILE_SPECIFIER', 'DEVELOPMENT_TEAM'}}
-        environment.update(signing, ACOUPLET_STORE_CHECK_ROOT=str(root), ACOUPLET_STORE_CHECK_MODE=mode)
+                       if key not in {'CODE_SIGN_IDENTITY', 'PROVISIONING_PROFILE_SPECIFIER', 'DEVELOPMENT_TEAM', 'DEVELOPER_DIR'}}
+        environment.update(signing, ACOUPLET_STORE_CHECK_ROOT=str(root), ACOUPLET_STORE_CHECK_MODE=mode,
+                           ACOUPLET_STORE_CHECK_DEVELOPER_DIR=signing.get('DEVELOPER_DIR', '/Applications/Selected Xcode.app/Contents/Developer'))
         result = subprocess.run(['/bin/zsh', str(script), *(['--unsigned'] if unsigned else [])],
                                 env=environment, text=True, capture_output=True)
         assert (result.returncode == 0) == succeeds, (name, result.stdout, result.stderr)
+        assert (root / 'selected-developer-dir').exists() == ('DEVELOPER_DIR' not in signing)
         log = root / 'commands.jsonl'
         commands = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         if commands:
@@ -156,6 +163,7 @@ else:
 
 
 check_command('unsigned-command', {}, unsigned=True)
+check_command('explicit-developer-directory', {'DEVELOPER_DIR': '/Applications/Chosen Xcode.app/Contents/Developer'}, unsigned=True)
 check_command('audit-failure-keeps-previous', {}, mode='audit-failure', unsigned=True, succeeds=False)
 check_command('existing-distribution-signing', {'CODE_SIGN_IDENTITY': 'Apple Distribution: Example (ABCDE12345)',
               'PROVISIONING_PROFILE_SPECIFIER': 'Existing Profile', 'DEVELOPMENT_TEAM': 'ABCDE12345'})

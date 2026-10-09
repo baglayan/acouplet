@@ -1,15 +1,15 @@
-#define main originalNativeBatteryHelperMain
 #include "SonyNativeBatteryHelper.m"
-#undef main
 #import <IOKit/IOCFSerialize.h>
 #import <dlfcn.h>
 #import <IOBluetooth/IOBluetooth.h>
+#include "SonyClassicConnection.h"
 
 typedef struct { int identifier; BOOL allocated; } EnvelopeSource;
 static mach_port_t server;
 static BOOL creationFinished;
 static const int nativeDisconnectedExit = 76;
 static const int nativeUnavailableExit = 77;
+static const int leaseExpiredExit = 78;
 static IOReturn (*connectServer)(mach_port_t *);
 static IOReturn (*disconnectServer)(mach_port_t);
 static kern_return_t (*createSource)(mach_port_t, int *, int *);
@@ -97,11 +97,17 @@ static BOOL inventoryDue(double *nextCheck, double now, BOOL inputReady) {
     return YES;
 }
 
-static BOOL sameReadings(NSDictionary *first, NSDictionary *second) {
-    return [first[@"left"][@"level"] isEqual:second[@"left"][@"level"]]
+static BOOL samePairReadings(NSDictionary *first, NSDictionary *second) {
+    return [first[@"name"] isEqual:second[@"name"]] && [first[@"left"][@"level"] isEqual:second[@"left"][@"level"]]
         && [first[@"right"][@"level"] isEqual:second[@"right"][@"level"]]
         && [first[@"left"][@"isCharging"] isEqual:second[@"left"][@"isCharging"]]
         && [first[@"right"][@"isCharging"] isEqual:second[@"right"][@"isCharging"]];
+}
+
+static BOOL sameReadings(NSDictionary *first, NSDictionary *second) {
+    return samePairReadings(first, second) && ((!first[@"caseBattery"] && !second[@"caseBattery"])
+            || ([first[@"caseBattery"][@"level"] isEqual:second[@"caseBattery"][@"level"]]
+                && [first[@"caseBattery"][@"isCharging"] isEqual:second[@"caseBattery"][@"isCharging"]]));
 }
 
 static NSDictionary *single(NSDictionary *baseline, NSString *marker) {
@@ -178,6 +184,10 @@ static int resultBeforeCleanup(int result, NSDictionary *sample, double deadline
     return expired(sample, deadline) ? 1 : result;
 }
 
+static int resultAfterLease(int result, NSDictionary *sample, double deadline) {
+    return result == 0 && !stopped && expired(sample, deadline) ? leaseExpiredExit : resultBeforeCleanup(result, sample, deadline);
+}
+
 static double sampleDeadline(NSDictionary *sample) {
     double observed = MIN([sample[@"left"][@"observedAt"] doubleValue], [sample[@"right"][@"observedAt"] doubleValue]);
     return NSProcessInfo.processInfo.systemUptime + observed + 45 - NSDate.date.timeIntervalSince1970;
@@ -248,7 +258,7 @@ static BOOL releaseOwned(EnvelopeSource *source, NSString *identifier, NSArray<N
 
 static NSNumber *classicConnected(NSString *address) {
     IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
-    return device && device.isPaired ? @(device.isConnected) : nil;
+    return device && device.isPaired ? @(SonyClassicIsConnected(device)) : nil;
 }
 
 static NSArray *completeInventory(NSString *identifier) {
@@ -276,11 +286,11 @@ static int nativeLossResult(NSArray *records, NSString *identifier, NSString *pa
         } else {
             if (![record[@"Part Identifier"] isEqual:@"Combined"]) return 1;
             if ([record[ownerKey] isEqual:pairMarker]) {
-                if ([parts count] != 2) return 1;
-                for (NSUInteger index = 0; index < 2; index++) {
+                if ([parts count] != 2 && [parts count] != 3) return 1;
+                for (NSUInteger index = 0; index < [parts count]; index++) {
                     id component = parts[index];
                     if (![component isKindOfClass:NSDictionary.class]
-                        || ![component[@"Part Identifier"] isEqual:index == 0 ? @"Left" : @"Right"]
+                        || ![component[@"Part Identifier"] isEqual:index == 0 ? @"Left" : index == 1 ? @"Right" : @"Case"]
                         || !level(component[@"Current Capacity"]) || component[ownerKey]
                         || ![component[@"Accessory Identifier"] isEqual:identifier]
                         || ![component[@"Group Identifier"] isEqual:identifier]
@@ -302,6 +312,7 @@ static int finalInventoryResult(NSArray *records, NSString *identifier, NSNumber
 static int withdrawalResult(int previous, int next) {
     if (previous == 1 || next == 1) return 1;
     if (previous == nativeDisconnectedExit || next == nativeDisconnectedExit) return nativeDisconnectedExit;
+    if (previous == nativeUnavailableExit || next == nativeUnavailableExit) return nativeUnavailableExit;
     return MAX(previous, next);
 }
 
@@ -350,7 +361,7 @@ static int pulse(NSString *identifier, NSString *session) {
     }
     {
         NSDictionary *sample = command[@"sample"];
-        if (!valid(sample, identifier, nil, NSDate.date.timeIntervalSince1970)) goto cleanup;
+        if (!validWithMaximumAge(sample, identifier, nil, NSDate.date.timeIntervalSince1970, 45)) goto cleanup;
         double lease = MIN(deadline, sampleDeadline(sample));
         NSArray *records = inventory(identifier);
         if (!guarded(records, identifier, [session stringByAppendingString:@"/parent"], command[@"guard"], command[@"pair"], command[@"trailer"], YES)) goto cleanup;
@@ -383,7 +394,9 @@ static BOOL trigger(NSString *executable, NSString *identifier, NSString *sessio
     if (![task launchAndReturnError:nil]) return NO;
     [input.fileHandleForReading closeFile];
     [output.fileHandleForWriting closeFile];
-    BOOL sent = message(input.fileHandleForWriting, @{@"sample": sample, @"guard": guard, @"pair": pairMarker, @"trailer": trailer});
+    NSMutableDictionary *pulseSample = sample.mutableCopy;
+    [pulseSample removeObjectForKey:@"caseBattery"];
+    BOOL sent = message(input.fileHandleForWriting, @{@"sample": pulseSample, @"guard": guard, @"pair": pairMarker, @"trailer": trailer});
     [input.fileHandleForWriting closeFile];
     event(@"pulse-started", @{@"pulsePID": @(task.processIdentifier)});
     double stopAt = MIN(deadline, NSProcessInfo.processInfo.systemUptime + 4);
@@ -409,6 +422,8 @@ static BOOL trigger(NSString *executable, NSString *identifier, NSString *sessio
         && task.terminationReason == NSTaskTerminationReasonExit && task.terminationStatus == 0;
 }
 
+static double caseDeadline(NSDictionary *sample);
+
 static int child(NSString *identifier, NSString *session) {
     NSString *parentMarker = [session stringByAppendingString:@"/parent"];
     NSArray *markers = @[[session stringByAppendingString:@"/a"], [session stringByAppendingString:@"/b"], [session stringByAppendingString:@"/c"]];
@@ -417,8 +432,7 @@ static int child(NSString *identifier, NSString *session) {
     NSUInteger guardIndex = 0, pairIndex = 1, trailerIndex = 2;
     NSMutableData *buffer = NSMutableData.data;
     NSDictionary *command = nil, *sample = nil, *trailerDetails = nil;
-    double deadline = INFINITY;
-    double lease = 0;
+    double lease = 0, caseLease = 0, lastCaseObservation = -INFINITY;
     int result = 1;
     double inputDeadline = NSProcessInfo.processInfo.systemUptime + 20;
     while (!stopped && NSProcessInfo.processInfo.systemUptime < inputDeadline) {
@@ -429,6 +443,8 @@ static int child(NSString *identifier, NSString *session) {
             sample = command[@"sample"];
             if (![command[@"command"] isEqual:@"prepare"] || !valid(sample, identifier, nil, NSDate.date.timeIntervalSince1970)) goto cleanup;
             lease = sampleDeadline(sample);
+            caseLease = sample[@"caseBattery"] ? caseDeadline(sample) : 0;
+            if (sample[@"caseBattery"]) lastCaseObservation = [sample[@"caseBattery"][@"observedAt"] doubleValue];
             break;
         }
     }
@@ -459,15 +475,16 @@ static int child(NSString *identifier, NSString *session) {
         }
         event(@"preflight-passed", @{@"records": records, @"childSourceIDs": @[@(sources[0].identifier), @(sources[1].identifier), @(sources[2].identifier)],
             @"guard": markers[guardIndex], @"pair": markers[pairIndex], @"trailer": markers[trailerIndex]});
-        if (expired(sample, MIN(deadline, lease))
+        if (expired(sample, lease)
             || setSource(sources[guardIndex], envelope(sample, markers[guardIndex]))) goto cleanup;
         event(@"prepared", @{@"guard": markers[guardIndex], @"pair": markers[pairIndex], @"trailer": markers[trailerIndex]});
     }
     {
         BOOL active = NO;
         BOOL nativeUnavailable = NO;
+        BOOL caseWithdrawn = NO;
         double nextInventory = 0;
-        while (!expired(sample, MIN(deadline, lease))) {
+        while (!expired(sample, lease)) {
             @autoreleasepool {
                 int received = receive(STDIN_FILENO, buffer, &command);
                 if (received < 0) { result = received == -1 ? (nativeUnavailable ? result : 0) : 1; break; }
@@ -478,6 +495,15 @@ static int child(NSString *identifier, NSString *session) {
                     if (result == 1) break;
                     nativeUnavailable = YES;
                 }
+                if (active && !nativeUnavailable && !caseWithdrawn && sample[@"caseBattery"]
+                    && (NSProcessInfo.processInfo.systemUptime >= caseLease
+                        || NSDate.date.timeIntervalSince1970 >= [sample[@"caseBattery"][@"observedAt"] doubleValue] + 45)) {
+                    NSMutableDictionary *withoutCase = sample.mutableCopy;
+                    [withoutCase removeObjectForKey:@"caseBattery"];
+                    if (setSource(sources[pairIndex], publication(withoutCase, markers[pairIndex]))) { result = 1; break; }
+                    caseWithdrawn = YES;
+                    event(@"case-expired", @{@"sample": sample});
+                }
                 if (!received) continue;
                 NSString *kind = command[@"command"];
                 if ([kind isEqual:@"stop"]) { result = nativeUnavailable ? result : 0; break; }
@@ -485,9 +511,15 @@ static int child(NSString *identifier, NSString *session) {
                 BOOL activating = !active && [kind isEqual:@"activate"];
                 if (!(activating || (active && [kind isEqual:@"sample"]))
                     || !valid(next, identifier, activating ? nil : sample, NSDate.date.timeIntervalSince1970)
+                    || !caseProgresses(next, sample, lastCaseObservation)
                     || (activating && ![next isEqual:sample])) { result = 1; break; }
                 if (nativeUnavailable) continue;
                 double nextLease = activating ? lease : sampleDeadline(next);
+                BOOL sameCase = [next[@"caseBattery"] isEqual:sample[@"caseBattery"]];
+                double nextCaseLease = sameCase ? caseLease : next[@"caseBattery"] ? caseDeadline(next) : 0;
+                BOOL nextCaseWithdrawn = caseWithdrawn && sameCase;
+                NSMutableDictionary *visibleNext = next.mutableCopy;
+                if (nextCaseWithdrawn) [visibleNext removeObjectForKey:@"caseBattery"];
                 NSArray *records = inventory(identifier);
                 NSInteger parentIndex = indexOfMarker(records, parentMarker);
                 if (parentIndex == NSNotFound || ![records[parentIndex][@"Part Identifier"] isEqual:@"Combined"]
@@ -502,26 +534,30 @@ static int child(NSString *identifier, NSString *session) {
                     continue;
                 }
                 NSDictionary *nextTrailer = single(native, markers[trailerIndex]);
-                BOOL sourcesUnchanged = active && sameReadings(sample, next) && [nextTrailer isEqual:trailerDetails];
+                BOOL pairUnchanged = active && samePairReadings(sample, next) && [nextTrailer isEqual:trailerDetails];
+                BOOL sourcesUnchanged = pairUnchanged && !caseWithdrawn && sameReadings(sample, next);
                 if (expired(sample, lease) || expired(next, nextLease)
                     || !guarded(records, identifier, parentMarker, markers[guardIndex], markers[pairIndex], markers[trailerIndex], YES)
-                    || (!sourcesUnchanged && setSource(sources[trailerIndex], nextTrailer))) { result = 1; break; }
+                    || (!pairUnchanged && setSource(sources[trailerIndex], nextTrailer))) { result = 1; break; }
                 if (!sourcesUnchanged && !guarded(inventory(identifier), identifier, parentMarker, markers[guardIndex], markers[pairIndex], markers[trailerIndex], YES)) { result = 1; break; }
-                if (expired(sample, MIN(deadline, lease)) || expired(next, MIN(deadline, nextLease))
-                    || (!sourcesUnchanged && setSource(sources[guardIndex], envelope(next, markers[guardIndex])))) { result = 1; break; }
+                if (expired(sample, lease) || expired(next, nextLease)
+                    || (!pairUnchanged && setSource(sources[guardIndex], envelope(next, markers[guardIndex])))) { result = 1; break; }
                 if (!sourcesUnchanged && !guarded(inventory(identifier), identifier, parentMarker, markers[guardIndex], markers[pairIndex], markers[trailerIndex], YES)) { result = 1; break; }
-                if (expired(sample, MIN(deadline, lease)) || expired(next, MIN(deadline, nextLease))
-                    || (!sourcesUnchanged && setSource(sources[pairIndex], publication(next, markers[pairIndex])))
-                    || expired(next, MIN(deadline, nextLease))) { result = 1; break; }
+                if (expired(sample, lease) || expired(next, nextLease)
+                    || (!sourcesUnchanged && setSource(sources[pairIndex], publication(visibleNext, markers[pairIndex])))
+                    || expired(next, nextLease)) { result = 1; break; }
                 trailerDetails = nextTrailer;
                 sample = next;
+                if (sample[@"caseBattery"]) lastCaseObservation = MAX(lastCaseObservation, [sample[@"caseBattery"][@"observedAt"] doubleValue]);
                 lease = nextLease;
+                caseLease = nextCaseLease;
                 active = YES;
+                caseWithdrawn = nextCaseWithdrawn;
                 result = 0;
                 event(@"pair-submitted", @{@"guard": markers[guardIndex], @"pair": markers[pairIndex], @"sample": sample, @"sourcesUnchanged": @(sourcesUnchanged)});
             }
         }
-        result = resultBeforeCleanup(result, sample, MIN(deadline, lease));
+        result = resultAfterLease(result, sample, lease);
     }
 cleanup:
     alarm(12);
@@ -556,22 +592,38 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
     EnvelopeSource source = {0};
     NSTask *task = NSTask.new;
     NSPipe *toChild = NSPipe.pipe, *fromChild = NSPipe.pipe;
-    double deadline = INFINITY;
-    double lease = 0;
+    double lease = 0, lastCaseObservation = -INFINITY;
     int result = 1;
     double inputDeadline = NSProcessInfo.processInfo.systemUptime + 20;
     while (!stopped && NSProcessInfo.processInfo.systemUptime < inputDeadline) {
         @autoreleasepool {
             int received = receive(STDIN_FILENO, input, &incoming);
-            if (received < 0) goto cleanup;
+            if (received < 0) {
+                if (received == -1 && markersAbsent(allInventory(), @[marker,
+                    [session stringByAppendingString:@"/a"], [session stringByAppendingString:@"/b"], [session stringByAppendingString:@"/c"]])) return 75;
+                goto cleanup;
+            }
             if (!received) continue;
-            if (!valid(incoming, identifier, nil, NSDate.date.timeIntervalSince1970)) goto cleanup;
+            double now = NSDate.date.timeIntervalSince1970;
+            if (!valid(incoming, identifier, nil, now)) {
+                if (validWithMaximumAge(incoming, identifier, nil, now, INFINITY)) {
+                    event(@"prerequisite-unavailable", @{@"reason": @"Battery sample aged before startup"});
+                    if (markersAbsent(allInventory(), @[marker, [session stringByAppendingString:@"/a"],
+                        [session stringByAppendingString:@"/b"], [session stringByAppendingString:@"/c"]])) return 75;
+                }
+                goto cleanup;
+            }
             sample = incoming;
+            if (sample[@"caseBattery"]) lastCaseObservation = [sample[@"caseBattery"][@"observedAt"] doubleValue];
             lease = sampleDeadline(sample);
             break;
         }
     }
-    if (!sample) goto cleanup;
+    if (!sample) {
+        if (!stopped && markersAbsent(allInventory(), @[marker, [session stringByAppendingString:@"/a"],
+            [session stringByAppendingString:@"/b"], [session stringByAppendingString:@"/c"]])) return 75;
+        goto cleanup;
+    }
     {
         NSArray *records = inventory(identifier);
         if (records.count != 1 || !nativeSingle(records.firstObject, identifier)) {
@@ -595,11 +647,11 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
     }
     {
         BOOL childPrepared = NO;
-        while (!expired(sample, MIN(deadline, lease)) && task.running) {
+        while (!expired(sample, lease) && task.running) {
             @autoreleasepool {
                 int parentReceived = receive(STDIN_FILENO, input, &incoming);
                 if (parentReceived != 0) {
-                    if (parentReceived == -1) result = resultBeforeCleanup(0, sample, MIN(deadline, lease));
+                    if (parentReceived == -1) result = resultBeforeCleanup(0, sample, lease);
                     goto cleanup;
                 }
                 int received = receive(fromChild.fileHandleForReading.fileDescriptor, childInput, &incoming);
@@ -620,15 +672,15 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
         }
         if (!childPrepared || !childGuard || !childPair || !childTrailer
             || !guarded(inventory(identifier), identifier, marker, childGuard, childPair, childTrailer, YES)) goto cleanup;
-        if (expired(sample, MIN(deadline, lease)) || setSource(source, envelope(sample, marker))) goto cleanup;
-        if (expired(sample, MIN(deadline, lease))
+        if (expired(sample, lease) || setSource(source, envelope(sample, marker))) goto cleanup;
+        if (expired(sample, lease)
             || !message(toChild.fileHandleForWriting, @{@"command": @"activate", @"sample": sample})) goto cleanup;
         result = 0;
         NSDictionary *pending = sample;
         double pendingLease = lease;
         double nextInventory = 0;
         NSUInteger updates = 1;
-        while (!expired(sample, MIN(deadline, lease)) && task.running) {
+        while (!expired(sample, lease) && task.running) {
             @autoreleasepool {
                 int childReceived = receive(fromChild.fileHandleForReading.fileDescriptor, childInput, &incoming);
                 if (childReceived < 0) { if (childReceived != -1) result = 1; break; }
@@ -636,6 +688,12 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
                     event(@"child-report", @{@"report": incoming});
                     if ([incoming[@"event"] isEqual:@"native-disconnected"]) { result = nativeDisconnectedExit; break; }
                     if ([incoming[@"event"] isEqual:@"native-unavailable"]) { result = nativeUnavailableExit; break; }
+                    if ([incoming[@"event"] isEqual:@"case-expired"]) {
+                        if (![incoming[@"sample"] isEqual:sample] || !sample[@"caseBattery"]) { result = 1; break; }
+                        NSMutableDictionary *withoutCase = sample.mutableCopy;
+                        [withoutCase removeObjectForKey:@"caseBattery"];
+                        if (!trigger(executable, identifier, session, childGuard, childPair, childTrailer, withoutCase, lease)) { result = 1; break; }
+                    }
                     if ([incoming[@"event"] isEqual:@"pair-submitted"]) {
                         if (!pending || ![incoming[@"sample"] isEqual:pending] || expired(sample, lease)
                             || expired(pending, pendingLease)) { result = 1; break; }
@@ -644,7 +702,7 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
                         lease = pendingLease;
                         pending = nil;
                         if (!sourcesUnchanged && !trigger(executable, identifier, session, childGuard, childPair, childTrailer, sample, lease)) { result = 1; break; }
-                        if (expired(sample, MIN(deadline, lease))) { result = 1; break; }
+                        if (expired(sample, lease)) { result = 1; break; }
                         if (!guarded(inventory(identifier), identifier, marker, childGuard, childPair, childTrailer, YES)) {
                             result = nativeLossResult(completeInventory(identifier), identifier, marker, childGuard, childPair, childTrailer, classicConnected(sample[@"address"]));
                             event(result == 1 ? @"guard-lost" : result == nativeDisconnectedExit ? @"native-disconnected" : @"native-unavailable", @{@"phase": @"supervisor-refresh"});
@@ -662,7 +720,8 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
                 int received = receive(STDIN_FILENO, input, &incoming);
                 if (received < 0) { if (received != -1) result = 1; break; }
                 if (!received) continue;
-                if (pending || !valid(incoming, identifier, sample, NSDate.date.timeIntervalSince1970)) { result = 1; break; }
+                if (pending || !valid(incoming, identifier, sample, NSDate.date.timeIntervalSince1970)
+                    || !caseProgresses(incoming, sample, lastCaseObservation)) { result = 1; break; }
                 if (!guarded(inventory(identifier), identifier, marker, childGuard, childPair, childTrailer, YES)) {
                     result = nativeLossResult(completeInventory(identifier), identifier, marker, childGuard, childPair, childTrailer, classicConnected(sample[@"address"]));
                     event(result == 1 ? @"guard-lost" : result == nativeDisconnectedExit ? @"native-disconnected" : @"native-unavailable", @{@"phase": @"supervisor-update"});
@@ -670,15 +729,17 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
                 }
                 double nextLease = sampleDeadline(incoming);
                 if (expired(sample, lease) || expired(incoming, nextLease)
-                    || (!sameReadings(sample, incoming) && setSource(source, envelope(incoming, marker)))
+                    || (!samePairReadings(sample, incoming) && setSource(source, envelope(incoming, marker)))
                     || expired(sample, lease) || expired(incoming, nextLease)
                     || !message(toChild.fileHandleForWriting, @{@"command": @"sample", @"sample": incoming})) { result = 1; break; }
                 pending = incoming;
+                if (pending[@"caseBattery"]) lastCaseObservation = MAX(lastCaseObservation, [pending[@"caseBattery"][@"observedAt"] doubleValue]);
                 pendingLease = nextLease;
                 updates++;
             }
         }
-        result = resultBeforeCleanup(result, sample, MIN(deadline, lease));
+        result = pending ? resultBeforeCleanup(result, sample, lease)
+            : resultAfterLease(result, sample, lease);
     }
 cleanup:
     alarm(40);
@@ -715,7 +776,7 @@ cleanup:
                 event(@"child-report", @{@"report": incoming});
             if (received == -2) result = 1;
             if (task.terminationReason != NSTaskTerminationReasonExit
-                || (task.terminationStatus != 0 && task.terminationStatus != nativeDisconnectedExit && task.terminationStatus != nativeUnavailableExit)) result = 1;
+                || (task.terminationStatus != 0 && task.terminationStatus != nativeDisconnectedExit && task.terminationStatus != nativeUnavailableExit && task.terminationStatus != leaseExpiredExit)) result = 1;
             else result = withdrawalResult(result, task.terminationStatus);
             event(@"child-terminated", @{@"reason": @(task.terminationReason), @"status": @(task.terminationStatus)});
         }
@@ -731,16 +792,117 @@ cleanup:
     return result;
 }
 
+static BOOL caseInventoryMatches(NSArray *records, NSString *prefix, NSString *marker, NSDictionary *details) {
+    if (!records) return NO;
+    NSUInteger count = 0;
+    for (NSDictionary *record in records) {
+        id owner = record[ownerKey];
+        if (![owner isKindOfClass:NSString.class] || ![owner hasPrefix:prefix]) continue;
+        if (!marker || ![owner isEqual:marker] || record[@"Accessory Identifier"] || record[@"Group Identifier"]) return NO;
+        for (NSString *key in details) if (![record[key] isEqual:details[key]]) return NO;
+        count++;
+    }
+    return count == (marker ? 1 : 0);
+}
+
+static double caseDeadline(NSDictionary *sample) {
+    return NSProcessInfo.processInfo.systemUptime + [sample[@"caseBattery"][@"observedAt"] doubleValue] + 45 - NSDate.date.timeIntervalSince1970;
+}
+
+static BOOL caseExpired(NSDictionary *sample, double deadline) {
+    return stopped || NSProcessInfo.processInfo.systemUptime >= deadline
+        || NSDate.date.timeIntervalSince1970 >= [sample[@"caseBattery"][@"observedAt"] doubleValue] + 45;
+}
+
+static int casePublisher(NSString *identifier, NSString *session) {
+    NSString *prefix = [identifier stringByAppendingString:@"/case/"];
+    NSString *marker = [prefix stringByAppendingString:session];
+    NSMutableData *input = NSMutableData.data;
+    NSDictionary *sample = nil, *incoming = nil, *details = nil;
+    EnvelopeSource source = {0};
+    double lease = 0, nextInventory = 0, inputDeadline = NSProcessInfo.processInfo.systemUptime + 20;
+    int result = 1;
+    NSUInteger updates = 0;
+    while (!stopped && NSProcessInfo.processInfo.systemUptime < inputDeadline) {
+        int received = receive(STDIN_FILENO, input, &incoming);
+        if (received < 0) { if (received == -1) result = 75; goto cleanup; }
+        if (!received) continue;
+        double now = NSDate.date.timeIntervalSince1970;
+        if (!validCase(incoming, identifier, nil, now)) {
+            if (validCaseWithMaximumAge(incoming, identifier, nil, now, INFINITY)) result = 75;
+            goto cleanup;
+        }
+        sample = incoming;
+        lease = caseDeadline(sample);
+        break;
+    }
+    if (!sample) { result = 75; goto cleanup; }
+    if (![classicConnected(sample[@"address"]) isEqual:@YES]
+        || !caseInventoryMatches(allInventory(), prefix, nil, nil)) {
+        result = 75;
+        event(@"prerequisite-unavailable", @{@"reason": @"Case publication prerequisites unavailable"});
+        goto cleanup;
+    }
+    if (allocateSource(&source)) goto cleanup;
+    creationFinished = YES;
+    while (!caseExpired(sample, lease)) {
+        @autoreleasepool {
+            if (inventoryDue(&nextInventory, NSProcessInfo.processInfo.systemUptime, NO)) {
+                if (![classicConnected(sample[@"address"]) isEqual:@YES]) { result = nativeDisconnectedExit; break; }
+                if (details && !caseInventoryMatches(allInventory(), prefix, marker, details)) { result = 1; break; }
+            }
+            if (!details) {
+                details = casePublication(sample, marker);
+                if (caseExpired(sample, lease) || setSource(source, details)) { result = 1; break; }
+                double confirmationDeadline = MIN(lease, NSProcessInfo.processInfo.systemUptime + 2);
+                while (!caseInventoryMatches(allInventory(), prefix, marker, details)
+                    && !caseExpired(sample, confirmationDeadline)) tick();
+                if (caseExpired(sample, confirmationDeadline)
+                    || !caseInventoryMatches(allInventory(), prefix, marker, details)) { result = 1; break; }
+                event(@"refresh-completed", @{@"sample": sample, @"update": @(++updates)});
+                result = 0;
+            }
+            int received = receive(STDIN_FILENO, input, &incoming);
+            if (received < 0) { if (received == -2) result = 1; break; }
+            if (!received) continue;
+            if (!validCase(incoming, identifier, sample, NSDate.date.timeIntervalSince1970)
+                || caseExpired(sample, lease)) { result = 1; break; }
+            sample = incoming;
+            lease = caseDeadline(sample);
+            details = nil;
+        }
+    }
+cleanup:
+    alarm(7);
+    if (!releaseOwned(&source, nil, @[marker], NSProcessInfo.processInfo.systemUptime + 5)) result = 1;
+    if (stopped) result = 1;
+    event(@"case-exit", @{@"result": @(result)});
+    return result;
+}
+
 static int envelopeSelfTest(void) {
     NSString *identifier = @"00000000-0000-4000-8000-000000000019";
     NSDictionary *reading = @{@"level": @40, @"isCharging": @NO, @"observedAt": @100};
-    NSDictionary *sample = @{@"identifier": identifier, @"address": @"02:00:00:00:00:19", @"controlSession": @1, @"left": reading, @"right": reading};
+    NSDictionary *sample = @{@"identifier": identifier, @"name": @"WF-1000XM5", @"address": @"02:00:00:00:00:19", @"controlSession": @1, @"left": reading, @"right": reading};
     NSMutableDictionary *native = [publication(sample, @"unused") mutableCopy];
     [native removeObjectForKey:ownerKey];
     [native removeObjectForKey:@"Combined Parts"];
     native[@"Part Identifier"] = @"Single";
     native[@"Power Source ID"] = @1;
     assert(nativeSingle(native, identifier));
+    NSMutableDictionary *renamedNative = native.mutableCopy;
+    renamedNative[@"Name"] = @"Renamed Sony earbuds";
+    assert(nativeSingle(renamedNative, identifier));
+    renamedNative[@"Vendor ID"] = @76;
+    assert(!nativeSingle(renamedNative, identifier));
+    NSMutableDictionary *renamedSample = sample.mutableCopy;
+    renamedSample[@"name"] = @"Renamed Sony earbuds";
+    assert(valid(renamedSample, identifier, nil, 100));
+    assert([publication(renamedSample, @"renamed")[@"Name"] isEqual:@"Renamed Sony earbuds"]);
+    assert(!sameReadings(sample, renamedSample));
+    assert(!valid(sample, identifier, nil, 120.001));
+    assert(validWithMaximumAge(sample, identifier, nil, 120.001, INFINITY));
+
     NSMutableDictionary *parent = [single(native, @"parent") mutableCopy];
     NSMutableDictionary *guard = [single(native, @"guard") mutableCopy];
     NSMutableDictionary *pairRecord = [single(native, @"pair") mutableCopy];
@@ -909,6 +1071,12 @@ static int envelopeSelfTest(void) {
     assert(resultBeforeCleanup(nativeUnavailableExit, sample, INFINITY) == 1);
     assert(finalWithdrawalResult(resultBeforeCleanup(nativeUnavailableExit, sample, INFINITY), nativeDisconnectedExit) == 1);
     assert(resultBeforeCleanup(0, freshSample, NSProcessInfo.processInfo.systemUptime - 1) == 1);
+    assert(resultAfterLease(0, freshSample, NSProcessInfo.processInfo.systemUptime - 1) == leaseExpiredExit);
+    assert(resultAfterLease(1, freshSample, NSProcessInfo.processInfo.systemUptime - 1) == 1);
+    assert(finalWithdrawalResult(leaseExpiredExit, 0) == leaseExpiredExit);
+    assert(finalWithdrawalResult(leaseExpiredExit, 1) == 1);
+    assert(finalWithdrawalResult(leaseExpiredExit, nativeUnavailableExit) == 1);
+    assert(finalWithdrawalResult(nativeUnavailableExit, leaseExpiredExit) == 1);
     assert(withdrawalResult(resultBeforeCleanup(0, sample, INFINITY), nativeDisconnectedExit) == 1);
     assert(withdrawalResult(resultBeforeCleanup(nativeDisconnectedExit, sample, INFINITY), 0) == 1);
     assert(!single(native, @"parent")[@"Power Source ID"]);
@@ -917,6 +1085,92 @@ static int envelopeSelfTest(void) {
     creationFinished = YES;
     EnvelopeSource closed = {0};
     assert(allocateSource(&closed) == kIOReturnNotPermitted && !closed.allocated);
+    NSDictionary *casePart = @{@"level": @0, @"isCharging": @NO, @"observedAt": @100};
+    NSDictionary *caseSample = @{@"identifier": identifier, @"name": @"WF-1000XM5", @"address": @"02:00:00:00:00:19", @"controlSession": @1, @"caseBattery": casePart};
+    assert(validCase(caseSample, identifier, nil, 100));
+    NSMutableDictionary *renamedCase = caseSample.mutableCopy;
+    renamedCase[@"name"] = @"Renamed Sony earbuds";
+    assert([casePublication(renamedCase, @"renamed-case")[@"Name"] isEqual:@"Renamed Sony earbuds Case"]);
+    assert(!validCase(caseSample, identifier, nil, 120.001));
+    assert(validCaseWithMaximumAge(caseSample, identifier, nil, 120.001, INFINITY));
+    for (id name in @[@"", @19, NSNull.null]) {
+        renamedCase[@"name"] = name;
+        renamedSample[@"name"] = name;
+        assert(!validCase(renamedCase, identifier, nil, 100));
+        assert(!valid(renamedSample, identifier, nil, 100));
+    }
+
+    assert(!validCase(caseSample, identifier, caseSample, 100));
+    assert(!validCase(caseSample, identifier, nil, 121));
+    assert(!validCase(caseSample, identifier, nil, 94));
+    assert(!valid(caseSample, identifier, nil, 100));
+    assert(!validCase(sample, identifier, nil, 100));
+    NSString *casePrefix = [identifier stringByAppendingString:@"/case/"];
+    NSString *caseMarker = [casePrefix stringByAppendingString:@"fixture"];
+    NSDictionary *caseDetails = casePublication(caseSample, caseMarker);
+    assert([caseDetails[@"Part Identifier"] isEqual:@"Case"] && [caseDetails[@"Current Capacity"] isEqual:@0]);
+    assert([caseDetails[@"Vendor ID"] isEqual:@1356] && [caseDetails[@"Product ID"] isEqual:@3683]);
+    assert(!caseDetails[@"Accessory Identifier"] && !caseDetails[@"Group Identifier"] && !caseDetails[@"Power Source ID"]);
+    assert(!caseDetails[@"Combined Parts"]);
+    assert(caseInventoryMatches(@[], casePrefix, nil, nil));
+    assert(!caseInventoryMatches(nil, casePrefix, nil, nil));
+    assert(caseInventoryMatches(@[caseDetails, native], casePrefix, caseMarker, caseDetails));
+    assert(!caseInventoryMatches(@[caseDetails], casePrefix, nil, nil));
+    assert(!caseInventoryMatches(@[caseDetails, caseDetails], casePrefix, caseMarker, caseDetails));
+    for (NSString *key in @[@"Accessory Identifier", @"Group Identifier"]) {
+        NSMutableDictionary *associated = caseDetails.mutableCopy;
+        associated[key] = identifier;
+        assert(!caseInventoryMatches(@[associated], casePrefix, caseMarker, caseDetails));
+    }
+    for (NSNumber *capacity in @[@0, @1, @63, @100, @101, @-1, @0.5, @YES]) {
+        NSMutableDictionary *changed = caseSample.mutableCopy, *changedPart = casePart.mutableCopy;
+        changedPart[@"level"] = capacity;
+        changed[@"caseBattery"] = changedPart;
+        BOOL acceptable = number(capacity) && [capacity doubleValue] == [capacity intValue]
+            && [capacity intValue] >= 0 && [capacity intValue] <= 100;
+        assert(validCase(changed, identifier, nil, 100) == acceptable);
+    }
+    NSMutableDictionary *integrated = sample.mutableCopy;
+    integrated[@"caseBattery"] = @{@"level": @63, @"isCharging": @YES, @"observedAt": @100};
+    assert(valid(integrated, identifier, nil, 100));
+    assert(valid(integrated, identifier, sample, 100));
+    assert(!valid(integrated, identifier, integrated, 100));
+    NSDictionary *three = publication(integrated, @"pair");
+    NSArray *threeParts = three[@"Combined Parts"];
+    assert(threeParts.count == 3 && [threeParts[2][@"Part Identifier"] isEqual:@"Case"]);
+    assert([threeParts[2][@"Current Capacity"] isEqual:@63] && [threeParts[2][@"Is Charging"] isEqual:@YES]);
+    assert([three[@"Current Capacity"] isEqual:publication(sample, @"pair")[@"Current Capacity"]]);
+    for (NSUInteger index = 0; index < 2; index++) assert([threeParts[index] isEqual:publication(sample, @"pair")[@"Combined Parts"][index]]);
+    for (NSDictionary *part in threeParts) {
+        assert([part[@"Accessory Identifier"] isEqual:identifier] && [part[@"Group Identifier"] isEqual:identifier]);
+        assert([part[@"Vendor ID"] isEqual:@1356] && [part[@"Product ID"] isEqual:@3683]);
+        assert(!part[ownerKey] && !part[@"Power Source ID"] && !part[@"Combined Parts"]);
+    }
+    NSMutableDictionary *threeRecord = three.mutableCopy;
+    threeRecord[@"Power Source ID"] = @4;
+    assert(loss(@[activeParent, activeGuard, threeRecord, trailer], @NO) == nativeDisconnectedExit);
+    assert(loss(@[activeParent, activeGuard, threeRecord, trailer], @YES) == nativeUnavailableExit);
+    assert(valid(sample, identifier, integrated, 125));
+    NSMutableDictionary *caseUpdate = sample.mutableCopy;
+    caseUpdate[@"caseBattery"] = @{@"level": @62, @"isCharging": @NO, @"observedAt": @125};
+    assert(valid(caseUpdate, identifier, integrated, 125));
+    assert(!sameReadings(integrated, caseUpdate));
+    NSMutableDictionary *budsUpdate = integrated.mutableCopy;
+    budsUpdate[@"left"] = @{@"level": @39, @"isCharging": @NO, @"observedAt": @130};
+    budsUpdate[@"right"] = @{@"level": @38, @"isCharging": @YES, @"observedAt": @130};
+    assert(valid(budsUpdate, identifier, integrated, 130));
+    assert(!valid(integrated, identifier, caseUpdate, 125));
+    assert(!caseProgresses(integrated, sample, 100));
+    assert(caseProgresses(caseUpdate, sample, 100));
+    assert(caseProgresses(integrated, integrated, 100));
+    assert(!valid(caseUpdate, identifier, integrated, 145.001));
+    assert(valid(budsUpdate, identifier, integrated, 145.001));
+    for (id invalid in @[@0, @101, @YES, NSNull.null, @{@"level": @63, @"isCharging": @YES},
+        @{@"level": @63, @"isCharging": @YES, @"observedAt": @106}]) {
+        NSMutableDictionary *bad = integrated.mutableCopy;
+        bad[@"caseBattery"] = invalid;
+        assert(!valid(bad, identifier, nil, 100));
+    }
     NSDictionary *unassociated = unassociatedSingle(native, @"pulse");
     assert(!unassociated[@"Accessory Identifier"] && !unassociated[@"Group Identifier"] && !unassociated[@"Power Source ID"]);
     assert([unassociated[@"Current Capacity"] isEqual:native[@"Current Capacity"]]);
@@ -925,17 +1179,21 @@ static int envelopeSelfTest(void) {
     return 0;
 }
 
-static int model(NSString *identifier) {
+static int model(NSString *identifier, BOOL caseOnly) {
     NSMutableData *buffer = NSMutableData.data;
     NSDictionary *sample = nil, *incoming = nil;
     NSUInteger update = 0;
+    double lastCaseObservation = -INFINITY;
     while (!stopped) {
         @autoreleasepool {
             int received = receive(STDIN_FILENO, buffer, &incoming);
             if (received < 0) return received == -1 ? 0 : 2;
             if (!received) continue;
-            if (!valid(incoming, identifier, sample, NSDate.date.timeIntervalSince1970)) return 2;
+            if (!(caseOnly ? validCase(incoming, identifier, sample, NSDate.date.timeIntervalSince1970)
+                : valid(incoming, identifier, sample, NSDate.date.timeIntervalSince1970))) return 2;
+            if (!caseOnly && !caseProgresses(incoming, sample, lastCaseObservation)) return 2;
             sample = incoming;
+            if (sample[@"caseBattery"]) lastCaseObservation = MAX(lastCaseObservation, [sample[@"caseBattery"][@"observedAt"] doubleValue]);
             event(@"refresh-completed", @{@"sample": sample, @"update": @(++update)});
         }
     }
@@ -946,7 +1204,7 @@ static int model(NSString *identifier) {
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc == 2 && !strcmp(argv[1], "--self-test")) return envelopeSelfTest();
-        if (argc != 4 || (strcmp(argv[1], "--publish") && strcmp(argv[1], "--child") && strcmp(argv[1], "--pulse") && strcmp(argv[1], "--model"))) return 2;
+        if (argc != 4 || (strcmp(argv[1], "--publish") && strcmp(argv[1], "--child") && strcmp(argv[1], "--pulse") && strcmp(argv[1], "--model") && strcmp(argv[1], "--case") && strcmp(argv[1], "--case-model"))) return 2;
         NSString *identifier = [[NSUUID alloc] initWithUUIDString:[NSString stringWithUTF8String:argv[2]]].UUIDString;
         NSString *session = [[NSUUID alloc] initWithUUIDString:[NSString stringWithUTF8String:argv[3]]].UUIDString;
         if (!identifier || !session) return 2;
@@ -955,9 +1213,10 @@ int main(int argc, const char *argv[]) {
         signal(SIGTERM, stop);
         signal(SIGALRM, SIG_DFL);
         if (!strcmp(argv[1], "--pulse")) alarm(5);
-        if (!strcmp(argv[1], "--model")) return model(identifier);
+        if (!strcmp(argv[1], "--model") || !strcmp(argv[1], "--case-model")) return model(identifier, !strcmp(argv[1], "--case-model"));
         if (!openServer()) return 3;
-        int result = !strcmp(argv[1], "--pulse") ? pulse(identifier, session)
+        int result = !strcmp(argv[1], "--case") ? casePublisher(identifier, session)
+            : !strcmp(argv[1], "--pulse") ? pulse(identifier, session)
             : !strcmp(argv[1], "--child") ? child(identifier, session)
             : supervisor(NSProcessInfo.processInfo.arguments.firstObject, identifier, session);
         disconnectServer(server);

@@ -383,12 +383,12 @@ final class SonyTouchAssignmentsTests: XCTestCase {
         XCTAssertNotNil(controller.pendingChanges[.touchAssignments])
         XCTAssertEqual(controller.touchAssignments.selectedPresets, [0x35, 0x20])
         for payload: [UInt8] in [[0xF9, 3, 2, 0x20], [0xF9, 3, 2, 0x20, 0x35], [0xF9, 0x0E, 2, 0x20, 0x20]] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload)
             XCTAssertNotNil(controller.pendingChanges[.touchAssignments])
         }
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF7, 3, 2, 0x20, 0x20]))
+        controller.simulateProtocolMessage([0xF7, 3, 2, 0x20, 0x20])
         XCTAssertNotNil(controller.pendingChanges[.touchAssignments])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF9, 3, 2, 0x20, 0x20]))
+        controller.simulateProtocolMessage([0xF9, 3, 2, 0x20, 0x20])
         XCTAssertNil(controller.pendingChanges[.touchAssignments])
         XCTAssertEqual(controller.touchAssignments.selectedPresets, [0x20, 0x20])
         controller.setTouchAssignment(key: 1, preset: 0x35)
@@ -483,9 +483,9 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
                 let session = controller.simulatedControlSession
                 controller.simulateTouchReadTimeout(testCase.query)
                 for _ in 0..<4 { await Task.yield() }
-                XCTAssertEqual(controller.isReady, reply == testCase.valid)
+                XCTAssertTrue(controller.isReady)
                 if reply != testCase.valid {
-                    XCTAssertGreaterThan(controller.simulatedControlSession, session)
+                    XCTAssertEqual(controller.simulatedControlSession, session)
                     XCTAssertTrue(controller.isDeviceConnected)
                 }
             }
@@ -576,7 +576,7 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
             deliver(changed, to: controller)
             acknowledgeAll(controller)
             XCTAssertFalse(payloads(controller).contains([0xF8, 6, 2, 0x10, 0x20]))
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertNil(controller.pendingChanges[.touchAssignments])
         }
         let controller = readyLegacyController()
@@ -783,7 +783,7 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
             deliver(testCase.change, to: controller)
             acknowledgeAll(controller)
             XCTAssertFalse(payloads(controller).contains { $0.first == 0xFC })
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.pendingChanges.isEmpty)
         }
     }
@@ -868,10 +868,18 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
             let session = controller.simulatedControlSession
             controller.simulateTouchReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertFalse(controller.isReady)
-            XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
             XCTAssertTrue(controller.isDeviceConnected)
-            XCTAssertNil(controller.touchAssignments.keys)
+            XCTAssertNotNil(controller.noiseControlMode)
+            XCTAssertNotNil(controller.settingErrors[query[0] == 0xFA ? .touchCustomActions : .touchAssignments])
+            switch query[0] {
+            case 0xF0: XCTAssertNil(controller.touchAssignments.keys)
+            case 0xF2: XCTAssertNil(controller.touchAssignments.statuses)
+            case 0xF6: XCTAssertNil(controller.touchAssignments.selectedPresets)
+            default: XCTAssertNil(controller.touchAssignments.customizedActions)
+            }
+            controller.simulateControlLoss()
             deliver(extended(command: 0xFD), session: session, to: controller)
             XCTAssertNil(controller.touchAssignments.customizedActions)
             controller.simulateDeviceConnection(named: "WF-1000XM5")
@@ -881,11 +889,43 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
         }
     }
 
+    func testExpiredTouchSelectionReadRetainsOwnershipAndAcceptsFreshRecovery() async {
+        for notification in [false, true] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            controller.refresh()
+            acknowledgeAll(controller)
+            let session = controller.simulatedControlSession
+            let query: [UInt8] = [0xF6, 3]
+            let reads = payloads(controller).filter { $0 == query }.count
+            controller.simulateTouchReadTimeout(query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertNil(controller.touchAssignments.selectedPresets)
+            XCTAssertFalse(controller.canSetTouchAssignment(key: 0))
+            XCTAssertNotNil(controller.noiseControlMode)
+            if notification { deliver([0xF9, 3, 2, 0x20, 0x35], to: controller) }
+            for _ in 0..<5 { controller.simulateAutomaticRefresh() }
+            acknowledgeAll(controller)
+            deliver([0xF7, 3, 2, 0x35], to: controller)
+            acknowledgeAll(controller)
+            XCTAssertEqual(payloads(controller).filter { $0 == query }.count, reads)
+            deliver([0xF7, 3, 2, 0x35, 0x20], to: controller)
+            XCTAssertEqual(controller.touchAssignments.selectedPresets, notification ? [0x20, 0x35] : nil)
+            acknowledgeAll(controller)
+            XCTAssertEqual(payloads(controller).filter { $0 == query }.count, reads + 1)
+            deliver([0xF7, 3, 2, 0x35, 0x20], to: controller)
+            XCTAssertEqual(controller.touchAssignments.selectedPresets, [0x35, 0x20])
+            XCTAssertTrue(controller.canSetTouchAssignment(key: 0))
+            XCTAssertEqual(controller.simulatedControlSession, session)
+        }
+    }
+
     private func beginLegacyDiscovery() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [1, 0, 2, 0x10]), beginConnection: true)
+        controller.simulateProtocolMessage([1, 0, 2, 0x10], beginConnection: true)
         acknowledgeAll(controller)
         let model = Array("WF-1000XM4".utf8)
         deliver([5, 1, UInt8(model.count)] + model, to: controller)
@@ -912,8 +952,7 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
     private func beginDiscovery() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [1, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeAll(controller)
         deliver([7, 0, 2, 0x6B, 1, 0xF3, 1], to: controller)
         acknowledgeAll(controller)
@@ -941,7 +980,7 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
 
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, session: UInt64? = nil,
                          to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), session: session)
+        controller.simulateProtocolMessage(payload, type: type, session: session)
     }
 
     private func acknowledgeAll(_ controller: SonyHeadphonesController) {

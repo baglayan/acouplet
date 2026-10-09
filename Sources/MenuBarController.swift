@@ -88,8 +88,9 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         let ldac = self.ldac
         #endif
+        let screenHeight = statusItem.button?.window?.screen?.visibleFrame.height
         let controller = NSHostingController(rootView: SelectedDeviceView(devices: devices) { [weak self] in
-            MenuBarView(showSettings: showSettings, closeMenu: { [weak self] in self?.closeMenu() })
+            MenuBarView(showSettings: showSettings, closeMenu: { [weak self] in self?.closeMenu() }, initialScreenHeight: screenHeight)
                 .environmentObject(settings)
                 #if ACOUPLET_SPARKLE
                 .environmentObject(updater)
@@ -177,9 +178,12 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         } else if !model.isEarbuds {
             batteryDescription = headphones.batteries.single.map { String(localized: "Battery \($0.level)%") } ?? ""
         } else {
-            batteryDescription = [(String(localized: "Left"), headphones.batteries.left), (String(localized: "Right"), headphones.batteries.right), (String(localized: "Case"), headphones.batteries.caseBattery)]
+            var parts = [(String(localized: "Left"), headphones.batteries.left), (String(localized: "Right"), headphones.batteries.right)]
                 .compactMap { name, reading in reading.map { String(localized: "\(name) \($0.level)%") } }
-                .joined(separator: ", ")
+            if let reading = headphones.batteries.caseBattery {
+                parts.append(String(localized: "Case \(reading.level)%, \(reading.chargingState.title), last reported"))
+            }
+            batteryDescription = parts.joined(separator: ", ")
         }
         button.setAccessibilityLabel(String(localized: "Acouplet, \(headphones.deviceName), \(headphones.statusText)"))
         button.setAccessibilityValue(model.isEarbuds ? DeviceIcon.connectionValue(

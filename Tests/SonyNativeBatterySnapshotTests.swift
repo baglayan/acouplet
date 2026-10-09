@@ -16,6 +16,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         XCTAssertTrue(report.contains("Left: 73%, not charging"))
         XCTAssertTrue(report.contains("Right: 84%, charging"))
         XCTAssertTrue(report.contains("fresh"))
+        XCTAssertTrue(report.contains("received \(date.ISO8601Format())"))
     }
 
     @MainActor
@@ -39,7 +40,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
     }
 
     @MainActor
-    func testCaseBatteryExpiryClearsChargingWithoutExpiringTheOtherBudOrSession() throws {
+    func testCaseBatteryExpiryPreservesLastReportedReadingWithoutExpiringTheOtherBudOrSession() throws {
         let controller = batteryController(functions: [0x29, 0x2A])
         defer { controller.simulateControlLoss() }
         deliverBattery([0x23, 0x0A, 65, 1, 20], to: controller)
@@ -49,13 +50,14 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         controller.simulateCaseBatteryExpiry(at: observedAt.addingTimeInterval(45))
         XCTAssertEqual(controller.batteries.caseBattery?.isCharging, true)
         controller.simulateCaseBatteryExpiry(at: observedAt.addingTimeInterval(46))
-        XCTAssertNil(controller.batteries.caseBattery)
+        XCTAssertEqual(controller.batteries.caseBattery?.level, 65)
+        XCTAssertEqual(controller.batteries.caseBattery?.chargingState, .charging)
         XCTAssertFalse(controller.lowBatteryReadings.contains { $0.part == .caseBattery })
         XCTAssertEqual(controller.batteries.left?.level, 73)
         XCTAssertEqual(controller.batteries.right?.level, 76)
         XCTAssertTrue(controller.isReady)
         XCTAssertEqual(controller.simulatedControlSession, session)
-        XCTAssertTrue(controller.diagnosticReport.contains("Case charging: Unknown"))
+        XCTAssertTrue(controller.diagnosticReport.contains("Case charging (last reported): Charging"))
         deliverBattery([0x25, 0x0A, 64, 0, 20], to: controller)
         XCTAssertEqual(controller.batteries.caseBattery?.level, 64)
         XCTAssertEqual(controller.batteries.caseBattery?.chargingState, .notCharging)
@@ -100,7 +102,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         XCTAssertEqual(controller.batteries.right?.level, 16)
         XCTAssertEqual(controller.batteries.caseBattery?.level, 17)
         XCTAssertTrue(controller.diagnosticReport.contains("Left charging: Unknown"))
-        XCTAssertTrue(controller.diagnosticReport.contains("Case charging: Unknown"))
+        XCTAssertTrue(controller.diagnosticReport.contains("Case charging (last reported): Unknown"))
     }
 
     @MainActor
@@ -114,17 +116,39 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         XCTAssertEqual(pair.map(\.isCharging), [false, true])
         XCTAssertEqual(pair.first?.observedAt, pair.last?.observedAt)
         XCTAssertNil(controller.lowBatteryNotificationDeviceID)
-        deliverBattery([0x23, 0x0A, 0, 0, 15], to: controller)
+        deliverBattery([0x23, 0x0A, 1, 0, 15], to: controller)
         XCTAssertEqual(Array(controller.lowBatteryReadings.prefix(2)), pair)
         let caseReading = try XCTUnwrap(controller.lowBatteryReadings.last)
         XCTAssertEqual(caseReading.part, .caseBattery)
-        XCTAssertEqual(caseReading.level, 0)
+        XCTAssertEqual(caseReading.level, 1)
         deliverBattery([0x25, 0x09, 0, 0, 255, 0, 20, 20], to: controller)
         XCTAssertEqual(controller.lowBatteryReadings, [caseReading])
         let session = controller.notificationSession
         controller.simulateControlLoss()
         XCTAssertTrue(controller.lowBatteryReadings.isEmpty)
         XCTAssertGreaterThan(controller.notificationSession, session)
+    }
+
+    @MainActor
+    func testCaseZeroClearsLowBatteryObservationWithoutRefreshingTheBuds() {
+        for command: UInt8 in [0x23, 0x25] {
+            let controller = batteryController(functions: [0x29, 0x2A])
+            defer { controller.simulateControlLoss() }
+            deliverBattery([0x23, 0x09, 0x46, 0, 0x40, 0, 0x64, 0x64], to: controller)
+            deliverBattery([0x23, 0x0A, 15, 0, 0x1E], to: controller)
+            XCTAssertTrue(controller.lowBatteryReadings.contains { $0.part == .caseBattery })
+            let pair = controller.lowBatteryReadings.filter { $0.part != .caseBattery }
+            controller.refresh()
+            acknowledgeBatteryCommands(controller)
+            deliverBattery([command, 0x0A, 0, 0, 0x1E], to: controller)
+            XCTAssertNil(controller.batteries.caseBattery)
+            XCTAssertEqual(controller.lowBatteryReadings, pair)
+            XCTAssertEqual(controller.batteries.left?.level, 70)
+            XCTAssertEqual(controller.batteries.right?.level, 64)
+            deliverBattery([0x25, 0x0A, 1, 0, 0x1E], to: controller)
+            XCTAssertEqual(controller.batteries.caseBattery?.level, 1)
+            XCTAssertEqual(controller.lowBatteryReadings.first { $0.part == .caseBattery }?.level, 1)
+        }
     }
 
     @MainActor
@@ -148,13 +172,13 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
     func testSimulatedHeadphonesNeverSupplyNativeBatteryReadings() {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true, simulatedReady: true)
         XCTAssertNil(controller.nativeBatterySnapshot)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x25, 0x09, 73, 0, 76, 1]))
+        controller.simulateProtocolMessage([0x25, 0x09, 73, 0, 76, 1])
         XCTAssertEqual(controller.batteries.left?.level, 73)
         XCTAssertNil(controller.nativeBatterySnapshot)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x25, 0x09, 72, 0, 75, 1, 20, 20]))
+        controller.simulateProtocolMessage([0x25, 0x09, 72, 0, 75, 1, 20, 20])
         XCTAssertEqual(controller.batteries.left?.level, 72)
         XCTAssertNil(controller.nativeBatterySnapshot)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x25, 0x0A, 65, 0, 15]))
+        controller.simulateProtocolMessage([0x25, 0x0A, 65, 0, 15])
         XCTAssertEqual(controller.batteries.caseBattery?.level, 65)
         XCTAssertNil(controller.nativeBatterySnapshot)
         controller.simulateControlLoss()
@@ -171,9 +195,9 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.left?.level, 73)
         XCTAssertEqual(snapshot.right?.isCharging, true)
         XCTAssertNil(snapshot.caseBattery)
-        XCTAssertTrue(batteries.update([0x23, 0x0A, 0, 0]))
+        XCTAssertTrue(batteries.update([0x23, 0x0A, 1, 0]))
         snapshot.update(batteries, type: 0x0A, observedAt: firstDate.addingTimeInterval(30))
-        XCTAssertEqual(snapshot.caseBattery?.level, 0)
+        XCTAssertEqual(snapshot.caseBattery?.level, 1)
         XCTAssertEqual(snapshot.freshReadings(at: firstDate.addingTimeInterval(46)).keys.sorted(), ["Case"])
         XCTAssertTrue(batteries.update([0x25, 0x09, 255, 0, 76, 0]))
         snapshot.update(batteries, type: 0x09, observedAt: firstDate.addingTimeInterval(60))
@@ -228,7 +252,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
             var snapshot = SonyNativeBatterySnapshot(identifier: UUID(), name: "WF-1000XM5")
             XCTAssertTrue(batteries.update([0x25, 0x09, 73, 0, 76, 0, 20, 20]))
             snapshot.update(batteries, type: 0x09, observedAt: firstDate)
-            XCTAssertTrue(batteries.update([0x25, 0x0A, 0, 0, 15]))
+            XCTAssertTrue(batteries.update([0x25, 0x0A, 1, 0, 15]))
             snapshot.update(batteries, type: 0x0A, observedAt: firstDate)
             let caseReading = snapshot.caseBattery
             let rightReading = snapshot.right
@@ -252,7 +276,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
             snapshot.invalidateUnavailableBuds(leftConnected: true, rightConnected: true)
             XCTAssertNil(snapshot.left)
             XCTAssertNil(snapshot.right)
-            XCTAssertEqual(snapshot.caseBattery?.level, 0)
+            XCTAssertEqual(snapshot.caseBattery?.level, 1)
             XCTAssertEqual(snapshot.caseBattery?.observedAt, firstDate)
         }
     }
@@ -377,7 +401,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         for _ in 0..<5 { await Task.yield() }
         let reads = batteryReadCount(controller, inquiry: 0x09)
         for _ in 0..<3 {
-            controller.refresh()
+            for _ in 0..<5 { controller.simulateAutomaticRefresh() }
             acknowledgeBatteryCommands(controller)
         }
         XCTAssertTrue(controller.isReady)
@@ -388,7 +412,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         deliverBattery([0x23, 0x09, 74, 0, 77, 0], to: controller)
         XCTAssertEqual(controller.batteries.left?.level, 73)
         XCTAssertEqual(controller.lastSyncDate, reportedAt)
-        controller.refresh()
+        for _ in 0..<5 { controller.simulateAutomaticRefresh() }
         acknowledgeBatteryCommands(controller)
         XCTAssertEqual(batteryReadCount(controller, inquiry: 0x09), reads + 1)
         deliverBattery([0x23, 0x09, 72, 0, 75, 0], to: controller)
@@ -396,7 +420,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         controller.simulateBatteryReadTimeout([0x22, 0x09])
         for _ in 0..<5 { await Task.yield() }
         XCTAssertTrue(controller.isReady)
-        controller.refresh()
+        for _ in 0..<5 { controller.simulateAutomaticRefresh() }
         acknowledgeBatteryCommands(controller)
         controller.simulateBatteryReadTimeout([0x22, 0x09])
         controller.simulateControlLoss()
@@ -410,8 +434,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
     private func batteryController(functions: [UInt8], acknowledgeReads: Bool = true) -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [0x01, 0, 0x03, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([0x01, 0, 0x03, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeBatteryCommands(controller)
         let supported: [UInt8] = [0x6B] + functions
         deliverBattery([0x07, 0, UInt8(supported.count)] + supported.flatMap { [$0, 0] }, to: controller)
@@ -440,7 +463,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
 
     @MainActor
     private func deliverBattery(_ payload: [UInt8], type: UInt8 = 0x0C, to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload, type: type)
     }
 }
 #endif

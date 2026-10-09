@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <IOBluetooth/IOBluetooth.h>
+#include "../SonyClassicConnection.h"
+#include "LDACParentLifetime.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/event.h>
@@ -17,6 +19,10 @@
 #include "ldacBT.h"
 #include "ldacBT_ex.h"
 #include "AdaptiveLDAC/LDACAdaptivePolicy.h"
+
+#ifndef ACOUPLET_LDAC_PROBE_ONLY
+#define ACOUPLET_LDAC_PROBE_ONLY 1
+#endif
 
 @interface CBClassicPeer : CBPeer
 @property(copy) void (^connectL2CAPCallback)(CBL2CAPChannel *, NSInteger);
@@ -36,7 +42,7 @@
 @end
 
 static void RunLoopFor(NSTimeInterval seconds) {
-    [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, false);
 }
 
 static double MonotonicTime(void) {
@@ -85,6 +91,14 @@ static BOOL ParseUnsigned(NSString *text, uint32_t *value) {
     if (errno || *end || parsed > UINT32_MAX) return NO;
     *value = (uint32_t)parsed;
     return YES;
+}
+
+static BOOL ParseDurationSeconds(NSString *text, uint32_t *value) {
+#if ACOUPLET_LDAC_PROBE_ONLY
+    return ParseUnsigned(text, value) && *value <= 60;
+#else
+    return ParseUnsigned(text, value) && *value == 0;
+#endif
 }
 
 static BOOL ParseGain(NSString *text, double *value) {
@@ -317,6 +331,8 @@ static NSUInteger PCMSkipBytes(NSUInteger buffered, NSUInteger reserve, uint64_t
 }
 
 static BOOL ContinuousPCMChecks(void);
+static BOOL PreparedPCMChecks(void);
+static BOOL PreparedPCMStopChecks(void);
 
 static BOOL ConvertRampedPCM(const uint8_t *bytes, NSUInteger frames, double *gain, double target, uint32_t *remaining, float *output) {
     for (NSUInteger frame = 0; frame < frames; frame++) {
@@ -436,7 +452,7 @@ static BOOL SelfTest(void) {
     float input[256] = {0};
     float output[256] = {0};
     input[0] = 1; input[1] = -1;
-    BOOL passed = RecoveryChecks() && ContinuousPCMChecks() && ConvertPCM((const uint8_t *)input, 0.5, output);
+    BOOL passed = RecoveryChecks() && ContinuousPCMChecks() && PreparedPCMChecks() && PreparedPCMStopChecks() && ConvertPCM((const uint8_t *)input, 0.5, output);
     passed &= output[0] == 0.5 && output[1] == -0.5 && output[255] == 0;
     const float invalid[] = {NAN, INFINITY, -INFINITY};
     for (NSUInteger sample = 0; sample < 3; sample++) {
@@ -476,6 +492,12 @@ static BOOL SelfTest(void) {
     for (NSUInteger block = 1; block < 8; block++) passed &= ConvertRampedPCM((const uint8_t *)input, 128, &gain, 0.5, &remaining, output);
     passed &= remaining == 0 && gain == 0.5 && output[0] > 0.625 && output[0] < 1 && output[255] == -0.625;
     passed &= ConvertRampedPCM((const uint8_t *)input, 128, &gain, 0.5, &remaining, output) && output[0] == 0.625 && output[255] == -0.625;
+    uint32_t seconds = 0;
+    passed &= ParseDurationSeconds(@"0", &seconds) && seconds == 0 &&
+        !ParseDurationSeconds(@"61", &seconds) && !ParseDurationSeconds(@"0x", &seconds) &&
+        !ParseDurationSeconds(@"4294967296", &seconds);
+    passed &= ParseDurationSeconds(@"1", &seconds) == ACOUPLET_LDAC_PROBE_ONLY &&
+        ParseDurationSeconds(@"60", &seconds) == ACOUPLET_LDAC_PROBE_ONLY;
     passed &= ParseGain(@"0", &gain) && gain == 0 && !ParseGain(@"nan", &gain) && !ParseGain(@"1.01", &gain);
     passed &= [NormalizeAddress("02:00:00:00:00:ab") isEqualToString:@"02-00-00-00-00-AB"] && !NormalizeAddress("02-00-00-00-00-G6");
     return MatrixChecks() && passed;
@@ -497,6 +519,7 @@ static BOOL SelfTest(void) {
 @property uint64_t pcmDiscardedBytes;
 @property uint64_t pcmSkippedBytes;
 @property BOOL pcmActive;
+@property BOOL pcmStarted;
 @property BOOL pcmContinuous;
 @property BOOL pcmCanSkip;
 @property NSUInteger pcmReserveBytes;
@@ -570,6 +593,12 @@ static BOOL SelfTest(void) {
     if (!self.pcmActive || self.pcmEnded || (self.failed && !self.pcmComplete)) return;
     while (YES) {
         uint8_t discarded[4096];
+        if (!self.pcmStarted && !self.pcmComplete) {
+            NSUInteger bytes = PCMSkipBytes(self.pcmBytes, self.profile.prefillBytes, UINT64_MAX);
+            self.pcmHead = (self.pcmHead + bytes) % self.profile.capacityBytes;
+            self.pcmBytes -= bytes;
+            self.pcmDiscardedBytes += bytes;
+        }
         NSUInteger available = self.profile.capacityBytes - self.pcmBytes;
         if (!available && !self.pcmComplete && self.pcmContinuous && self.pcmCanSkip) {
             [self discardPCMFrames:UINT64_MAX];
@@ -680,6 +709,7 @@ static BOOL ContinuousPCMChecks(void) {
     probe.pcmDiscardedBytes = 0;
     probe.pcmContinuous = YES;
     probe.pcmActive = YES;
+    probe.pcmStarted = YES;
     uint8_t input[PCMBlockBytes + 7] = {0};
     passed &= write(descriptors[1], input, sizeof(input)) == sizeof(input);
     [probe pollPCM];
@@ -690,6 +720,51 @@ static BOOL ContinuousPCMChecks(void) {
     close(descriptors[1]);
     [probe pollPCM];
     passed &= probe.pcmEnded && !probe.failed;
+    return passed;
+}
+
+static BOOL PreparedPCMChecks(void) {
+    BOOL passed = YES;
+    const uint32_t rates[] = {44100, 48000, 88200, 96000};
+    for (NSUInteger index = 0; index < sizeof(rates) / sizeof(rates[0]); index++) {
+        LDACProfile profile;
+        if (!SelectProfile(rates[index], @"high", &profile)) return NO;
+        int descriptors[2];
+        if (pipe(descriptors) != 0) return NO;
+        DirectMediaProbe *probe = [DirectMediaProbe new];
+        probe.pcmFD = descriptors[0];
+        probe.profile = profile;
+        probe.pcmRing = calloc(1, profile.capacityBytes);
+        if (!probe.pcmRing || fcntl(probe.pcmFD, F_SETFL, O_NONBLOCK) != 0) {
+            close(descriptors[1]);
+            return NO;
+        }
+        probe.pcmActive = YES;
+        NSUInteger produced = 0;
+        uint8_t input[PCMBlockBytes + 7];
+        while (produced < profile.capacityBytes * 3 && !probe.failed) {
+            for (NSUInteger byte = 0; byte < sizeof(input); byte++) input[byte] = (uint8_t)((produced + byte) % 251);
+            if (write(descriptors[1], input, sizeof(input)) != sizeof(input)) { passed = NO; break; }
+            produced += sizeof(input);
+            [probe pollPCM];
+        }
+        passed &= !probe.failed && probe.pcmReady && probe.pcmReadBytes == produced && probe.pcmSkippedBytes == 0;
+        passed &= probe.pcmBytes >= profile.prefillBytes && probe.pcmBytes < profile.prefillBytes + PCMBlockBytes;
+        passed &= probe.pcmBytes + probe.pcmDiscardedBytes == produced && probe.pcmHead % PCMBlockBytes == 0;
+        for (NSUInteger byte = 0; byte < probe.pcmBytes; byte++) {
+            passed &= probe.pcmRing[(probe.pcmHead + byte) % profile.capacityBytes] == (uint8_t)((produced - probe.pcmBytes + byte) % 251);
+        }
+        NSUInteger retained = probe.pcmBytes;
+        uint64_t discarded = probe.pcmDiscardedBytes;
+        probe.pcmStarted = YES;
+        passed &= write(descriptors[1], input, sizeof(input)) == sizeof(input);
+        [probe pollPCM];
+        passed &= !probe.failed && probe.pcmBytes == retained + sizeof(input) && probe.pcmDiscardedBytes == discarded;
+        probe.pcmComplete = YES;
+        close(descriptors[1]);
+        [probe pollPCM];
+        passed &= probe.pcmEnded && !probe.failed;
+    }
     return passed;
 }
 
@@ -737,11 +812,53 @@ static NSString *AvailableCommand(DirectMediaProbe *probe) {
 static NSString *ReadCommand(DirectMediaProbe *probe) {
     while (YES) {
         NSString *command = AvailableCommand(probe);
+        if ([command isEqualToString:@"stop"] && !probe.pcmStarted) {
+            probe.stopRequested = YES;
+            probe.pcmComplete = YES;
+            printf("PCM_STOP_READY started=0\n");
+        }
         if (command || probe.stdinEnded) return command;
         [probe pollInput];
         [probe pollPCM];
         RunLoopFor(0.001);
     }
+}
+
+static BOOL PreparedPCMStopChecks(void) {
+    LDACProfile profile;
+    if (!SelectProfile(96000, @"high", &profile)) return NO;
+    BOOL passed = YES;
+    for (NSUInteger stopped = 0; stopped < 2; stopped++) {
+        int pcm[2], control[2];
+        if (pipe(pcm) != 0) return NO;
+        if (pipe(control) != 0) { close(pcm[0]); close(pcm[1]); return NO; }
+        DirectMediaProbe *probe = [DirectMediaProbe new];
+        probe.pcmFD = pcm[0];
+        probe.profile = profile;
+        probe.pcmRing = calloc(1, profile.capacityBytes);
+        probe.controlPending = [NSMutableData data];
+        int savedInput = dup(STDIN_FILENO);
+        if (!probe.pcmRing || savedInput < 0 || fcntl(probe.pcmFD, F_SETFL, O_NONBLOCK) != 0 || dup2(control[0], STDIN_FILENO) < 0) {
+            if (savedInput >= 0) close(savedInput);
+            close(pcm[1]); close(control[0]); close(control[1]);
+            return NO;
+        }
+        probe.pcmActive = YES;
+        uint8_t input[PCMBlockBytes + 7] = {0};
+        passed &= write(pcm[1], input, sizeof(input)) == sizeof(input);
+        [probe pollPCM];
+        if (stopped) {
+            passed &= write(control[1], "stop\n", 5) == 5;
+            passed &= [ReadCommand(probe) isEqualToString:@"stop"];
+            passed &= probe.stopRequested && probe.pcmComplete && !probe.pcmStarted;
+        }
+        close(pcm[1]);
+        [probe pollPCM];
+        passed &= probe.pcmEnded && probe.failed == !stopped;
+        passed &= dup2(savedInput, STDIN_FILENO) >= 0;
+        close(savedInput); close(control[0]); close(control[1]);
+    }
+    return passed;
 }
 
 static void PollLiveControls(DirectMediaProbe *probe) {
@@ -771,7 +888,8 @@ static void PollLiveControls(DirectMediaProbe *probe) {
 }
 
 static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain, uint32_t seconds) {
-    id activity = [NSProcessInfo.processInfo beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"LDAC streaming experiment"];
+    probe.pcmStarted = YES;
+    id activity = [NSProcessInfo.processInfo beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"LDAC streaming"];
     int qos = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     printf("STREAM_ACTIVITY qosStatus=%d\n", qos);
     LDACProfile profile = probe.profile;
@@ -794,8 +912,13 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
     NSUInteger sentPackets = 0, drainedPackets = 0, sentBytes = 0;
     uint64_t sentSamples = 0, drainedSamples = 0, sourceSamples = 0, generatedSamples = 0;
     uint64_t sentRTPSamples = 0;
+#if ACOUPLET_LDAC_PROBE_ONLY
     uint64_t targetSamples = (uint64_t)seconds * profile.sampleRate;
-    BOOL continuous = seconds == 0;
+    const BOOL continuous = seconds == 0;
+#else
+    uint64_t targetSamples = 0;
+    const BOOL continuous = YES;
+#endif
     probe.pcmContinuous = continuous;
     probe.pcmReserveBytes = MIN(profile.capacityBytes, MAX(profile.prefillBytes, (probe.pcmBytes / PCMBlockBytes) * PCMBlockBytes));
     probe.pcmCanSkip = YES;
@@ -854,7 +977,9 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
             if (continuous && !probe.stopRequested && !finishing) [probe checkDegradation];
             if (probe.closed || probe.failed || probe.inputEnded) break;
             if (probe.stopRequested) { finishing = YES; targetSamples = sourceSamples; }
+#if ACOUPLET_LDAC_PROBE_ONLY
             else if (!continuous && sourceSamples == targetSamples) finishing = YES;
+#endif
             if (finishing && !sourceSamples) { flushed = YES; break; }
             if (sourceSamples > UINT64_MAX - 2048 || generatedSamples > UINT64_MAX - 2048 ||
                 probe.pcmSkippedBytes / 8 > UINT64_MAX - generatedSamples - 2048 || sentPackets == NSUIntegerMax) {
@@ -1026,11 +1151,13 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
             if (!probe.pcmSkippedBytes && RecordRecovery(&recovery, now, lateness))
                 printf("RECOVERY packet=%lu late=%.6f elapsed=%.6f sinceFirstBreach=%.6f strictPass=0\n",
                        sentPackets, lateness, now - started, now - recovery.firstBreach);
+#if ACOUPLET_LDAC_PROBE_ONLY
             if ((!continuous && lateness >= 0.25) || now >= deadline) {
                 limitStopped = YES;
                 printf("PACING_LIMIT packet=%lu late=%.6f elapsed=%.6f limit=0.250\n", sentPackets, lateness, now - started);
                 break;
             }
+#endif
             double beforeSend = MonotonicTime();
             ssize_t sent = send(fd, packet, packetLength, 0);
             double afterSend = MonotonicTime();
@@ -1203,7 +1330,11 @@ int main(int argc, const char *argv[]) {
         LDACProfile profile;
         argumentsValid = argumentsValid && pcmSeen && addressSeen && SelectProfile(sampleRate, quality, &profile);
         if (!argumentsValid) {
+#if ACOUPLET_LDAC_PROBE_ONLY
             fprintf(stderr, "Usage: %s --media --pcm-fd FD --address ADDRESS [--sample-rate 44100|48000|88200|96000] [--quality auto|low|mid|high]; stdin: open, start live GAIN SECONDS (0=continuous, 1..60), gain VALUE, stop, close, transport-closed\n"
+#else
+            fprintf(stderr, "Usage: %s --media --pcm-fd FD --address ADDRESS [--sample-rate 44100|48000|88200|96000] [--quality auto|low|mid|high]; stdin: open, start live GAIN 0, gain VALUE, stop, close, transport-closed\n"
+#endif
                     "       %s --self-test\n", argv[0], argv[0]);
             return 2;
         }
@@ -1214,11 +1345,12 @@ int main(int argc, const char *argv[]) {
             fprintf(stderr, "PCM_FAILED reason=invalid-read-pipe fd=%u errno=%d\n", pcmDescriptor, errno);
             return 2;
         }
+        if (!LDACWatchParent(20)) return 3;
         setbuf(stdout, NULL);
         IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
         printf("BEFORE time=%.6f address=%s paired=%d connected=%d\n", NSDate.date.timeIntervalSince1970,
-               device.addressString.UTF8String, device.isPaired, device.isConnected);
-        if (!device || !device.isPaired || !device.isConnected) {
+               device.addressString.UTF8String, device.isPaired, SonyClassicIsConnected(device));
+        if (!device || !device.isPaired || !SonyClassicIsConnected(device)) {
             fprintf(stderr, "The exact Sony target must already be paired and connected; launch only after signaling Open acceptance\n");
             return 3;
         }
@@ -1268,8 +1400,8 @@ int main(int argc, const char *argv[]) {
         };
         printf("OPEN_BEGIN time=%.6f PSM=0019 role=media\n", NSDate.date.timeIntervalSince1970);
         [peer openL2CAPChannel:0x0019];
-        NSDate *openDeadline = [NSDate dateWithTimeIntervalSinceNow:5];
-        while (!openDone && !probe.stdinEnded && !probe.closeRequested && openDeadline.timeIntervalSinceNow > 0) {
+        double openDeadline = MonotonicTime() + 5;
+        while (!openDone && !probe.stdinEnded && !probe.closeRequested && MonotonicTime() < openDeadline) {
             NSString *command = AvailableCommand(probe);
             if ([command isEqualToString:@"close"] || [command isEqualToString:@"stop"]) probe.closeRequested = YES;
             else if (command) { printf("COMMAND_REJECTED phase=open\n"); probe.failed = YES; }
@@ -1336,8 +1468,8 @@ int main(int argc, const char *argv[]) {
                     double gain = 0;
                     uint32_t seconds = 0;
                     NSArray<NSString *> *fields = [command componentsSeparatedByString:@" "];
-                    BOOL valid = fields.count == 4 && ParseGain(fields[2], &gain) && ParseUnsigned(fields[3], &seconds) &&
-                        seconds <= 60 && probe.pcmReady;
+                    BOOL valid = fields.count == 4 && ParseGain(fields[2], &gain) && ParseDurationSeconds(fields[3], &seconds) &&
+                        probe.pcmReady;
                     feedSucceeded = valid && FeedLive(probe, owned, gain, seconds);
                     if (!feedSucceeded) {
                         result = 5;
@@ -1399,7 +1531,7 @@ int main(int argc, const char *argv[]) {
         if (probe.failed) result = 5;
         printf("AFTER time=%.6f result=%d CID=%04X closed=%d received=%lu paired=%d connected=%d\n",
                NSDate.date.timeIntervalSince1970, result, owned.cid, probe.closed, probe.received,
-               device.isPaired, device.isConnected);
+               device.isPaired, SonyClassicIsConnected(device));
         return result;
     }
 }

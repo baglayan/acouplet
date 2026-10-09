@@ -125,6 +125,25 @@ final class RFCOMMChannelIOTests: XCTestCase {
     }
 
     @MainActor
+    func testCloseReleasesChannelOffMainBeforeCompletingWhileIORemainsRetained() async {
+        let released = expectation(description: "Channel released")
+        let closed = expectation(description: "Close completed")
+        var channel: TestChannel? = TestChannel(onDeinit: {
+            XCTAssertFalse(Thread.isMainThread)
+            released.fulfill()
+        })
+        weak var retainedChannel = channel
+        let io = RFCOMMChannelIO(channel: channel!)
+        channel = nil
+        io.close {
+            XCTAssertNil(retainedChannel)
+            closed.fulfill()
+        }
+        await fulfillment(of: [released, closed], timeout: 2)
+        withExtendedLifetime(io) {}
+    }
+
+    @MainActor
     func testQueuedStopCannotConfirmSilenceBeforeNativeWriteAdmission() async throws {
         let started = expectation(description: "Preceding write started")
         let completed = expectation(description: "Writes completed")
@@ -167,38 +186,44 @@ final class RFCOMMChannelIOTests: XCTestCase {
         XCTAssertFalse(session.mayBeRinging)
     }
 
-    final class TestChannel: IOBluetoothRFCOMMChannel, @unchecked Sendable {
+    final class TestChannel: FastPairChannel, @unchecked Sendable {
         private let lock = NSLock()
         private var recordedWrites: [Data] = []
         private var recordedCloseCount = 0
         private let onFirstWrite: @Sendable () -> Void
         private let onClose: @Sendable () -> Void
+        private let onDeinit: @Sendable () -> Void
 
         var writes: [Data] { lock.withLock { recordedWrites } }
         var closeCount: Int { lock.withLock { recordedCloseCount } }
 
-        init(onFirstWrite: @escaping @Sendable () -> Void = {}, onClose: @escaping @Sendable () -> Void = {}) {
+        init(onFirstWrite: @escaping @Sendable () -> Void = {}, onClose: @escaping @Sendable () -> Void = {},
+             onDeinit: @escaping @Sendable () -> Void = {}) {
             self.onFirstWrite = onFirstWrite
             self.onClose = onClose
-            super.init()
+            self.onDeinit = onDeinit
         }
 
-        override func isOpen() -> Bool { true }
+        deinit { onDeinit() }
 
-        override func writeSync(_ data: UnsafeMutableRawPointer!, length: UInt16) -> IOReturn {
+        func isOpen() -> Bool { true }
+        func isTransmissionPaused() -> Bool { false }
+        func getMTU() -> BluetoothRFCOMMMTU { 127 }
+
+        func writeSync(_ data: UnsafeMutableRawPointer!, length: UInt16) -> IOReturn {
             XCTAssertFalse(Thread.isMainThread)
             if lock.withLock({ recordedWrites.isEmpty }) { onFirstWrite() }
             lock.withLock { recordedWrites.append(Data(bytes: data, count: Int(length))) }
             return kIOReturnSuccess
         }
 
-        override func setDelegate(_ delegate: Any!) -> IOReturn {
+        func setDelegate(_ delegate: Any!) -> IOReturn {
             XCTAssertFalse(Thread.isMainThread)
             XCTAssertNil(delegate)
             return kIOReturnSuccess
         }
 
-        override func close() -> IOReturn {
+        func close() -> IOReturn {
             XCTAssertFalse(Thread.isMainThread)
             lock.withLock { recordedCloseCount += 1 }
             onClose()

@@ -50,7 +50,7 @@ final class SonyFirmwareUpdateControllerTests: XCTestCase {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
         let protocolReply: [UInt8] = legacy ? [1, 0, 2, 0x10] : [1, 0, 3, 0, 0x30, 0x18, 0, 0]
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: protocolReply), beginConnection: true)
+        controller.simulateProtocolMessage(protocolReply, beginConnection: true)
         acknowledgeAll(controller)
         deliver([0x05, 0x01] + field(legacy ? "WH-1000XM4" : "WF-1000XM5"), to: controller)
         deliver(legacy ? [7, 0, 2, 0x62, 0x30] : [7, 0, 2, 0x6B, 1, 0x32, 1], to: controller)
@@ -68,7 +68,7 @@ final class SonyFirmwareUpdateControllerTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload, type: type)
     }
 
     @MainActor

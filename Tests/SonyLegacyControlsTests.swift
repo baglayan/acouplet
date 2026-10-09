@@ -372,17 +372,37 @@ final class SonyLegacyControllerTests: XCTestCase {
     private let capability: [UInt8] = [0x61, 2, 2, 3, 1, 2, 0, 20, 1, 15]
     private let ambient: [UInt8] = [0x67, 2, 1, 2, 0, 1, 0, 12]
 
-    func testLegacyBudBatteryCannotRestoreExpiredCaseCharging() throws {
+    func testNoiseShortcutTogglesFromPendingAndQueuedLegacyTargets() throws {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        controller.toggleNoiseControl()
+        let anc = try XCTUnwrap(controller.pendingChanges[.noiseControl])
+        XCTAssertEqual(anc, [2, 1, 2, 2, 1, 0, 0])
+        controller.toggleNoiseControl()
+        acknowledgeAll(controller)
+        deliver([0x69] + anc, to: controller)
+        let ambient = try XCTUnwrap(controller.pendingChanges[.noiseControl])
+        XCTAssertEqual(ambient, [2, 1, 2, 0, 1, 0, 12])
+        controller.toggleNoiseControl()
+        controller.toggleNoiseControl()
+        acknowledgeAll(controller)
+        deliver([0x69] + ambient, to: controller)
+        XCTAssertEqual(controller.pendingChanges[.noiseControl], ambient)
+    }
+
+    func testLegacyBudBatteryDoesNotRefreshLastReportedCaseReading() throws {
         let controller = makeController()
         defer { controller.simulateControlLoss() }
         deliver([0x13, 2, 65, 1], to: controller)
         let observedAt = try XCTUnwrap(controller.lowBatteryReadings.first { $0.part == .caseBattery }?.observedAt)
         controller.simulateCaseBatteryExpiry(at: observedAt.addingTimeInterval(46))
-        XCTAssertNil(controller.batteries.caseBattery)
+        XCTAssertEqual(controller.batteries.caseBattery?.level, 65)
+        XCTAssertFalse(controller.lowBatteryReadings.contains { $0.part == .caseBattery })
         deliver([0x13, 1, 73, 0, 76, 0], to: controller)
         XCTAssertEqual(controller.batteries.left?.level, 73)
         XCTAssertEqual(controller.batteries.right?.level, 76)
-        XCTAssertNil(controller.batteries.caseBattery)
+        XCTAssertEqual(controller.batteries.caseBattery?.level, 65)
+        XCTAssertFalse(controller.lowBatteryReadings.contains { $0.part == .caseBattery })
         deliver([0x13, 2, 64, 0], to: controller)
         XCTAssertEqual(controller.batteries.caseBattery?.level, 64)
         XCTAssertEqual(controller.batteries.caseBattery?.chargingState, .notCharging)
@@ -673,7 +693,7 @@ final class SonyLegacyControllerTests: XCTestCase {
             for _ in 0..<4 { await Task.yield() }
             XCTAssertGreaterThan(controller.simulatedControlSession, session)
             XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect the headphones to try again."))
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: capability), session: session)
+            controller.simulateProtocolMessage(capability, session: session)
             XCTAssertNil(controller.legacyControls)
         }
     }
@@ -694,7 +714,7 @@ final class SonyLegacyControllerTests: XCTestCase {
         XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect the headphones to try again."))
         controller.simulateDeviceConnection(named: "WF-1000XM4", galleryModel: .wfXM4)
         controller.simulateNoiseReadTimeout([0x66, 2])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: ambient), session: session)
+        controller.simulateProtocolMessage(ambient, session: session)
         for _ in 0..<4 { await Task.yield() }
         XCTAssertTrue(controller.isReady)
     }
@@ -705,14 +725,14 @@ final class SonyLegacyControllerTests: XCTestCase {
         let payload = try XCTUnwrap(controller.simulatedPendingFrame?.payload)
         let session = controller.simulatedControlSession
         controller.simulateControlLoss()
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x69] + payload.dropFirst()), session: session)
+        controller.simulateProtocolMessage([0x69] + payload.dropFirst(), session: session)
         XCTAssertNil(controller.legacyControls)
         XCTAssertNil(controller.protocolInformation)
         XCTAssertNil(controller.deviceInformation.modelName)
         XCTAssertNil(controller.noiseControlMode)
         XCTAssertTrue(controller.pendingChanges.isEmpty)
         XCTAssertNil(controller.batteries.left)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x01, 0, 2, 0x10]), beginConnection: true)
+        controller.simulateProtocolMessage([0x01, 0, 2, 0x10], beginConnection: true)
         acknowledgeAll(controller)
         deliver(capability, to: controller)
         deliver([0x63, 2, 0], to: controller)
@@ -722,20 +742,41 @@ final class SonyLegacyControllerTests: XCTestCase {
         controller.simulateControlLoss()
     }
 
-    func testUnsupportedLegacyNoiseCapabilityStopsWithoutRetrying() {
+    func testLegacyLevelAdjustmentCapabilityKeepsOtherControlsReadyWithoutNoisePolling() {
         let controller = beginController()
-        deliver([0x07, 0, 1, 0x62], to: controller)
+        defer { controller.simulateControlLoss() }
+        deliver([0x07, 0, 2, 0x62, 0x15], to: controller)
         acknowledgeAll(controller)
         deliver([0x61, 2, 1, 20, 1, 1, 0, 20], to: controller)
-        XCTAssertFalse(controller.isReady)
-        XCTAssertTrue(controller.statusText.contains("not supported yet"))
+        acknowledgeAll(controller)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        XCTAssertTrue(controller.availableNoiseModes.isEmpty)
         XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
         XCTAssertNil(controller.retrySecondsRemaining)
         XCTAssertEqual(controller.protocolInformation?.generation, .v1)
-        let sent = controller.simulatedTransmittedFrames
-        controller.simulateAutomaticRefresh()
-        XCTAssertEqual(controller.simulatedTransmittedFrames, sent)
-        controller.simulateControlLoss()
+        deliver([0x11, 1, 80, 0, 82, 0], to: controller)
+        XCTAssertEqual(controller.batteries.left?.level, 80)
+        let noiseReads = controller.simulatedTransmittedFrames.filter { [0x60, 0x62, 0x66].contains($0.payload.first) }
+        for _ in 0..<10 {
+            controller.simulateAutomaticRefresh()
+            acknowledgeAll(controller)
+        }
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { [0x60, 0x62, 0x66].contains($0.payload.first) }, noiseReads)
+        for query: [UInt8] in [[0x60, 2], [0x62, 2], [0x66, 2]] {
+            XCTAssertNil(controller.simulatedNoiseReadTimeoutID(query))
+        }
+    }
+
+    func testUnknownLegacyNoiseCapabilityStillRejectsTheUnsupportedProtocol() {
+        let controller = beginController()
+        defer { controller.simulateControlLoss() }
+        deliver([0x07, 0, 1, 0x62], to: controller)
+        acknowledgeAll(controller)
+        deliver([0x61, 2, 0xFF, 20, 1, 1, 0, 20], to: controller)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.statusText.contains("not supported yet"))
+        XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
     }
 
     func testLegacyDSEEWaitsForCapabilityAvailabilityAndCurrentTypedValue() {
@@ -846,19 +887,37 @@ final class SonyLegacyControllerTests: XCTestCase {
         XCTAssertTrue(controller.canSetDSEE)
     }
 
-    func testAcknowledgedLegacyDSEEReadsHaveBoundedLifetime() async {
-        for query: [UInt8] in [[0xE0, 2], [0xE2, 2], [0xE6, 2]] {
+    func testAcknowledgedLegacyDSEEReadExpiryIsIsolatedAndLateRepliesRequireAFreshRead() async {
+        let replies: [[UInt8]] = [[0xE1, 2, 0, 0], [0xE3, 2, 0], [0xE7, 2, 0, 1]]
+        for reply in replies {
+            let query: [UInt8] = [reply[0] - 1, 2]
             let controller = makeController(supportsDSEE: true)
             defer { controller.simulateControlLoss() }
+            for other in replies where other != reply { deliver(other, to: controller) }
             let session = controller.simulatedControlSession
             XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == query })
             controller.simulateLegacyDSEEReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertFalse(controller.isReady)
-            XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            XCTAssertEqual(controller.linkState, .failed("DSEE settings were not received. Reconnect the headphones to try again."))
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 2, 0, 1]), session: session)
-            XCTAssertNil(controller.dseeMode)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertTrue(controller.canChangeNoiseControl)
+            XCTAssertFalse(controller.canSetDSEE)
+            XCTAssertEqual(controller.settingErrors[.dsee], "DSEE settings are unavailable.")
+            let reads = controller.simulatedTransmittedFrames.filter { $0.payload == query }.count
+            controller.simulateAutomaticRefresh()
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, reads)
+            deliver(Array(reply.dropLast()), to: controller)
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, reads)
+            XCTAssertFalse(controller.canSetDSEE)
+            deliver(reply, to: controller)
+            XCTAssertFalse(controller.canSetDSEE)
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, reads + 1)
+            deliver(reply, to: controller)
+            XCTAssertTrue(controller.canSetDSEE)
+            XCTAssertNil(controller.settingErrors[.dsee])
         }
     }
 
@@ -872,25 +931,88 @@ final class SonyLegacyControllerTests: XCTestCase {
         acknowledgeAll(controller)
         controller.simulateLegacyDSEEReadTimeout([0xE6, 2])
         for _ in 0..<4 { await Task.yield() }
-        XCTAssertFalse(controller.isReady)
-        XCTAssertEqual(controller.linkState, .failed("DSEE settings were not received. Reconnect the headphones to try again."))
+        XCTAssertTrue(controller.isReady)
+        XCTAssertNil(controller.dseeMode)
+        XCTAssertFalse(controller.canSetDSEE)
         controller.simulateDeviceConnection(named: "WF-1000XM4", galleryModel: .wfXM4)
         controller.simulateLegacyDSEEReadTimeout([0xE6, 2])
         for _ in 0..<4 { await Task.yield() }
         XCTAssertTrue(controller.isReady)
     }
 
+    func testExpiredLegacyDSEEPollCannotConfirmALaterWrite() async {
+        let controller = makeDSEEController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        controller.setDSEE(.automatic)
+        acknowledgeAll(controller)
+        let session = controller.simulatedControlSession
+        controller.simulateLegacyDSEEReadTimeout([0xE6, 2])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.dseeMode, .off)
+        XCTAssertNotNil(controller.pendingChanges[.dsee])
+        controller.simulateSettingTimeout(.dsee)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertFalse(controller.canSetDSEE)
+        XCTAssertNotNil(controller.settingErrors[.dsee])
+        deliver([0xE7, 2, 0, 1], to: controller)
+        XCTAssertEqual(controller.dseeMode, .off)
+        XCTAssertNotNil(controller.settingErrors[.dsee])
+        acknowledgeAll(controller)
+        deliver([0xE7, 2, 0, 1], to: controller)
+        XCTAssertEqual(controller.dseeMode, .automatic)
+        XCTAssertTrue(controller.canSetDSEE)
+        XCTAssertNil(controller.settingErrors[.dsee])
+    }
+
+    func testLegacyDSEENotificationsRecoverExpiredReadsWithoutLateReturnsRewindingThem() async {
+        let cases: [(query: [UInt8], notification: [UInt8], late: [UInt8])] = [
+            ([0xE2, 2], [0xE5, 2, 0], [0xE3, 2, 1]),
+            ([0xE6, 2], [0xE9, 2, 0, 1], [0xE7, 2, 0, 0]),
+        ]
+        for testCase in cases {
+            for notificationFirst in [false, true] {
+                let controller = makeDSEEController()
+                defer { controller.simulateControlLoss() }
+                controller.refresh()
+                acknowledgeAll(controller)
+                if notificationFirst { deliver(testCase.notification, to: controller) }
+                controller.simulateLegacyDSEEReadTimeout(testCase.query)
+                for _ in 0..<4 { await Task.yield() }
+                XCTAssertTrue(controller.isReady)
+                if !notificationFirst {
+                    XCTAssertFalse(controller.canSetDSEE)
+                    deliver(testCase.notification, to: controller)
+                }
+                XCTAssertTrue(controller.canSetDSEE)
+                XCTAssertNil(controller.settingErrors[.dsee])
+                let mode = controller.dseeMode
+                let available = controller.dseeAvailable
+                deliver(testCase.late, to: controller)
+                XCTAssertEqual(controller.dseeMode, mode)
+                XCTAssertEqual(controller.dseeAvailable, available)
+                XCTAssertTrue(controller.canSetDSEE)
+            }
+        }
+    }
+
     func testQueuedLegacyDSEEWriteRevalidatesAvailabilityBeforeTransmission() {
         let controller = makeDSEEController()
         defer { controller.simulateControlLoss() }
+        let session = controller.simulatedControlSession
         controller.refresh()
         controller.setDSEE(.automatic)
         XCTAssertNotNil(controller.pendingChanges[.dsee])
         deliver([0xE5, 2, 1], to: controller)
         acknowledgeAll(controller)
         XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xE8 })
-        XCTAssertFalse(controller.isReady)
-        XCTAssertEqual(controller.lastErrorMessage, "DSEE became unavailable before the change could be sent.")
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertNil(controller.pendingChanges[.dsee])
+        XCTAssertEqual(controller.settingErrors[.dsee], "DSEE became unavailable before the change could be sent.")
     }
 
     func testUnadvertisedAndPreviousSessionDSEECannotEnableOrConfirmControls() {
@@ -907,7 +1029,7 @@ final class SonyLegacyControllerTests: XCTestCase {
         controller.setDSEE(.automatic)
         let session = controller.simulatedControlSession
         controller.simulateControlLoss()
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 2, 0, 1]), session: session)
+        controller.simulateProtocolMessage([0xE9, 2, 0, 1], session: session)
         XCTAssertFalse(controller.supportsDSEE)
         XCTAssertNil(controller.dseeMode)
         XCTAssertTrue(controller.pendingChanges.isEmpty)
@@ -936,6 +1058,274 @@ final class SonyLegacyControllerTests: XCTestCase {
         for reply in replies { deliver(reply, to: controller) }
         XCTAssertTrue(controller.equalizer.canEdit)
         XCTAssertEqual(controller.equalizer.settings, .flat)
+    }
+
+    func testOptionalLegacyReadDeadlinesRetainMalformedOwnershipAndDrainExpiredReplies() async throws {
+        let metadata: [UInt8] = SonyEqualizerBand.legacy.flatMap { [$0.informationType, UInt8($0.value >> 8), UInt8($0.value & 0xFF)] }
+        let reads: [(query: [UInt8], malformed: [UInt8], reply: [UInt8])] = [
+            ([0x10, 1], [0x11, 1, 73, 0, 84], [0x11, 1, 73, 0, 84, 0]),
+            ([0x04, 2], [0x05, 2, 5, 0x31], [0x05, 2, 5] + Array("1.2.3".utf8)),
+            ([0x50, 1, 1], [0x51, 1, 6, 21, 1, 0xA0], [0x51, 1, 6, 21, 1, 0xA0, 0]),
+            ([0x52, 1], [0x53, 1], [0x53, 1, 0]),
+            ([0x5A, 1], [0x5B, 1, 6], [0x5B, 1, 6] + metadata),
+        ]
+        for read in reads {
+            let controller = makeController(supportsEqualizer: true)
+            defer { controller.simulateControlLoss() }
+            let session = controller.simulatedControlSession
+            let noise = controller.noiseControlDisplayState
+            let timeoutID = try XCTUnwrap(controller.simulatedLegacyOptionalReadTimeoutID(read.query))
+            let count = controller.simulatedTransmittedFrames.filter { $0.payload == read.query }.count
+            deliver(read.malformed, to: controller)
+            XCTAssertEqual(controller.simulatedLegacyOptionalReadTimeoutID(read.query), timeoutID)
+            controller.simulateLegacyOptionalReadTimeout(read.query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertNil(controller.simulatedLegacyOptionalReadTimeoutID(read.query))
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertEqual(controller.noiseControlDisplayState, noise)
+            deliver(read.malformed, to: controller)
+            for _ in 0..<10 { controller.simulateAutomaticRefresh() }
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == read.query }.count, count)
+            deliver(read.reply, to: controller)
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == read.query }.count, count + 1)
+            XCTAssertNotNil(controller.simulatedLegacyOptionalReadTimeoutID(read.query))
+            switch read.query[0] {
+            case 0x10: XCTAssertNil(controller.batteries.left)
+            case 0x04: XCTAssertNil(controller.firmwareVersion)
+            case 0x50: XCTAssertNil(controller.equalizer.capabilities)
+            case 0x52: XCTAssertNil(controller.equalizer.status)
+            case 0x5A: XCTAssertNil(controller.equalizer.bandInformation)
+            default: XCTFail("Unexpected legacy read")
+            }
+            deliver(read.reply, to: controller)
+            XCTAssertNil(controller.simulatedLegacyOptionalReadTimeoutID(read.query))
+            switch read.query[0] {
+            case 0x10: XCTAssertEqual(controller.batteries.left?.level, 73)
+            case 0x04: XCTAssertEqual(controller.firmwareVersion, "1.2.3")
+            case 0x50: XCTAssertNotNil(controller.equalizer.capabilities)
+            case 0x52: XCTAssertEqual(controller.equalizer.status, 0)
+            case 0x5A: XCTAssertEqual(controller.equalizer.bandInformation, SonyEqualizerBand.legacy)
+            default: XCTFail("Unexpected legacy read")
+            }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertNil(controller.lastErrorMessage)
+        }
+    }
+
+    func testExplicitRefreshReopensExpiredLegacyReadsWithoutWaitingForOldReplies() async {
+        let metadata: [UInt8] = SonyEqualizerBand.legacy.flatMap { [$0.informationType, UInt8($0.value >> 8), UInt8($0.value & 0xFF)] }
+        let reads: [(query: [UInt8], reply: [UInt8])] = [
+            ([0x10, 1], [0x11, 1, 73, 0, 84, 0]),
+            ([0x04, 2], [0x05, 2, 5] + Array("1.2.3".utf8)),
+            ([0x50, 1, 1], [0x51, 1, 6, 21, 1, 0xA0, 0]),
+            ([0x52, 1], [0x53, 1, 0]),
+            ([0x5A, 1], [0x5B, 1, 6] + metadata),
+        ]
+        for read in reads {
+            let controller = makeController(supportsEqualizer: true)
+            defer { controller.simulateControlLoss() }
+            controller.setReconnectAutomatically(false)
+            let session = controller.simulatedControlSession
+            controller.simulateLegacyOptionalReadTimeout(read.query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            controller.refresh()
+            let freshSession = controller.simulatedControlSession
+            XCTAssertGreaterThan(freshSession, session)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0, 0])
+            XCTAssertNil(controller.retrySecondsRemaining)
+            for _ in 0..<10 {
+                controller.refresh()
+                controller.simulateAutomaticRefresh()
+            }
+            XCTAssertEqual(controller.simulatedControlSession, freshSession)
+            controller.simulateProtocolMessage(read.reply, session: session)
+            XCTAssertNil(controller.batteries.left)
+            XCTAssertNil(controller.firmwareVersion)
+            XCTAssertNil(controller.equalizer.capabilities)
+            XCTAssertNil(controller.equalizer.status)
+            XCTAssertNil(controller.equalizer.bandInformation)
+            deliver([0x01, 0, 2, 0x10], to: controller)
+            acknowledgeAll(controller)
+            deliver([0x07, 0, 5, 0x15, 0x18, 0x62, 0x23, 0x51], to: controller)
+            acknowledgeAll(controller)
+            deliver(capability, to: controller)
+            deliver([0x63, 2, 0], to: controller)
+            acknowledgeAll(controller)
+            deliver(ambient, to: controller)
+            acknowledgeAll(controller)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertNotNil(controller.simulatedLegacyOptionalReadTimeoutID(read.query))
+            deliver(read.reply, to: controller)
+            XCTAssertNil(controller.simulatedLegacyOptionalReadTimeoutID(read.query))
+            switch read.query[0] {
+            case 0x10: XCTAssertEqual(controller.batteries.left?.level, 73)
+            case 0x04: XCTAssertEqual(controller.firmwareVersion, "1.2.3")
+            case 0x50: XCTAssertNotNil(controller.equalizer.capabilities)
+            case 0x52: XCTAssertEqual(controller.equalizer.status, 0)
+            case 0x5A: XCTAssertEqual(controller.equalizer.bandInformation, SonyEqualizerBand.legacy)
+            default: XCTFail("Unexpected legacy read")
+            }
+        }
+    }
+
+    func testExplicitRefreshPreservesInFlightCommandDespiteExpiredOptionalRead() async {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        let session = controller.simulatedControlSession
+        controller.simulateLegacyOptionalReadTimeout([0x10, 1])
+        for _ in 0..<4 { await Task.yield() }
+        controller.setNoiseControl(.anc)
+        let pending = controller.pendingChanges[.noiseControl]
+        XCTAssertNotNil(pending)
+        controller.refresh()
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.pendingChanges[.noiseControl], pending)
+        XCTAssertTrue(controller.isReady)
+    }
+
+    func testExpiredLegacyBatteryReplyPreservesNotificationAndFreshPollOwnership() async {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        let query: [UInt8] = [0x10, 1]
+        deliver([0x13, 1, 82, 0, 83, 0], to: controller)
+        controller.simulateLegacyOptionalReadTimeout(query)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.batteries.left?.level, 82)
+        let count = controller.simulatedTransmittedFrames.filter { $0.payload == query }.count
+        deliver([0x11, 1, 20, 0, 21, 0], to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.batteries.left?.level, 82)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, count + 1)
+        deliver([0x11, 1, 84, 0, 85, 0], to: controller)
+        XCTAssertEqual(controller.batteries.left?.level, 84)
+        XCTAssertNil(controller.simulatedLegacyOptionalReadTimeoutID(query))
+        XCTAssertTrue(controller.isReady)
+    }
+
+    func testSameTransportHandshakeRetainsExpiredLegacyMetadataOwnership() async {
+        let controller = makeController(supportsEqualizer: true)
+        defer { controller.simulateControlLoss() }
+        let query: [UInt8] = [0x50, 1, 1]
+        let reply: [UInt8] = [0x51, 1, 6, 21, 1, 0xA0, 0]
+        let metadata: [UInt8] = SonyEqualizerBand.legacy.flatMap { [$0.informationType, UInt8($0.value >> 8), UInt8($0.value & 0xFF)] }
+        for payload: [UInt8] in [[0x11, 1, 70, 0, 71, 0], [0x11, 2, 72, 0],
+                                [0x05, 2, 5] + Array("1.2.3".utf8), [0x53, 1, 0],
+                                [0x5B, 1, 6] + metadata, [0x57, 1, 0xA0, 0]] {
+            deliver(payload, to: controller)
+        }
+        XCTAssertNotNil(controller.simulatedLegacyOptionalReadTimeoutID(query))
+        controller.simulateLegacyOptionalReadTimeout(query)
+        for _ in 0..<4 { await Task.yield() }
+        let count = controller.simulatedTransmittedFrames.filter { $0.payload == query }.count
+        let session = controller.simulatedControlSession
+        controller.simulateSameTransportHandshake()
+        XCTAssertGreaterThan(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x00, 0x00])
+        deliver([0x01, 0, 2, 0x10], to: controller)
+        acknowledgeAll(controller)
+        deliver([0x07, 0, 4, 0x15, 0x18, 0x62, 0x51], to: controller)
+        acknowledgeAll(controller)
+        deliver(capability, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        acknowledgeAll(controller)
+        deliver(ambient, to: controller)
+        acknowledgeAll(controller)
+        deliver([0x53, 1, 0], to: controller)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.equalizer.available, true)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, count)
+        deliver([0x51, 1, 6, 21, 1, 0xA0], to: controller)
+        XCTAssertNil(controller.equalizer.capabilities)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, count)
+        deliver(reply, to: controller)
+        acknowledgeAll(controller)
+        XCTAssertNil(controller.equalizer.capabilities)
+        XCTAssertFalse(controller.equalizer.canSelectPreset)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, count + 1)
+        deliver(reply, to: controller)
+        XCTAssertNotNil(controller.equalizer.capabilities)
+        XCTAssertTrue(controller.equalizer.canSelectPreset)
+        XCTAssertNil(controller.simulatedLegacyOptionalReadTimeoutID(query))
+    }
+
+    func testMissingEqualizerParameterReplyReopensTransportForRequestedVerification() async {
+        let controller = makeController(supportsEqualizer: true, supportsConnectionQuality: true)
+        defer { controller.simulateControlLoss() }
+        let metadata: [UInt8] = SonyEqualizerBand.legacy.flatMap { [$0.informationType, UInt8($0.value >> 8), UInt8($0.value & 0xFF)] }
+        for payload: [UInt8] in [[0x11, 1, 70, 0, 71, 0], [0x11, 2, 72, 0],
+                                [0x05, 2, 5] + Array("1.2.3".utf8),
+                                [0x51, 1, 6, 21, 1, 0xA0, 0], [0x53, 1, 0], [0x5B, 1, 6] + metadata,
+                                [0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
+            deliver(payload, to: controller)
+        }
+        XCTAssertTrue(controller.canChangeConnectionMode)
+        controller.setConnectionMode(.stableConnection)
+        acknowledgeAll(controller)
+        controller.simulateConnectionModeTimeout()
+        controller.connect()
+        deliver([0xE7, 1, 0, 0], to: controller)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.connectionTransition?.phase, .recovering)
+        let session = controller.simulatedControlSession
+        let setters = controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xE8 }
+        controller.simulateEqualizerReadTimeout()
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.linkState, .disconnected)
+        XCTAssertEqual(controller.connectionTransition?.phase, .recovering)
+        XCTAssertGreaterThan(controller.simulatedControlSession, session)
+        XCTAssertNotNil(controller.retrySecondsRemaining)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        controller.simulateProtocolMessage([0x57, 1, 0xA0, 0], session: session)
+        XCTAssertNil(controller.equalizer.presetID)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xE8 }, setters)
+    }
+
+    func testFreshEqualizerReadReconcilesFailedWriteWithoutAcceptingOlderRead() async {
+        for readState in ["fresh", "older", "expired", "matching"] {
+            let controller = makeController(supportsEqualizer: true, supportsConnectionQuality: true)
+            defer { controller.simulateControlLoss() }
+            for payload: [UInt8] in [[0x51, 1, 6, 21, 2, 0xA0, 0, 0x16, 0], [0x53, 1, 0],
+                                    [0x57, 1, 0x16, 0], [0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
+                deliver(payload, to: controller)
+            }
+            acknowledgeAll(controller)
+            XCTAssertTrue(controller.canChangeConnectionMode)
+            if readState == "older" {
+                controller.refreshEqualizer()
+                acknowledgeAll(controller)
+            }
+            controller.setEqualizerPreset(.manual)
+            acknowledgeAll(controller)
+            controller.simulateSettingTimeout(.equalizer)
+            for _ in 0..<4 { await Task.yield() }
+            let issue = controller.settingErrors[.equalizer]
+            XCTAssertNotNil(issue)
+            XCTAssertFalse(controller.canChangeConnectionMode)
+            controller.refreshEqualizer()
+            if readState == "expired" {
+                acknowledgeAll(controller)
+                controller.simulateEqualizerReadTimeout()
+                for _ in 0..<4 { await Task.yield() }
+            }
+            if readState == "older" || readState == "expired" {
+                deliver([0x57, 1, 0x16, 0], to: controller)
+                XCTAssertFalse(controller.canChangeConnectionMode)
+                XCTAssertEqual(controller.settingErrors[.equalizer], issue)
+            }
+            acknowledgeAll(controller)
+            let actualPreset: EqualizerPreset = readState == "matching" ? .manual : .bassBoost
+            deliver([0x57, 1, actualPreset.rawValue, 0], to: controller)
+            XCTAssertTrue(controller.canChangeConnectionMode)
+            XCTAssertEqual(controller.settingErrors[.equalizer], readState == "matching" ? nil : issue)
+            XCTAssertEqual(controller.equalizerPreset, actualPreset)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0x58 }.count, 1)
+        }
     }
 
     func testLegacyEqualizerUsesOwnedReadsAndConfirmsTheExactManualCurve() async throws {
@@ -1147,7 +1537,7 @@ final class SonyLegacyControllerTests: XCTestCase {
             acknowledgeAll(controller)
             XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xF8 })
             XCTAssertTrue(controller.pendingChanges.isEmpty)
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
         }
     }
 
@@ -1169,17 +1559,45 @@ final class SonyLegacyControllerTests: XCTestCase {
             let session = controller.simulatedControlSession
             controller.simulateSystemReadTimeout(testCase.query)
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.isDeviceConnected)
-            XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            XCTAssertNil(controller.systemFeatureState(.pauseOnRemoval))
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+            XCTAssertNotNil(controller.noiseControlMode)
             controller.simulateDeviceConnection(named: "WF-1000XM4", galleryModel: .wfXM4)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF9, 3, 0, 1]), session: session)
+            controller.simulateProtocolMessage([0xF9, 3, 0, 1], session: session)
             controller.simulateSystemReadTimeout(testCase.query)
             for _ in 0..<4 { await Task.yield() }
             XCTAssertTrue(controller.isReady)
             XCTAssertNil(controller.systemFeatureState(.pauseOnRemoval))
         }
+    }
+
+    func testExpiredLegacyPauseReadRequiresFreshTypedReplyWithoutDisconnecting() async {
+        let controller = makeWearingController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeAll(controller)
+        let query: [UInt8] = [0xF6, 3]
+        let reads = controller.simulatedTransmittedFrames.filter { $0.payload == query }.count
+        let session = controller.simulatedControlSession
+        controller.simulateSystemReadTimeout(query)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+        XCTAssertNotNil(controller.noiseControlMode)
+        deliver([0xF7, 3, 0], to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, reads)
+        deliver([0xF7, 3, 0, 1], to: controller)
+        XCTAssertNil(controller.systemFeatureState(.pauseOnRemoval)?.enabled)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, reads + 1)
+        deliver([0xF7, 3, 0, 0], to: controller)
+        XCTAssertEqual(controller.systemFeatureState(.pauseOnRemoval)?.enabled, false)
+        XCTAssertTrue(controller.canSetSystemFeature(.pauseOnRemoval))
+        XCTAssertEqual(controller.simulatedControlSession, session)
     }
 
     func testLegacyPauseAndV2TouchUseTheirOwnNegotiatedInquiryThreeDialect() {
@@ -1234,11 +1652,13 @@ final class SonyLegacyControllerTests: XCTestCase {
         let session = controller.simulatedControlSession
         controller.simulateSystemReadTimeout([0xF6, 4])
         for _ in 0..<4 { await Task.yield() }
-        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.isReady)
         XCTAssertTrue(controller.isDeviceConnected)
-        XCTAssertNil(controller.automaticPowerOff)
+        XCTAssertFalse(controller.canSetAutomaticPowerOff)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertNotNil(controller.noiseControlMode)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF9, 4, 1, 0x11, 3]), session: session)
+        controller.simulateProtocolMessage([0xF9, 4, 1, 0x11, 3], session: session)
         deliver([0xF9, 4, 1, 0x11, 3], to: controller)
         controller.simulateSystemReadTimeout([0xF6, 4])
         for _ in 0..<4 { await Task.yield() }
@@ -1325,7 +1745,7 @@ final class SonyLegacyControllerTests: XCTestCase {
             deliver(changed, to: controller)
             acknowledgeAll(controller)
             XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xF8 })
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.pendingChanges.isEmpty)
         }
     }
@@ -1333,7 +1753,7 @@ final class SonyLegacyControllerTests: XCTestCase {
     private func beginController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x01, 0, 2, 0x10]), beginConnection: true)
+        controller.simulateProtocolMessage([0x01, 0, 2, 0x10], beginConnection: true)
         acknowledgeAll(controller)
         let name = Array("WF-1000XM4".utf8)
         deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
@@ -1342,9 +1762,11 @@ final class SonyLegacyControllerTests: XCTestCase {
     }
 
     private func makeController(capability: [UInt8]? = nil, state: [UInt8]? = nil, available: UInt8 = 0,
-                                supportsDSEE: Bool = false, supportsEqualizer: Bool = false) -> SonyHeadphonesController {
+                                supportsDSEE: Bool = false, supportsEqualizer: Bool = false,
+                                supportsConnectionQuality: Bool = false) -> SonyHeadphonesController {
         let controller = beginController()
         let functions: [UInt8] = [0x15, 0x18, 0x62, 0x23] + (supportsDSEE ? [0xE2] : []) + (supportsEqualizer ? [0x51] : [])
+            + (supportsConnectionQuality ? [0xE1] : [])
         deliver([0x07, 0, UInt8(functions.count)] + functions, to: controller)
         acknowledgeAll(controller)
         deliver(capability ?? self.capability, to: controller)
@@ -1402,7 +1824,7 @@ final class SonyLegacyControllerTests: XCTestCase {
     }
 
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload, type: type)
     }
 
     private func acknowledgeAll(_ controller: SonyHeadphonesController) {

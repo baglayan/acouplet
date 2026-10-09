@@ -10,7 +10,7 @@ if (( $# )); then
     fi
     unsigned=true
 fi
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-beta.app/Contents/Developer}"
+export DEVELOPER_DIR="${DEVELOPER_DIR:-$(/usr/bin/xcode-select -p)}"
 signing_settings=(CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO ENABLE_HARDENED_RUNTIME=YES)
 if [[ "$unsigned" == true ]]; then
     signing_settings+=(CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=)

@@ -201,8 +201,9 @@ final class SonySourceControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testRepeatedCapabilitiesDoNotStealReadbackAndChangedCapabilitiesCancelQueuedWrites() throws {
+    func testUnownedCapabilitiesCannotStealReadbackOrCancelQueuedWrites() throws {
         let controller = preparedController()
+        defer { controller.simulateControlLoss() }
         let phone = try XCTUnwrap(controller.multipoint.devices.last)
         controller.selectAudioSource(phone)
         acknowledgeAll(controller)
@@ -217,11 +218,18 @@ final class SonySourceControllerTests: XCTestCase {
         controller.setDSEE(.off)
         controller.setSourceKeeping(true)
         XCTAssertEqual(controller.sourceTransition?.phase, .queued)
+        let session = controller.simulatedControlSession
+        let pending = controller.simulatedPendingFrame
         deliver([0x07, 0, 2, 0x31, 0, 0x32, 0], to: controller)
-        XCTAssertEqual(controller.sourceTransition?.phase, .failed)
-        XCTAssertFalse(controller.isReady)
-        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertEqual(controller.sourceTransition?.phase, .queued)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.supportedFunctions2.sorted(), functions)
+        XCTAssertEqual(controller.simulatedPendingFrame, pending)
         XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0x38, 1, 0] })
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.sourceTransition?.phase, .awaitingKeeping)
+        XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x38, 1, 0] })
     }
 
     @MainActor
@@ -262,7 +270,7 @@ final class SonySourceControllerTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0E, to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload, type: type)
     }
 
     private func inventory(command: UInt8, selected: UInt8) -> [UInt8] {

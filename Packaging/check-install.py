@@ -2,6 +2,9 @@ from pathlib import Path
 import fcntl, hashlib, json, os, plistlib, shutil, subprocess, tempfile
 
 packaging = Path(__file__).parent
+service_check = (packaging / 'check-service.sh').read_text().split("<<'PLIST'\n", 1)[1].split('\nPLIST\n', 1)[0]
+service_policy = plistlib.loads(service_check.encode())
+assert service_policy['KeepAlive'] == {'SuccessfulExit': False} and service_policy['RunAtLoad'] is True
 native_label = 'dev.baglayan.Acouplet.agent'
 legacy_label = 'local.xm5control.native.agent'
 older_label = 'local.xm5control.agent'
@@ -174,8 +177,9 @@ def fixture(root, mode):
         configs[label] = plistlib.dumps({'Label': label, 'ProgramArguments': [program, '--background-service'], 'KeepAlive': True, 'OldConfiguration': 'preserve'})
         if mode in ('matching-plist', 'matching-plist-failure') and label == native_label:
             configs[label] = plistlib.dumps({
-                'KeepAlive': True, 'RunAtLoad': True, 'LimitLoadToSessionType': 'Aqua',
+                'KeepAlive': {'SuccessfulExit': False}, 'RunAtLoad': True, 'LimitLoadToSessionType': 'Aqua',
                 'AssociatedBundleIdentifiers': ['dev.baglayan.Acouplet'],
+                'EnvironmentVariables': {'ACOUPLET_SERVICE_POLICY': 'successful-exit-v1'},
                 'ProgramArguments': [program, '--background-service'], 'Label': label,
             }, fmt=plistlib.FMT_BINARY, sort_keys=False)
         (agents / (label + '.plist')).write_bytes(configs[label])
@@ -287,7 +291,8 @@ for scenario in scenarios:
                 'Label': native_label,
                 'ProgramArguments': [str(native / 'Contents/MacOS/Acouplet'), '--background-service'],
                 'AssociatedBundleIdentifiers': ['dev.baglayan.Acouplet'],
-                'LimitLoadToSessionType': 'Aqua', 'RunAtLoad': True, 'KeepAlive': True,
+                'LimitLoadToSessionType': 'Aqua', 'RunAtLoad': True, 'KeepAlive': {'SuccessfulExit': False},
+                'EnvironmentVariables': {'ACOUPLET_SERVICE_POLICY': 'successful-exit-v1'},
             }, output
             assert not legacy.exists() and not (applications / 'XM5 Control.app').exists(), output
             assert not state[legacy_label]['loaded'] and not (agents / (legacy_label + '.plist')).exists(), state
@@ -394,13 +399,13 @@ for scenario in ('success', 'orphan-service', 'unexpected-agent', 'unexpected-lo
         assert (root / 'Preferences/dev.baglayan.Acouplet.plist').read_text() == 'preserve'
         print('uninstall-' + scenario + ': passed')
 
-for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-stage-changed', 'local-hud-check-changed', 'local-ldac-media-changed', 'local-audio-capture-changed', 'local-output-driver-changed', 'local-output-driver-info-changed', 'local-driver-installer-changed', 'local-resource-seal-changed'):
+for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-stage-changed', 'local-hud-check-changed', 'local-ldac-media-changed', 'local-audio-capture-changed', 'local-output-driver-changed', 'local-output-driver-info-changed', 'local-driver-installer-changed', 'local-driver-uninstaller-changed', 'local-resource-seal-changed'):
     with tempfile.TemporaryDirectory(prefix='acouplet-local-install-check-') as directory:
         root = Path(directory)
         mode = 'success' if scenario == 'running' else 'inactive-update'
         _, initial_state = fixture(root, mode)
         source = root / 'package/Acouplet.app'
-        binaries = ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist', 'Contents/Resources/Acouplet LDAC Output.pkg', 'Contents/_CodeSignature/CodeResources')
+        binaries = ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/LDACLogObserver', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist', 'Contents/Resources/Acouplet LDAC Output.pkg', 'Contents/Resources/Acouplet LDAC Removal.pkg', 'Contents/_CodeSignature/CodeResources')
         for relative in binaries[1:]:
             binary = source / relative
             binary.parent.mkdir(parents=True, exist_ok=True)
@@ -418,6 +423,7 @@ for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-sta
         if scenario == 'local-output-driver-changed': (source / 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput').write_text('changed driver')
         if scenario == 'local-output-driver-info-changed': (release / 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist').write_text('changed driver metadata')
         if scenario == 'local-driver-installer-changed': (source / 'Contents/Resources/Acouplet LDAC Output.pkg').write_text('changed installer')
+        if scenario == 'local-driver-uninstaller-changed': (source / 'Contents/Resources/Acouplet LDAC Removal.pkg').write_text('changed uninstaller')
         if scenario == 'local-resource-seal-changed': (source / 'Contents/_CodeSignature/CodeResources').write_text('changed resource seal')
         result = run(root, mode, arguments=('--require-stopped',))
         commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()]

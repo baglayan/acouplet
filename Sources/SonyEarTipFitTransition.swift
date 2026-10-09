@@ -14,6 +14,7 @@ struct SonyEarTipFitTransition: Equatable {
     private(set) var message: String?
     private(set) var series = SonyEarTipFit.Series.other
     private(set) var commandTransmitted = false
+    private(set) var dismissWhenFinished = false
     private var writtenQueries: Set<[UInt8]> = []
     private var receivedQueries: Set<[UInt8]> = []
     private var closing = false
@@ -91,7 +92,8 @@ struct SonyEarTipFitTransition: Equatable {
         return true
     }
 
-    mutating func cancel() {
+    mutating func cancel(dismissWhenFinished: Bool = false) {
+        self.dismissWhenFinished = self.dismissWhenFinished || dismissWhenFinished
         closing = true
         preparingAgain = false
         switch phase {
@@ -207,6 +209,10 @@ struct SonyEarTipFitTransition: Equatable {
 
     mutating func controlLost() {
         guard blocksCommands else { return }
+        if phase == .checking || phase == .ready {
+            move(to: .finished)
+            return
+        }
         interrupt(String(localized: "Controls disconnected. The fit test outcome is unknown. Check the earbuds in Sound Connect before reconnecting controls."))
     }
 

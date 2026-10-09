@@ -91,7 +91,7 @@ final class SonyNotificationServiceTests: XCTestCase {
         notifications.start()
         deliverSourceInventory(selected: 1, to: controller)
         deliverSourceInventory(selected: 2, to: controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x39, 2, 1]))
+        controller.simulateProtocolMessage([0x39, 2, 1], type: 0x0E)
         notifications.retryPendingAlerts()
         XCTAssertEqual(attempts, 1)
         deliverSourceInventory(selected: 2, to: controller)
@@ -168,52 +168,60 @@ final class SonyNotificationServiceTests: XCTestCase {
         })
         let reading = SonyLowBatteryPolicy.Reading(part: .headphones, level: 20, isCharging: false, observedAt: Date())
         XCTAssertFalse(settings.lowBatteryNotificationsEnabled)
-        await notifications.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading], isConnected: true)
+        await notifications.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading])
         XCTAssertEqual(attempts, 0)
         settings.lowBatteryNotificationsEnabled = true
         XCTAssertTrue(SettingsStore(defaults: defaults).lowBatteryNotificationsEnabled)
-        await notifications.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading], isConnected: true)
+        await notifications.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading])
         XCTAssertEqual(attempts, 1)
         XCTAssertTrue(presented.isEmpty)
         accepted = true
-        await notifications.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading], isConnected: true)
+        await notifications.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading])
         XCTAssertEqual(presented.map(\.reading), [reading])
-        await notifications.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading], isConnected: true)
+        await notifications.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading])
         let restored = SonyNotificationService(settings: SettingsStore(defaults: defaults), devices: devices,
                                                 presentLowBattery: { warning, _ in presented.append(warning); return true })
-        await restored.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading], isConnected: true)
+        await restored.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading])
         XCTAssertEqual(attempts, 2)
         XCTAssertEqual(presented.count, 1)
         let charged = SonyLowBatteryPolicy.Reading(part: .headphones, level: 50, isCharging: false, observedAt: Date())
-        await restored.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [charged], isConnected: true)
-        await restored.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading], isConnected: true)
+        await restored.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [charged])
+        await restored.updateLowBattery(deviceID: "WH", name: "WH-1000XM5", readings: [reading])
         XCTAssertEqual(presented.count, 2)
     }
 
     @MainActor
-    func testStaleContextCancellationChargingAndDisconnectionCannotConsumeWarnings() async throws {
+    func testDisconnectedContextCancellationAndChargingCannotConsumeWarnings() async throws {
         let suiteName = "dev.baglayan.Acouplet.tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let settings = SettingsStore(defaults: defaults)
         settings.lowBatteryNotificationsEnabled = true
-        let devices = SonyDeviceCoordinator(controller: SonyHeadphonesController(startAutomatically: false, displayOnly: true))
+        let controller = SonyHeadphonesController(startAutomatically: false, pinnedAddress: "02:53:4F:4E:59:01",
+                                                  advertisedName: "WF-1000XM5")
+        let devices = SonyDeviceCoordinator(controller: controller)
+        let deviceID = controller.address
+        let session = controller.notificationSession
+        XCTAssertEqual(controller.deviceModel, .wfXM5)
+        XCTAssertFalse(controller.isDeviceConnected)
+        XCTAssertNil(controller.lowBatteryNotificationDeviceID)
         var presented = 0
         let notifications = SonyNotificationService(settings: settings, devices: devices,
                                                     presentLowBattery: { _, _ in presented += 1; return true })
         let reading = SonyLowBatteryPolicy.Reading(part: .right, level: 10, isCharging: false, observedAt: Date())
-        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [reading], isConnected: true,
-                                             isCurrent: { false })
-        let task = Task { await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [reading], isConnected: true) }
+        await notifications.updateLowBattery(deviceID: deviceID, name: "WF-1000XM5", readings: [reading],
+                                             isCurrent: {
+            controller.notificationSession == session && controller.lowBatteryNotificationDeviceID == deviceID
+        })
+        let task = Task { await notifications.updateLowBattery(deviceID: deviceID, name: "WF-1000XM5", readings: [reading]) }
         task.cancel()
         await task.value
-        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [reading], isConnected: false)
         let stale = SonyLowBatteryPolicy.Reading(part: .right, level: 10, isCharging: false, observedAt: Date().addingTimeInterval(-46))
-        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [stale], isConnected: true)
+        await notifications.updateLowBattery(deviceID: deviceID, name: "WF-1000XM5", readings: [stale])
         let charging = SonyLowBatteryPolicy.Reading(part: .right, level: 10, isCharging: true, observedAt: Date())
-        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [charging], isConnected: true)
+        await notifications.updateLowBattery(deviceID: deviceID, name: "WF-1000XM5", readings: [charging])
         XCTAssertEqual(presented, 0)
-        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [reading], isConnected: true)
+        await notifications.updateLowBattery(deviceID: deviceID, name: "WF-1000XM5", readings: [reading])
         XCTAssertEqual(presented, 1)
     }
 
@@ -227,11 +235,11 @@ final class SonyNotificationServiceTests: XCTestCase {
         let devices = SonyDeviceCoordinator(controller: SonyHeadphonesController(startAutomatically: false, displayOnly: true))
         let notifications = SonyNotificationService(settings: settings, devices: devices, presentLowBattery: { _, _ in false })
         let reading = SonyLowBatteryPolicy.Reading(part: .left, level: 5, isCharging: false, observedAt: Date())
-        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [reading], isConnected: true)
+        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [reading])
         var presented = 0
         let restored = SonyNotificationService(settings: settings, devices: devices,
                                                 presentLowBattery: { _, _ in presented += 1; return true })
-        await restored.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [reading], isConnected: true)
+        await restored.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: [reading])
         XCTAssertEqual(presented, 1)
     }
 
@@ -250,9 +258,9 @@ final class SonyNotificationServiceTests: XCTestCase {
             .init(part: .left, level: 20, isCharging: false, observedAt: Date()),
             .init(part: .caseBattery, level: 5, isCharging: false, observedAt: Date()),
         ]
-        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: readings, isConnected: true)
+        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: readings)
         XCTAssertEqual(presented.map(\.reading.part), [.caseBattery])
-        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: readings, isConnected: true)
+        await notifications.updateLowBattery(deviceID: "WF", name: "WF-1000XM5", readings: readings)
         XCTAssertEqual(presented.map(\.reading.part), [.caseBattery, .left])
     }
 
@@ -328,14 +336,14 @@ final class SonyNotificationServiceTests: XCTestCase {
         let entries: [UInt8] = devices.flatMap { address, id, name -> [UInt8] in
             Array(address.utf8) + [id, 0x2A, 0x41, 4, UInt8(name.utf8.count)] + Array(name.utf8)
         }
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x39, 2, 2] + entries + [selected]))
+        controller.simulateProtocolMessage([0x39, 2, 2] + entries + [selected], type: 0x0E)
     }
 
     @MainActor
     private func firmwareController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [1, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeAll(controller)
         deliver([0x05, 0x01, 10] + Array("WF-1000XM5".utf8), to: controller)
         deliver([7, 0, 3, 0x6B, 1, 0x32, 1, 0xF6, 1], to: controller)
@@ -357,7 +365,7 @@ final class SonyNotificationServiceTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload)
     }
 
     @MainActor

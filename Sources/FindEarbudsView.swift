@@ -87,6 +87,11 @@ struct FindEarbudsView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(!finder.canStop)
                         .accessibilityIdentifier("finder.stop")
+                } else if headphones.hasFailedTable2Discovery {
+                    Button("Reconnect Controls") { headphones.retryDeviceDiscovery() }
+                        .tint(.primary)
+                        .disabled(!headphones.canRetryDeviceDiscovery)
+                        .accessibilityIdentifier("finder.reconnectControls")
                 }
                 Spacer(minLength: 12)
                 Button("Done") { close() }
@@ -112,14 +117,29 @@ struct FindEarbudsView: View {
         }
         .alert(wearingConfirmationTitle,
                isPresented: $showsWearingConfirmation, presenting: wearingConfirmation) { session in
-            Button("Play Anyway") { finalWearingConfirmation = session }
+            Button("Play Anyway") {
+                guard let current = finder.session, current.id == session.id else { return }
+                if current.wearingConfirmationStatus != false,
+                   current.wearingConfirmationStatus != session.wearingConfirmationStatus {
+                    wearingConfirmation = current
+                    DispatchQueue.main.async { showsWearingConfirmation = true }
+                } else {
+                    finalWearingConfirmation = current
+                }
+            }
                 .keyboardShortcut(nil)
             Button("Cancel", role: .cancel) {
                 if finder.session?.id == session.id { finder.stop() }
             }
             .keyboardShortcut(.defaultAction)
         } message: { _ in
-            Text("A covered sensor can give a false reading. Make sure this earbud is out of everyone’s ears before playing the loud sound.")
+            if finder.session?.wearingConfirmationStatus == nil {
+                Text("Acouplet can’t determine whether this earbud is being worn. Make sure this earbud is out of everyone’s ears before playing the loud sound.")
+            } else if finder.session?.wearingConfirmationStatus == true {
+                Text("A covered sensor can give a false reading. Make sure this earbud is out of everyone’s ears before playing the loud sound.")
+            } else {
+                Text("Take both earbuds out of your ears before continuing. The sound may become loud.")
+            }
         }
         .background(FindEarbudWearingConfirmation(session: $finalWearingConfirmation, finder: finder))
         .onChange(of: finder.session, initial: true) { _, session in
@@ -127,6 +147,12 @@ struct FindEarbudsView: View {
                 wearingConfirmation = nil
                 finalWearingConfirmation = nil
                 showsWearingConfirmation = false
+            } else if let session, let finalWearingConfirmation,
+                      session.wearingConfirmationStatus != false,
+                      finalWearingConfirmation.wearingConfirmationStatus != session.wearingConfirmationStatus {
+                self.finalWearingConfirmation = nil
+                wearingConfirmation = session
+                showsWearingConfirmation = true
             } else if finalWearingConfirmation?.id != session?.id {
                 wearingConfirmation = session
                 showsWearingConfirmation = true
@@ -136,9 +162,19 @@ struct FindEarbudsView: View {
     }
 
     private var wearingConfirmationTitle: String {
-        wearingConfirmation?.target == .left
-            ? String(localized: "Left earbud detected in ear")
-            : String(localized: "Right earbud detected in ear")
+        if finder.session?.wearingConfirmationStatus == nil {
+            return wearingConfirmation?.target == .left
+                ? String(localized: "Left earbud wear status unknown")
+                : String(localized: "Right earbud wear status unknown")
+        }
+        if finder.session?.wearingConfirmationStatus == true {
+            return wearingConfirmation?.target == .left
+                ? String(localized: "Left earbud detected in ear")
+                : String(localized: "Right earbud detected in ear")
+        }
+        return wearingConfirmation?.target == .left
+            ? String(localized: "Play sound in the left earbud?")
+            : String(localized: "Play sound in the right earbud?")
     }
 
     private func earbud(_ target: FastPairRingTarget) -> some View {

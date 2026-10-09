@@ -45,3 +45,16 @@ else
         --install-location /Library/Audio/Plug-Ins/HAL --identifier dev.baglayan.Acouplet.LDACOutput \
         --version "$ldac_version" --ownership recommended --scripts "$ldac_stage/scripts" "$ldac_package"
 fi
+ldac_removal="$(dirname -- "$ldac_package")/Acouplet LDAC Removal.pkg"
+mkdir "$ldac_stage/removal-scripts"
+/usr/bin/sed "s/@ACOUPLET_LDAC_SIGNING_TEAM_ID@/$ldac_team/g" "$ldac_packaging/LDACOutputUninstaller/postinstall" > "$ldac_stage/removal-scripts/postinstall"
+chmod 755 "$ldac_stage/removal-scripts/postinstall"
+if [ -n "${ACOUPLET_INSTALLER_SIGNING_IDENTITY:-}" ]; then
+    /usr/bin/pkgbuild --nopayload --scripts "$ldac_stage/removal-scripts" \
+        --identifier dev.baglayan.Acouplet.LDACOutput.Removal --version "$ldac_version" \
+        --sign "$ACOUPLET_INSTALLER_SIGNING_IDENTITY" --timestamp "$ldac_removal"
+    /usr/sbin/pkgutil --check-signature "$ldac_removal"
+else
+    /usr/bin/pkgbuild --nopayload --scripts "$ldac_stage/removal-scripts" \
+        --identifier dev.baglayan.Acouplet.LDACOutput.Removal --version "$ldac_version" "$ldac_removal"
+fi

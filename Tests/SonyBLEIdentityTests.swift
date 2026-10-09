@@ -4,6 +4,50 @@ import XCTest
 final class SonyBLEIdentityTests: XCTestCase {
     private let basicChunk: [UInt8] = [0xB0, 0x32, 0x01, 0x00, 0x06, 0xF0, 0x12, 0xAB, 0xCD, 0x00, 0x08, 0x00]
 
+    func testPairedConnectionTargetRequiresTheSelectedPairedKnownDeviceAndCanonicalIdentifier() throws {
+        let identifier = UUID()
+        let address = "12:34:56:78:9A:BC"
+        let target = try XCTUnwrap(SonyBLEIdentity.ConnectionTarget(pairedAddress: "12-34-56-78-9a-bc",
+            selectedAddress: address, model: .wfXM5, peripheralIdentifier: identifier, isPaired: true))
+        XCTAssertEqual(target, .paired(peripheralIdentifier: identifier))
+        XCTAssertEqual(target.peripheralIdentifier, identifier)
+        let invalid: [(pairedAddress: String, selectedAddress: String, model: SonyDeviceModel, identifier: UUID?, isPaired: Bool)] = [
+            (address, address, .wfXM5, identifier, false),
+            (address, "12:34:56:78:9A:BD", .wfXM5, identifier, true),
+            ("12:34", address, .wfXM5, identifier, true),
+            (address, "12:34", .wfXM5, identifier, true),
+            (address, address, .unknown, identifier, true),
+            (address, address, .wfXM5, nil, true),
+        ]
+        for testCase in invalid {
+            XCTAssertNil(SonyBLEIdentity.ConnectionTarget(pairedAddress: testCase.pairedAddress,
+                selectedAddress: testCase.selectedAddress, model: testCase.model,
+                peripheralIdentifier: testCase.identifier, isPaired: testCase.isPaired))
+        }
+    }
+
+    func testPairedConnectionTargetMatchesOnlyItsCanonicalIdentifier() {
+        let identifier = UUID()
+        let target = SonyBLEIdentity.ConnectionTarget.paired(peripheralIdentifier: identifier)
+        for hash in ["ABCDEF12", "12345678"] {
+            XCTAssertTrue(target.matches(hash: hash, peripheralIdentifier: identifier))
+            XCTAssertFalse(target.matches(hash: hash, peripheralIdentifier: UUID()))
+            XCTAssertFalse(target.matches(hash: hash, peripheralIdentifier: nil))
+        }
+    }
+
+    func testVerifiedConnectionTargetRequiresItsHashEvenWithAMatchingIdentifier() {
+        let identifier = UUID()
+        for savedIdentifier in [identifier, nil] {
+            let target = SonyBLEIdentity.ConnectionTarget.verified(hash: "ABCDEF12", peripheralIdentifier: savedIdentifier)
+            XCTAssertEqual(target.peripheralIdentifier, savedIdentifier)
+            XCTAssertTrue(target.matches(hash: "ABCDEF12", peripheralIdentifier: identifier))
+            XCTAssertTrue(target.matches(hash: "ABCDEF12", peripheralIdentifier: nil))
+            XCTAssertFalse(target.matches(hash: "12345678", peripheralIdentifier: identifier))
+            XCTAssertFalse(target.matches(hash: "12345678", peripheralIdentifier: nil))
+        }
+    }
+
     func testAddressKeyedIdentitiesMigrateAndMergeWithoutReplacingOtherHeadphones() throws {
         let suite = "dev.baglayan.Acouplet.identity-map-tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -64,6 +108,24 @@ final class SonyBLEIdentityTests: XCTestCase {
     }
 
     #if !ACOUPLET_PUBLIC_APIS_ONLY
+    func testClassicConnectionStateUsesCurrentClassicPeer() {
+        let peer = ConnectionStateFixture(2)
+        let device = ClassicDeviceFixture(peer)
+        XCTAssertEqual(SonyBLEIdentity.classicConnectionState(for: device), true)
+        for state in [0, 1, 3] {
+            peer.state = state
+            XCTAssertEqual(SonyBLEIdentity.classicConnectionState(for: device), false)
+        }
+        peer.state = 2
+        XCTAssertEqual(SonyBLEIdentity.classicConnectionState(for: device), true)
+    }
+
+    func testClassicConnectionStateDistinguishesMissingPeerFromUnsupportedGetters() {
+        XCTAssertEqual(SonyBLEIdentity.classicConnectionState(for: ClassicDeviceFixture(nil)), false)
+        XCTAssertNil(SonyBLEIdentity.classicConnectionState(for: NSObject()))
+        XCTAssertNil(SonyBLEIdentity.classicConnectionState(for: ClassicDeviceFixture(NSObject())))
+    }
+
     func testClassicPeerIdentifierRequiresAvailableGettersAndUUIDValue() {
         let identifier = UUID()
         XCTAssertEqual(SonyBLEIdentity.classicPeripheralIdentifier(for: ClassicDeviceFixture(PeerFixture(identifier as NSUUID))), identifier)
@@ -170,6 +232,14 @@ final class SonyBLEIdentityTests: XCTestCase {
 }
 
 #if !ACOUPLET_PUBLIC_APIS_ONLY
+private final class ConnectionStateFixture: NSObject {
+    @objc var state: Int
+
+    init(_ state: Int) {
+        self.state = state
+    }
+}
+
 private final class ClassicDeviceFixture: NSObject {
     @objc let classicPeer: NSObject?
 

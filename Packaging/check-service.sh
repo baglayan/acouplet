@@ -49,7 +49,10 @@ cat > "$plist_path" <<'PLIST'
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 </dict>
 </plist>
 PLIST
@@ -91,27 +94,30 @@ fi
 print "Crash recovery passed: simulated process $first_pid restarted as $second_pid."
 
 /usr/bin/osascript -e 'tell application id "dev.baglayan.Acouplet.debug" to quit'
-third_pid="$(wait_for_pid "$second_pid")"
-if [[ "$(/bin/ps -ww -p "$third_pid" -o command= | tr -s ' ')" != "$expected_command" ]]; then
-    print -u2 "The relaunched PID does not match the isolated simulation command."
+for attempt in {1..80}; do
+    if ! /bin/kill -0 "$second_pid" 2>/dev/null; then break; fi
+    sleep 0.25
+done
+if /bin/kill -0 "$second_pid" 2>/dev/null || /usr/bin/pgrep -f "$process_pattern" >/dev/null; then
+    print -u2 "The isolated service did not remain stopped after a clean exit."
     exit 1
 fi
 service_state="$(/bin/launchctl print "$service_target")"
 if [[ "$service_state" != *"last exit code = 0"* ]]; then
-    print -u2 "The simulated app did not exit cleanly before restarting."
+    print -u2 "The simulated app did not exit cleanly."
     exit 1
 fi
-print "Continuous service passed: clean exit restarted process $second_pid as $third_pid."
-
-/bin/launchctl bootout "$service_target"
-for attempt in {1..20}; do
-    if ! /bin/kill -0 "$third_pid" 2>/dev/null; then
-        break
+for attempt in {1..80}; do
+    if /usr/bin/pgrep -f "$process_pattern" >/dev/null; then
+        print -u2 "The isolated service restarted after a clean exit."
+        exit 1
     fi
     sleep 0.25
 done
-if /bin/kill -0 "$third_pid" 2>/dev/null ||
-   /bin/launchctl print "$service_target" >/dev/null 2>&1 ||
+print "Graceful exit passed: process $second_pid stopped without automatic relaunch."
+
+/bin/launchctl bootout "$service_target"
+if /bin/launchctl print "$service_target" >/dev/null 2>&1 ||
    /usr/bin/pgrep -f "$process_pattern" >/dev/null; then
     print -u2 "Removing the test service did not stop its process and unload its job."
     exit 1

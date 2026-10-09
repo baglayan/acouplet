@@ -1,11 +1,15 @@
 #import <Foundation/Foundation.h>
 #import <IOBluetooth/IOBluetooth.h>
+#include "../SonyClassicConnection.h"
+#include "LDACParentLifetime.h"
 #include <CoreAudio/AudioHardware.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <string.h>
+#include <time.h>
+#include <math.h>
 #include <sys/event.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -15,6 +19,14 @@ static BOOL inputEnded;
 static BOOL disarmed;
 static char parentCommand[16];
 static size_t parentCommandLength;
+
+static void RunLoopFor(NSTimeInterval seconds) {
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, false);
+}
+
+static double MonotonicTime(void) {
+    return (double)clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1000000000.0;
+}
 
 static NSString *NormalizeAddress(const char *value) {
     if (!value || strlen(value) != 17 || (value[2] != ':' && value[2] != '-')) return nil;
@@ -69,14 +81,14 @@ static int ConnectionLock(NSString *address, BOOL watchParent) {
         close(descriptor);
         return -1;
     }
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5];
+    double deadline = MonotonicTime() + 5;
     while (flock(descriptor, LOCK_EX | LOCK_NB)) {
-        if ((errno != EWOULDBLOCK && errno != EINTR) || deadline.timeIntervalSinceNow <= 0 ||
+        if ((errno != EWOULDBLOCK && errno != EINTR) || MonotonicTime() >= deadline ||
             (watchParent && ParentInputEnded())) {
             close(descriptor);
             return -1;
         }
-        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+        RunLoopFor(0.01);
     }
     return descriptor;
 }
@@ -162,14 +174,14 @@ static int PriorityIdle(NSString *uid) {
 - (void)connectionComplete:(IOBluetoothDevice *)device status:(IOReturn)status {
     self.status = status;
     self.done = YES;
-    if (status == kIOReturnSuccess && device.isConnected) self.originalHandle = device.connectionHandle;
-    printf("CONNECTION_CALLBACK time=%.6f status=0x%08X connected=%d\n", NSDate.date.timeIntervalSince1970, status, device.isConnected);
+    if (status == kIOReturnSuccess && SonyClassicIsConnected(device)) self.originalHandle = device.connectionHandle;
+    printf("CONNECTION_CALLBACK time=%.6f status=0x%08X connected=%d\n", NSDate.date.timeIntervalSince1970, status, SonyClassicIsConnected(device));
 }
 - (void)disconnected:(IOBluetoothUserNotification *)notification device:(IOBluetoothDevice *)device {
     self.disconnected = YES;
     [notification unregister];
     self.disconnectNotification = nil;
-    printf("CONNECTION_DISCONNECTED handle=%04X connected=%d\n", self.originalHandle, device.isConnected);
+    printf("CONNECTION_DISCONNECTED handle=%04X connected=%d\n", self.originalHandle, SonyClassicIsConnected(device));
 }
 @end
 
@@ -179,7 +191,7 @@ static int WatchConnection(IOBluetoothDevice *device, ConnectionObserver *observ
     while (YES) {
         ParentInputEnded();
         parentExited |= ParentExited(parentEvents);
-        if (observer.disconnected || !device.isConnected || device.connectionHandle != observer.originalHandle) {
+        if (observer.disconnected || !SonyClassicIsConnected(device) || device.connectionHandle != observer.originalHandle) {
             printf("CONNECT_RETIRED reason=original-connection-ended\n");
             [observer.disconnectNotification unregister];
             return 0;
@@ -190,13 +202,13 @@ static int WatchConnection(IOBluetoothDevice *device, ConnectionObserver *observ
             return 0;
         }
         if (parentExited) break;
-        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        RunLoopFor(0.1);
     }
     alarm(80);
     printf("CONNECT_OWNER_EXIT handle=%04X\n", observer.originalHandle);
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:45];
-    while (deadline.timeIntervalSinceNow > 0) {
-        if (observer.disconnected || !device.isConnected || device.connectionHandle != observer.originalHandle) break;
+    double deadline = MonotonicTime() + 45;
+    while (MonotonicTime() < deadline) {
+        if (observer.disconnected || !SonyClassicIsConnected(device) || device.connectionHandle != observer.originalHandle) break;
         int native = NativeOutputState(address);
         int idle = priorityUID ? PriorityIdle(priorityUID) : 1;
         if (native != 0 || idle < 0) {
@@ -205,23 +217,23 @@ static int WatchConnection(IOBluetoothDevice *device, ConnectionObserver *observ
             return native == 1 ? 0 : 6;
         }
         if (idle == 1) {
-            [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
-            if (observer.disconnected || !device.isConnected || device.connectionHandle != observer.originalHandle) break;
+            RunLoopFor(0.1);
+            if (observer.disconnected || !SonyClassicIsConnected(device) || device.connectionHandle != observer.originalHandle) break;
             native = NativeOutputState(address);
             if (native != 0) {
                 printf("CONNECT_RECOVERY_SKIPPED native=%d priority=1\n", native);
                 [observer.disconnectNotification unregister];
                 return native == 1 ? 0 : 6;
             }
-            if (observer.disconnected || !device.isConnected || device.connectionHandle != observer.originalHandle) break;
+            if (observer.disconnected || !SonyClassicIsConnected(device) || device.connectionHandle != observer.originalHandle) break;
             IOReturn status = [device closeConnection];
             printf("CONNECT_RECOVERY_CLOSE status=0x%08X handle=%04X\n", status, observer.originalHandle);
             if (status != kIOReturnSuccess) return 6;
-            NSDate *closeDeadline = [NSDate dateWithTimeIntervalSinceNow:5];
-            while (!observer.disconnected && device.isConnected && closeDeadline.timeIntervalSinceNow > 0)
-                [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+            double closeDeadline = MonotonicTime() + 5;
+            while (!observer.disconnected && SonyClassicIsConnected(device) && MonotonicTime() < closeDeadline)
+                RunLoopFor(0.01);
             [observer.disconnectNotification unregister];
-            if (device.isConnected) {
+            if (SonyClassicIsConnected(device)) {
                 printf("CONNECT_RECOVERY_SKIPPED reason=connection-present-after-close\n");
                 return 6;
             }
@@ -229,28 +241,28 @@ static int WatchConnection(IOBluetoothDevice *device, ConnectionObserver *observ
             status = [device openConnection:restored];
             printf("CONNECT_RECOVERY_OPEN status=0x%08X\n", status);
             if (status != kIOReturnSuccess) return 6;
-            NSDate *openDeadline = [NSDate dateWithTimeIntervalSinceNow:15];
-            while (!restored.done && openDeadline.timeIntervalSinceNow > 0)
-                [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+            double openDeadline = MonotonicTime() + 15;
+            while (!restored.done && MonotonicTime() < openDeadline)
+                RunLoopFor(0.01);
             if (!restored.done) {
-                NSDate *settlementDeadline = [NSDate dateWithTimeIntervalSinceNow:2];
-                while (!restored.done && settlementDeadline.timeIntervalSinceNow > 0)
-                    [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+                double settlementDeadline = MonotonicTime() + 2;
+                while (!restored.done && MonotonicTime() < settlementDeadline)
+                    RunLoopFor(0.01);
             }
-            if (!restored.done || restored.status != kIOReturnSuccess || !device.isConnected) {
-                printf("CONNECT_RECOVERY_UNCONFIRMED callback=%d connected=%d status=0x%08X\n", restored.done, device.isConnected, restored.status);
+            if (!restored.done || restored.status != kIOReturnSuccess || !SonyClassicIsConnected(device)) {
+                printf("CONNECT_RECOVERY_UNCONFIRMED callback=%d connected=%d status=0x%08X\n", restored.done, SonyClassicIsConnected(device), restored.status);
                 return 6;
             }
-            NSDate *publishDeadline = [NSDate dateWithTimeIntervalSinceNow:8];
+            double publishDeadline = MonotonicTime() + 8;
             native = NativeOutputState(address);
-            while (native == 0 && device.isConnected && device.connectionHandle == restored.originalHandle && publishDeadline.timeIntervalSinceNow > 0) {
-                [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+            while (native == 0 && SonyClassicIsConnected(device) && device.connectionHandle == restored.originalHandle && MonotonicTime() < publishDeadline) {
+                RunLoopFor(0.05);
                 native = NativeOutputState(address);
             }
-            printf("CONNECT_RECOVERED native=%d connected=%d\n", native, device.isConnected);
+            printf("CONNECT_RECOVERED native=%d connected=%d\n", native, SonyClassicIsConnected(device));
             return native == 1 ? 0 : 6;
         }
-        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        RunLoopFor(0.05);
     }
     [observer.disconnectNotification unregister];
     printf("CONNECT_RECOVERY_SKIPPED reason=connection-ended-or-priority-deadline\n");
@@ -265,6 +277,8 @@ int main(int argc, const char *argv[]) {
         BOOL watchParent = NO;
         BOOL restore = NO;
         NSString *priorityUID = nil;
+        BluetoothConnectionHandle expectedHandle = kBluetoothConnectionHandleNone;
+        BOOL expectedHandleSeen = NO;
         for (int index = 1; index < argc; index++) {
             if (!strcmp(argv[index], "--address") && !addressSeen && index + 1 < argc) {
                 address = NormalizeAddress(argv[++index]);
@@ -279,14 +293,26 @@ int main(int argc, const char *argv[]) {
             } else if (!strcmp(argv[index], "--restore") && !restore) {
                 restore = YES;
                 continue;
+            } else if (!strcmp(argv[index], "--expected-handle") && !expectedHandleSeen && index + 1 < argc) {
+                const char *value = argv[++index];
+                expectedHandleSeen = YES;
+                if (strlen(value) == 4 && strspn(value, "0123456789abcdefABCDEF") == 4) {
+                    unsigned long handle = strtoul(value, NULL, 16);
+                    if (handle < kBluetoothConnectionHandleNone) {
+                        expectedHandle = (BluetoothConnectionHandle)handle;
+                        continue;
+                    }
+                }
             } else if (!strcmp(argv[index], "--priority-device-uid") && !priorityUID && index + 1 < argc) {
                 priorityUID = [NSString stringWithUTF8String:argv[++index]];
                 if (priorityUID.length > 0 && priorityUID.length <= 1024) continue;
             }
-            fprintf(stderr, "Usage: %s --address XX-XX-XX-XX-XX-XX [--disconnect] [--watch-parent] [--restore] [--priority-device-uid UID]\n", argv[0]);
+            fprintf(stderr, "Usage: %s --address XX-XX-XX-XX-XX-XX [--disconnect] [--watch-parent] [--restore] [--priority-device-uid UID] [--expected-handle HHHH]\n", argv[0]);
             return 2;
         }
-        if (!addressSeen || (priorityUID && (!watchParent || disconnect)) || (restore && watchParent)) return 2;
+        if (!addressSeen || (priorityUID && (!watchParent || disconnect)) || (restore && watchParent) ||
+            (expectedHandleSeen && (!restore || !disconnect))) return 2;
+        if (!LDACWatchParent(90)) return 3;
         setbuf(stdout, NULL);
         signal(SIGPIPE, SIG_IGN);
         int parentEvents = -1;
@@ -304,26 +330,26 @@ int main(int argc, const char *argv[]) {
             return canceled ? 0 : 3;
         }
         IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
-        printf("BEFORE time=%.6f address=%s paired=%d connected=%d\n", NSDate.date.timeIntervalSince1970, address.UTF8String, device.isPaired, device.isConnected);
+        printf("BEFORE time=%.6f address=%s paired=%d connected=%d\n", NSDate.date.timeIntervalSince1970, address.UTF8String, device.isPaired, SonyClassicIsConnected(device));
         if (!device || !device.isPaired) return 2;
-        NSDate *restoreDeadline = restore ? [NSDate dateWithTimeIntervalSinceNow:45] : nil;
+        double restoreDeadline = restore ? MonotonicTime() + 45 : INFINITY;
         if (restore) {
             int native = NativeOutputState(address);
             if (native != 0) {
-                BOOL connected = device.isConnected;
+                BOOL connected = SonyClassicIsConnected(device);
                 if (native == 1 && connected) printf("RESTORE_PRESERVED native=1 connected=1\n");
                 else if (native == 1) printf("RESTORE_UNCONFIRMED native=1 connected=0 reason=native-output-without-connection\n");
-                else printf("RESTORE_UNCONFIRMED native=-1 connected=%d reason=output-inspection\n", device.isConnected);
+                else printf("RESTORE_UNCONFIRMED native=-1 connected=%d reason=output-inspection\n", SonyClassicIsConnected(device));
                 return native == 1 && connected ? 0 : 6;
             }
-            if (!disconnect && device.isConnected) {
-                NSDate *publishDeadline = [NSDate dateWithTimeIntervalSinceNow:8];
-                while (native == 0 && device.isConnected && publishDeadline.timeIntervalSinceNow > 0) {
-                    [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+            if (SonyClassicIsConnected(device) && (!disconnect || !expectedHandleSeen || device.connectionHandle != expectedHandle)) {
+                double publishDeadline = MonotonicTime() + 8;
+                while (native == 0 && SonyClassicIsConnected(device) && MonotonicTime() < publishDeadline) {
+                    RunLoopFor(0.05);
                     native = NativeOutputState(address);
                 }
-                if (native != 0 || device.isConnected) {
-                    BOOL connected = device.isConnected;
+                if (native != 0 || SonyClassicIsConnected(device)) {
+                    BOOL connected = SonyClassicIsConnected(device);
                     if (native == 1 && connected) printf("RESTORE_PRESERVED native=1 connected=1\n");
                     else if (native == 1) printf("RESTORE_UNCONFIRMED native=1 connected=0 reason=native-output-without-connection\n");
                     else if (native < 0) printf("RESTORE_UNCONFIRMED native=-1 connected=%d reason=output-inspection\n", connected);
@@ -333,18 +359,24 @@ int main(int argc, const char *argv[]) {
             }
         }
         if (disconnect) {
-            IOReturn status = device.isConnected ? [device closeConnection] : kIOReturnSuccess;
+            if (restore && SonyClassicIsConnected(device) &&
+                (!expectedHandleSeen || device.connectionHandle != expectedHandle)) {
+                printf("RESTORE_UNCONFIRMED connected=1 reason=unowned-connection expected=%04X current=%04X\n",
+                       expectedHandle, device.connectionHandle);
+                return 6;
+            }
+            IOReturn status = SonyClassicIsConnected(device) ? [device closeConnection] : kIOReturnSuccess;
             printf("DISCONNECT_RETURN time=%.6f status=0x%08X\n", NSDate.date.timeIntervalSince1970, status);
             if (status != kIOReturnSuccess) return 3;
-            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5];
-            while (device.isConnected && deadline.timeIntervalSinceNow > 0)
-                [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
-            BOOL disconnected = !device.isConnected;
+            double deadline = MonotonicTime() + 5;
+            while (SonyClassicIsConnected(device) && MonotonicTime() < deadline)
+                RunLoopFor(0.01);
+            BOOL disconnected = !SonyClassicIsConnected(device);
             printf("AFTER disconnected=%d connected=%d\n", disconnected, !disconnected);
             if (restore && disconnected) printf("RESTORE_DISCONNECTED disconnected=1\n");
             return disconnected ? 0 : 4;
         }
-        if (device.isConnected) return 2;
+        if (SonyClassicIsConnected(device)) return 2;
         if (watchParent && (ParentInputEnded() || ParentExited(parentEvents))) {
             printf("CONNECT_CANCELED issued=0 settled=1\n");
             return 0;
@@ -357,55 +389,55 @@ int main(int argc, const char *argv[]) {
         IOReturn status = [device openConnection:observer];
         printf("CONNECT_RETURN time=%.6f status=0x%08X\n", NSDate.date.timeIntervalSince1970, status);
         if (status != kIOReturnSuccess) return 3;
-        NSDate *deadline = restore ? restoreDeadline : [NSDate dateWithTimeIntervalSinceNow:45];
+        double deadline = restore ? restoreDeadline : MonotonicTime() + 45;
         BOOL cancelled = NO;
-        while (!observer.done && deadline.timeIntervalSinceNow > 0) {
+        while (!observer.done && MonotonicTime() < deadline) {
             if (watchParent && (ParentInputEnded() || ParentExited(parentEvents))) {
                 cancelled = YES;
                 break;
             }
-            [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+            RunLoopFor(0.01);
         }
         if (cancelled) {
             BOOL closeRequested = NO;
             IOReturn closeStatus = kIOReturnSuccess;
-            NSDate *cancelDeadline = [NSDate dateWithTimeIntervalSinceNow:2];
-            while (cancelDeadline.timeIntervalSinceNow > 0) {
-                if (observer.disconnected || (observer.done && device.isConnected && device.connectionHandle != observer.originalHandle)) {
+            double cancelDeadline = MonotonicTime() + 2;
+            while (MonotonicTime() < cancelDeadline) {
+                if (observer.disconnected || (observer.done && SonyClassicIsConnected(device) && device.connectionHandle != observer.originalHandle)) {
                     printf("CONNECT_CANCELED callback=%d originalDisconnected=%d retired=1\n", observer.done, observer.disconnected);
                     return 0;
                 }
-                if (device.isConnected && !closeRequested) {
+                if (observer.done && observer.status == kIOReturnSuccess && SonyClassicIsConnected(device) && !closeRequested) {
                     closeRequested = YES;
                     closeStatus = [device closeConnection];
                     printf("CONNECT_CANCEL_CLOSE status=0x%08X\n", closeStatus);
                 }
-                if (observer.done && !device.isConnected && closeStatus == kIOReturnSuccess) {
+                if (observer.done && !SonyClassicIsConnected(device) && closeStatus == kIOReturnSuccess) {
                     printf("CONNECT_CANCELED callback=1 disconnected=1 settled=1\n");
                     return 0;
                 }
-                [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+                RunLoopFor(0.01);
             }
             printf("CONNECT_CANCELLATION_UNCONFIRMED callback=%d disconnected=%d closeRequested=%d status=0x%08X\n",
-                   observer.done, !device.isConnected, closeRequested, closeStatus);
+                   observer.done, !SonyClassicIsConnected(device), closeRequested, closeStatus);
             return 5;
         }
-        printf("AFTER callback=%d status=0x%08X connected=%d\n", observer.done, observer.status, device.isConnected);
-        if (!observer.done) printf("CONNECT_TERMINAL_UNCONFIRMED callback=0 connected=%d\n", device.isConnected);
-        if (watchParent && observer.done && observer.status == kIOReturnSuccess && device.isConnected &&
+        printf("AFTER callback=%d status=0x%08X connected=%d\n", observer.done, observer.status, SonyClassicIsConnected(device));
+        if (!observer.done) printf("CONNECT_TERMINAL_UNCONFIRMED callback=0 connected=%d\n", SonyClassicIsConnected(device));
+        if (watchParent && observer.done && observer.status == kIOReturnSuccess && SonyClassicIsConnected(device) &&
             observer.originalHandle != kBluetoothConnectionHandleNone)
             return WatchConnection(device, observer, address, priorityUID, parentEvents);
         if (restore) {
-            int native = observer.done && observer.status == kIOReturnSuccess && device.isConnected ? NativeOutputState(address) : 0;
-            while (native == 0 && observer.done && observer.status == kIOReturnSuccess && device.isConnected && deadline.timeIntervalSinceNow > 0) {
-                [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+            int native = observer.done && observer.status == kIOReturnSuccess && SonyClassicIsConnected(device) ? NativeOutputState(address) : 0;
+            while (native == 0 && observer.done && observer.status == kIOReturnSuccess && SonyClassicIsConnected(device) && MonotonicTime() < deadline) {
+                RunLoopFor(0.05);
                 native = NativeOutputState(address);
             }
-            BOOL connected = device.isConnected;
+            BOOL connected = SonyClassicIsConnected(device);
             if (native == 1 && connected) printf("RESTORE_CONNECTED native=1 connected=1\n");
             else printf("RESTORE_UNCONFIRMED native=%d connected=%d callback=%d status=0x%08X\n", native, connected, observer.done, observer.status);
             return native == 1 && connected ? 0 : 6;
         }
-        return observer.done && observer.status == kIOReturnSuccess && device.isConnected ? 0 : 4;
+        return observer.done && observer.status == kIOReturnSuccess && SonyClassicIsConnected(device) ? 0 : 4;
     }
 }

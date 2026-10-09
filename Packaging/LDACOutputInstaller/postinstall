@@ -5,7 +5,7 @@ ldac_driver=/Library/Audio/Plug-Ins/HAL/AcoupletLDACOutput.driver
 ldac_legacy_driver=/Library/Audio/Plug-Ins/HAL/XM5LDACOutput.driver
 ldac_team='@ACOUPLET_LDAC_SIGNING_TEAM_ID@'
 if [ ! -d "$ldac_driver" ] ||
-   [ "$(/usr/libexec/PlistBuddy -c 'Print :AcoupletLDACDriverRevision' "$ldac_driver/Contents/Info.plist" 2>/dev/null || true)" != 3 ]; then
+   [ "$(/usr/libexec/PlistBuddy -c 'Print :AcoupletLDACDriverRevision' "$ldac_driver/Contents/Info.plist" 2>/dev/null || true)" != 5 ]; then
     printf '%s\n' 'The installed driver does not match the required Acouplet LDAC output revision. The previous driver was preserved.' >&2
     exit 1
 fi
@@ -27,6 +27,31 @@ for ldac_driver in "$ldac_driver" "$ldac_legacy_driver"; do
             --test-requirement="=anchor apple generic and certificate leaf[subject.OU] = \"$ldac_team\"" "$ldac_driver"
     fi
 done
+ldac_support='/Library/Application Support/Acouplet'
+ldac_lock="$ldac_support/ldac-route-owner.lock"
+if [ ! -e "$ldac_support" ] && [ ! -L "$ldac_support" ]; then
+    /usr/bin/install -d -o root -g wheel -m 755 "$ldac_support"
+fi
+if [ -L "$ldac_support" ] || [ ! -d "$ldac_support" ] ||
+   [ "$(/usr/bin/stat -f '%u:%Lp' "$ldac_support")" != 0:755 ]; then
+    printf '%s\n' 'The LDAC route ownership directory is invalid. The previous driver was preserved.' >&2
+    exit 1
+fi
+if [ ! -e "$ldac_lock" ] && [ ! -L "$ldac_lock" ]; then
+    (umask 022; set -C; : > "$ldac_lock")
+    /usr/sbin/chown root:wheel "$ldac_lock"
+fi
+if [ -L "$ldac_lock" ] || [ ! -f "$ldac_lock" ]; then
+    printf '%s\n' 'The LDAC route ownership file is invalid. The previous driver was preserved.' >&2
+    exit 1
+fi
+case "$(/usr/bin/stat -f '%u:%Lp:%l' "$ldac_lock")" in
+    0:644:1|0:444:1) ;;
+    *)
+        printf '%s\n' 'The LDAC route ownership file is invalid. The previous driver was preserved.' >&2
+        exit 1
+        ;;
+esac
 if [ -d "$ldac_legacy_driver" ]; then
     /bin/rm -rf "$ldac_legacy_driver"
 fi

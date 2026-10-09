@@ -21,7 +21,7 @@ struct SonyNativeBatterySnapshot: Equatable, Sendable {
     }
 
     let identifier: UUID
-    let name: String
+    var name: String
     private(set) var left: Reading?
     private(set) var right: Reading?
     private(set) var caseBattery: Reading?
@@ -54,7 +54,7 @@ struct SonyNativeBatterySnapshot: Equatable, Sendable {
         let fresh = freshReadings(at: date)
         let parts = [("Left", left), ("Right", right), ("Case", caseBattery)].map { name, reading in
             guard let reading else { return "\(name): unknown" }
-            return "\(name): \(reading.level)%, \(reading.isCharging ? "charging" : "not charging"), observed \(reading.observedAt.ISO8601Format()), \(fresh[name] != nil ? "fresh" : "expired")"
+            return "\(name): \(reading.level)%, \(reading.isCharging ? "charging" : "not charging"), received \(reading.observedAt.ISO8601Format()), \(fresh[name] != nil ? "fresh" : "expired")"
         }.joined(separator: "; ")
         return parts
     }

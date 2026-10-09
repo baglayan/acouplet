@@ -501,7 +501,7 @@ final class SonyDeviceActionControllerTests: XCTestCase {
         XCTAssertEqual(failed?.phase, .failed)
         controller.completeSimulatedWrite()
         XCTAssertFalse(controller.simulatedDeviceActionTimeoutPending)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: result(address: mac.address, value: 0)), session: session)
+        controller.simulateProtocolMessage(result(address: mac.address, value: 0), type: 0x0E, session: session)
         XCTAssertEqual(controller.deviceActionTransition, failed)
         XCTAssertNil(controller.simulatedPendingFrame)
         controller.simulateAutomaticRefresh()
@@ -545,7 +545,7 @@ final class SonyDeviceActionControllerTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0E, to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload, type: type)
     }
 
     private func result(address: String, value: UInt8) -> [UInt8] {

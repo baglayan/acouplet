@@ -3,6 +3,122 @@ import XCTest
 
 final class SonyEarTipFitControllerTests: XCTestCase {
     @MainActor
+    func testDismissingHeadphoneTestAfterDeviceSelectionReleasesOnlyItsOwner() throws {
+        for practice in [false, true] {
+            let devices = SonyDeviceCoordinator(fallbackController: SonyHeadphonesController(startAutomatically: false, simulated: true)) { device in
+                let controller = SonyHeadphonesController(startAutomatically: false, simulated: true,
+                    pinnedAddress: device.address, advertisedName: device.name)
+                controller.simulateDeviceConnection(named: device.name, simulatedAddress: device.address)
+                return controller
+            }
+            defer { devices.stop() }
+            let first = try XCTUnwrap(SonyConnectedDevice(address: "02:53:4F:4E:59:01", name: "WF-1000XM5", model: .wfXM5))
+            let second = try XCTUnwrap(SonyConnectedDevice(address: "02:53:4F:4E:59:02", name: "WF-1000XM5", model: .wfXM5))
+            devices.reconcileConnectedDevices([first, second])
+            devices.select(address: first.address)
+            let owner = devices.selectedController
+            let oldID: UUID
+            if practice {
+                XCTAssertTrue(owner.beginHeadGesturePractice())
+                oldID = try XCTUnwrap(owner.headGesturePracticeTransition?.id)
+                deliver([0xF3, 0x10, 0], to: owner)
+                try acknowledge(SonyHeadGesturePractice.queryPayload, on: owner)
+            } else { oldID = try prepare(owner) }
+            devices.select(address: second.address)
+            let selected = devices.selectedController
+            XCTAssertFalse(selected === owner)
+            let newID = try prepare(selected)
+            if practice { owner.cancelHeadGesturePractice(id: oldID, dismissWhenFinished: true) }
+            else { owner.cancelEarTipFit(id: oldID, dismissWhenFinished: true) }
+            XCTAssertNil(owner.headGesturePracticeTransition)
+            XCTAssertNil(owner.earTipFitTransition)
+            XCTAssertEqual(selected.earTipFitTransition?.id, newID)
+            XCTAssertEqual(selected.earTipFitTransition?.phase, .ready)
+            XCTAssertFalse(owner.isRunningHeadphoneTest)
+            XCTAssertTrue(owner.beginEarTipFit())
+        }
+    }
+
+    @MainActor
+    func testDismissingFitSheetRetainsOwnershipUntilConfirmedExit() throws {
+        for outcome in ["confirmed", "disconnected", "timeout"] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            let id = try measure(controller)
+            controller.cancelEarTipFit(id: UUID(), dismissWhenFinished: true)
+            XCTAssertEqual(controller.earTipFitTransition?.phase, .measuring)
+            controller.cancelEarTipFit(id: id, dismissWhenFinished: true)
+            XCTAssertEqual(controller.earTipFitTransition?.phase, .cancelling)
+            XCTAssertTrue(controller.isRunningHeadphoneTest)
+            XCTAssertFalse(controller.beginHeadGesturePractice())
+            try acknowledge(cancel, on: controller)
+            deliver(notStarted, to: controller)
+            XCTAssertEqual(controller.earTipFitTransition?.phase, .leaving)
+            try acknowledge(SonyEarTipFit.exitModePayload, on: controller)
+            if outcome == "confirmed" {
+                deliver(modeOut, to: controller)
+                XCTAssertNil(controller.earTipFitTransition)
+                XCTAssertFalse(controller.simulatedEarTipFitTimeoutPending)
+                let replacement = try prepare(controller)
+                XCTAssertNotEqual(replacement, id)
+                controller.cancelEarTipFit(id: id, dismissWhenFinished: true)
+                XCTAssertEqual(controller.earTipFitTransition?.id, replacement)
+                XCTAssertEqual(controller.earTipFitTransition?.phase, .ready)
+            } else {
+                if outcome == "disconnected" { controller.simulateControlLoss(deviceConnected: true) }
+                else { controller.simulateEarTipFitTimeout() }
+                XCTAssertEqual(controller.earTipFitTransition?.phase, .interrupted)
+                XCTAssertTrue(controller.isRunningHeadphoneTest)
+                controller.simulateAutomaticRefresh()
+                XCTAssertEqual(controller.earTipFitTransition?.id, id)
+                XCTAssertNil(controller.simulatedPendingFrame)
+                controller.connect()
+                XCTAssertNil(controller.earTipFitTransition)
+            }
+            XCTAssertEqual(payloads(controller).filter { $0 == SonyEarTipFit.exitModePayload }.count, 1)
+        }
+    }
+
+    @MainActor
+    func testDismissingFitDiscoveryDrainsOwnedRepliesOrConnectionBeforeRelease() throws {
+        for disconnect in [false, true] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            XCTAssertTrue(controller.beginEarTipFit())
+            let id = try XCTUnwrap(controller.earTipFitTransition?.id)
+            controller.cancelEarTipFit(id: id, dismissWhenFinished: true)
+            XCTAssertEqual(controller.earTipFitTransition?.phase, .checking)
+            if disconnect { controller.simulateControlLoss(deviceConnected: true) }
+            else { try completeDiscovery(controller) }
+            XCTAssertNil(controller.earTipFitTransition)
+            XCTAssertFalse(controller.simulatedEarTipFitTimeoutPending)
+            XCTAssertFalse(controller.isRunningHeadphoneTest)
+            XCTAssertFalse(payloads(controller).contains(SonyEarTipFit.enterModePayload))
+        }
+    }
+
+    @MainActor
+    func testControlLossBeforeStartReleasesFitTestAndAllowsAutomaticReconnect() throws {
+        for ready in [false, true] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            controller.setReconnectAutomatically(true)
+            if ready { _ = try prepare(controller) }
+            else { XCTAssertTrue(controller.beginEarTipFit()) }
+            XCTAssertTrue(controller.isRunningHeadphoneTest)
+            controller.simulateControlLoss(deviceConnected: true)
+            XCTAssertEqual(controller.earTipFitTransition?.phase, .finished)
+            XCTAssertFalse(controller.isRunningHeadphoneTest)
+            XCTAssertFalse(controller.simulatedEarTipFitTimeoutPending)
+            controller.simulateAutomaticRefresh()
+            XCTAssertEqual(controller.linkState, .handshaking)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0, 0])
+            XCTAssertFalse(payloads(controller).contains(SonyEarTipFit.enterModePayload))
+            XCTAssertFalse(payloads(controller).contains(start))
+        }
+    }
+
+    @MainActor
     func testDiscoveryOwnsEachTransmittedQueryAndWaitsForFinalAcknowledgment() throws {
         let controller = readyController()
         defer { controller.simulateControlLoss() }
@@ -426,7 +542,8 @@ final class SonyEarTipFitControllerTests: XCTestCase {
                 let session = controller.simulatedControlSession
                 controller.simulateControlLoss()
                 for reply in initialReplies { deliver(reply, session: session, to: controller) }
-                XCTAssertEqual(controller.earTipFitTransition?.phase, .interrupted)
+                XCTAssertEqual(controller.earTipFitTransition?.phase, .finished)
+                XCTAssertFalse(controller.isRunningHeadphoneTest)
             } else {
                 if interruption == "checking" { controller.cancelEarTipFit(id: id) }
                 for var reply in initialReplies {
@@ -529,13 +646,14 @@ final class SonyEarTipFitControllerTests: XCTestCase {
             XCTAssertEqual(pending.payload, stallStart ? start : [0xF0, 6])
             XCTAssertFalse(controller.earTipFitTransition?.commandTransmitted ?? true)
             controller.simulateEarTipFitTimeout()
-            XCTAssertEqual(controller.earTipFitTransition?.phase, .interrupted)
+            XCTAssertEqual(controller.earTipFitTransition?.phase, stallStart ? .interrupted : .finished)
+            XCTAssertEqual(controller.isRunningHeadphoneTest, stallStart)
             XCTAssertNil(controller.simulatedPendingFrame)
             XCTAssertNotEqual(controller.simulatedControlSession, session)
             XCTAssertNotNil(controller.lastErrorMessage)
             controller.completeSimulatedWrite()
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - pending.sequence, payload: []), session: session)
-            XCTAssertEqual(controller.earTipFitTransition?.phase, .interrupted)
+            XCTAssertEqual(controller.earTipFitTransition?.phase, stallStart ? .interrupted : .finished)
             XCTAssertNil(controller.simulatedPendingFrame)
             XCTAssertFalse(controller.earTipFitTransition?.commandTransmitted ?? true)
         }
@@ -651,7 +769,7 @@ final class SonyEarTipFitControllerTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, session: UInt64? = nil, to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), session: session)
+        controller.simulateProtocolMessage(payload, type: type, session: session)
     }
 
     @MainActor

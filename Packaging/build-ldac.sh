@@ -4,10 +4,12 @@ set -eu
 ldac_helpers="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
 ldac_resources="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Resources"
 ldac_build="$DERIVED_FILE_DIR/LDAC"
+mkdir -p "$ldac_resources"
+/usr/bin/xcrun xcstringstool compile "$SRCROOT/Resources/InfoPlist.xcstrings" --output-directory "$ldac_resources"
 if [ "${ACOUPLET_PUBLIC_APIS_ONLY:-NO}" = YES ] || [ "${CONFIGURATION:-}" = AppStore ]; then
-    rm -f "$ldac_helpers/LDACSignaling" "$ldac_helpers/LDACMediaTransport" "$ldac_helpers/SonyAudioConnection"
+    rm -f "$ldac_helpers/LDACSignaling" "$ldac_helpers/LDACMediaTransport" "$ldac_helpers/SonyAudioConnection" "$ldac_helpers/LDACLogObserver"
     rm -rf "$ldac_helpers/Acouplet Audio.app" "$ldac_helpers/AcoupletLDACOutput.driver" "$ldac_build"
-    rm -f "$ldac_resources/LDAC-LICENSE.txt" "$ldac_resources/LDAC-NOTICE.txt" "$ldac_resources/Acouplet LDAC Output.pkg"
+    rm -f "$ldac_resources/LDAC-LICENSE.txt" "$ldac_resources/LDAC-NOTICE.txt" "$ldac_resources/Acouplet LDAC Output.pkg" "$ldac_resources/Acouplet LDAC Removal.pkg"
     exit 0
 fi
 ldac_source="$SRCROOT/Helpers/LDAC"
@@ -35,13 +37,24 @@ build_transport() {
     fi
 }
 
-build_transport LDACSignaling DirectAVDTPSustainedPlaybackProbe.m
-build_transport LDACMediaTransport DirectAVDTPLiveMediaProbe.m -I "$ldac_encoder/inc" -I "$ldac_encoder/src" "$ldac_encoder/src/ldacBT.c" "$ldac_encoder/src/ldaclib.c"
+"$ldac_clang" $ldac_arch_flags -isysroot "$ldac_sdk" "-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET:-15.4}" -O2 -Wall -Wextra -Werror \
+    "$ldac_source/LDACLogObserver.c" -o "$ldac_helpers/LDACLogObserver"
+if [ "${CODE_SIGNING_ALLOWED:-NO}" != NO ]; then
+    /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:--}" --identifier "dev.baglayan.Acouplet.LDACLogObserver" --options runtime --timestamp=none "$ldac_helpers/LDACLogObserver"
+fi
+
+build_transport LDACSignaling DirectAVDTPSustainedPlaybackProbe.m -DACOUPLET_LDAC_PROBE_ONLY=0
+build_transport LDACMediaTransport DirectAVDTPLiveMediaProbe.m -DACOUPLET_LDAC_PROBE_ONLY=0 -I "$ldac_encoder/inc" -I "$ldac_encoder/src" "$ldac_encoder/src/ldacBT.c" "$ldac_encoder/src/ldaclib.c"
 build_transport SonyAudioConnection PairedSonyConnectionProbe.m -framework CoreAudio
 ldac_audio="$ldac_helpers/Acouplet Audio.app"
 mkdir -p "$ldac_audio/Contents/MacOS"
 /bin/cp "$ldac_source/AcoupletAudio.Info.plist" "$ldac_audio/Contents/Info.plist"
 /usr/bin/plutil -replace CFBundleVersion -string "$CURRENT_PROJECT_VERSION" "$ldac_audio/Contents/Info.plist"
+/usr/bin/xcrun xcstringstool compile "$ldac_source/Resources/InfoPlist.xcstrings" --output-directory "$ldac_audio/Contents/Resources"
+for ldac_language in en tr; do
+    ldac_audio_description="$(/usr/bin/plutil -extract NSAudioCaptureUsageDescription raw -o - "$ldac_audio/Contents/Resources/$ldac_language.lproj/InfoPlist.strings")"
+    /usr/bin/plutil -insert NSAudioCaptureUsageDescription -string "$ldac_audio_description" "$ldac_resources/$ldac_language.lproj/InfoPlist.strings"
+done
 "$ldac_clang" $ldac_arch_flags -isysroot "$ldac_sdk" -mmacosx-version-min=15.4 -O2 -fobjc-arc -fblocks \
     -DACOUPLET_AUDIO_HELPER_BUNDLE_ID='"dev.baglayan.Acouplet.ldac-audio"' -DACOUPLET_AUDIO_HELPER_STREAM_ONLY=1 \
     -framework Foundation -framework CoreFoundation -framework CoreAudio -framework AudioToolbox \
@@ -58,7 +71,7 @@ mkdir -p "$ldac_driver/Contents/MacOS" "$ldac_driver/Contents/Resources"
 /bin/cp "$ldac_source/VirtualOutput/LICENSE.txt" "$ldac_driver/Contents/Resources/LICENSE.txt"
 /bin/cp "$ldac_source/VirtualOutput/Resources/Headphones.png" "$ldac_source/VirtualOutput/Resources/Earbuds.png" "$ldac_source/VirtualOutput/Resources/Speaker.png" "$ldac_driver/Contents/Resources/"
 "$ldac_clang" $ldac_arch_flags -isysroot "$ldac_sdk" "-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET:-15.4}" -std=gnu11 -O2 -fblocks -Werror -bundle \
-    -framework CoreAudio -framework CoreFoundation "$ldac_source/VirtualOutput/AcoupletVirtualOutput.c" \
+    -framework CoreAudio -framework CoreFoundation -framework Security "$ldac_source/VirtualOutput/AcoupletVirtualOutput.c" \
     -o "$ldac_driver/Contents/MacOS/AcoupletVirtualOutput"
 if [ "${CODE_SIGNING_ALLOWED:-NO}" != NO ]; then
     ldac_timestamp=--timestamp=none

@@ -18,7 +18,7 @@ struct SonyConnectedDevice: Identifiable, Equatable {
 }
 
 @MainActor
-final class SonyDeviceCoordinator: ObservableObject {
+final class SonyDeviceCoordinator: NSObject, ObservableObject {
     private struct NoiseControlTarget {
         let identifier: String
         let address: String
@@ -75,6 +75,7 @@ final class SonyDeviceCoordinator: ObservableObject {
     private var earbudFindingTerminationSessions = Set<UUID>()
 
     var discoveryTimer: Timer?
+    var bluetoothAuthorizationManager: CBCentralManager?
     var discoveryGeneration: UInt64 = 0
     @Published var isDiscovering = false
     @Published var isSystemSleeping = false
@@ -109,6 +110,7 @@ final class SonyDeviceCoordinator: ObservableObject {
          controllerFactory: @escaping (SonyConnectedDevice) -> SonyHeadphonesController) {
         self.fallbackController = fallbackController
         self.controllerFactory = controllerFactory
+        super.init()
         fallbackObservation = fallbackController.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -132,8 +134,22 @@ final class SonyDeviceCoordinator: ObservableObject {
         SonyBLEIdentity.normalizedAddress(address).flatMap { controllersByAddress[$0] }
     }
 
-    func reportBluetoothAuthorization(_ authorization: CBManagerAuthorization) {
+    @discardableResult
+    func reportBluetoothAuthorization(_ authorization: CBManagerAuthorization) -> Bool {
         fallbackController.reportBluetoothAuthorization(authorization)
+        guard isRunning, !isSystemSleeping else { return false }
+        guard authorization == .allowedAlways else {
+            discoveryGeneration += 1
+            isDiscovering = false
+            discoveryTimer?.invalidate()
+            discoveryTimer = nil
+            for controller in controllers {
+                controller.stop()
+                controller.reportBluetoothAuthorization(authorization)
+            }
+            return false
+        }
+        return !isDiscovering && discoveryTimer == nil
     }
 
     func select(address: String) {
@@ -345,9 +361,10 @@ final class SonyDeviceCoordinator: ObservableObject {
         guard let nativeBatteryPublisher else { return }
         guard isRunning, !isSystemSleeping else { nativeBatteryPublisher.revoke(); return }
         let date = Date()
-        nativeBatteryPublisher.reconcile(controllers.filter {
+        let eligible = controllers.filter {
             !retiredControllerAddresses.contains($0.address)
-        }.compactMap { $0.nativeBatteryPublication(at: date) })
+        }
+        nativeBatteryPublisher.reconcile(eligible.compactMap { $0.nativeBatteryPublication(at: date) })
     }
 
     #endif

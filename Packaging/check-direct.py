@@ -36,6 +36,22 @@ def command(args, **kwargs):
             assert args[1] == '--expand-full'
             target.mkdir()
             app = Path(args[2]).parents[2]
+            if Path(args[2]).name == 'Acouplet LDAC Removal.pkg':
+                (target / 'Scripts').mkdir()
+                script = target / 'Scripts/postinstall'
+                script.write_text((packaging / 'LDACOutputUninstaller/postinstall').read_text().replace('@ACOUPLET_LDAC_SIGNING_TEAM_ID@', 'OTHER67890' if failure == ('scripts-team', 'Acouplet LDAC Removal.pkg') else 'ABCDE12345'))
+                script.chmod(0o755)
+                (target / 'PackageInfo').write_text('<pkg-info identifier="dev.baglayan.Acouplet.LDACOutput.Removal" version="0.22"><scripts><postinstall file="./postinstall"/></scripts></pkg-info>')
+                if failure == ('payload', 'Acouplet LDAC Removal.pkg'):
+                    (target / 'Payload').mkdir()
+                    (target / 'Payload/unexpected').touch()
+                if failure == ('scripts', 'Acouplet LDAC Removal.pkg'): script.write_text('different script')
+                if failure == ('scripts-extra', 'Acouplet LDAC Removal.pkg'): (target / 'Scripts/unexpected').touch()
+                if failure == ('scripts-mode', 'Acouplet LDAC Removal.pkg'): script.chmod(0o644)
+                if failure == ('identity', 'Acouplet LDAC Removal.pkg'):
+                    info = target / 'PackageInfo'
+                    info.write_text(info.read_text().replace('LDACOutput.Removal', 'LDACOutput'))
+                return subprocess.CompletedProcess(args, status, stdout, stderr)
             driver = target / 'Payload/AcoupletLDACOutput.driver'
             shutil.copytree(app / 'Contents/Helpers/AcoupletLDACOutput.driver', driver)
             (target / 'Scripts').mkdir()
@@ -88,6 +104,7 @@ def sparkle_fixture(app):
     resources.mkdir(exist_ok=True)
     (resources / 'Sparkle-LICENSE.txt').write_text('Copyright (c) 2006-2013 Andy Matuschak.')
     (resources / 'Acouplet LDAC Output.pkg').write_text('signed installer')
+    (resources / 'Acouplet LDAC Removal.pkg').write_text('signed uninstaller')
     driver = app / 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput'
     driver.parent.mkdir(parents=True, exist_ok=True)
     driver.write_text('driver')
@@ -107,12 +124,12 @@ with tempfile.TemporaryDirectory(prefix='acouplet-direct-check-') as directory:
         calls.clear()
         report = inspect_package(root, False, dmg)
         assert not report['blockers'] and report['stapled_tickets_verified']
-        assert [args[-1] for args in calls if args[1:3] == ['stapler', 'validate']] == [str(root / 'Acouplet.app/Contents/Resources/Acouplet LDAC Output.pkg'), str(dmg)]
-        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'release.dmg'):
+        assert [args[-1] for args in calls if args[1:3] == ['stapler', 'validate']] == [str(root / 'Acouplet.app/Contents/Resources/Acouplet LDAC Output.pkg'), str(root / 'Acouplet.app/Contents/Resources/Acouplet LDAC Removal.pkg'), str(dmg)]
+        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'release.dmg'):
             for check in ('signature', 'developer-id', 'timestamp', 'team'):
                 failure = (check, name)
                 assert inspect_package(root, True, dmg)['blockers'], failure
-        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'):
+        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'):
             for check in ('runtime', 'debugger'):
                 failure = (check, name)
                 assert inspect_package(root, True, dmg)['blockers'], failure
@@ -124,6 +141,9 @@ with tempfile.TemporaryDirectory(prefix='acouplet-direct-check-') as directory:
             assert inspect_package(root, True, dmg)['blockers'], failure
         for check in ('signature', 'developer-id', 'timestamp', 'team', 'payload', 'scripts', 'scripts-team', 'scripts-extra', 'scripts-mode', 'mode', 'staple'):
             failure = (check, 'Acouplet LDAC Output.pkg')
+            assert inspect_package(root, check != 'staple', dmg)['blockers'], failure
+        for check in ('signature', 'developer-id', 'timestamp', 'team', 'payload', 'scripts', 'scripts-team', 'scripts-extra', 'scripts-mode', 'identity', 'staple'):
+            failure = (check, 'Acouplet LDAC Removal.pkg')
             assert inspect_package(root, check != 'staple', dmg)['blockers'], failure
         failure = ('staple', dmg.name)
         assert inspect_package(root, False, dmg)['blockers']
@@ -154,6 +174,7 @@ elif name == 'ditto': shutil.copytree(args[0], args[1])
 elif name == 'build-ldac-output-installer.sh':
     assert Path(args[0]).name == 'AcoupletLDACOutput.driver' and args[2] == '0.22'
     Path(args[1]).write_text('fresh final signed installer')
+    Path(args[1]).with_name('Acouplet LDAC Removal.pkg').write_text('fresh final signed uninstaller')
 elif name == 'swift':
     assert len(args) == 4 and Path(args[0]).name == 'DMGBackground.swift'
     icon, background = Path(args[1]), Path(args[2])
@@ -192,11 +213,26 @@ elif name == 'xcrun':
 elif name == 'spctl':
     if mode == 'gatekeeper-failure': sys.exit(1)
 elif name == 'python3':
-    if Path(args[0]).name == 'check-distribution.py':
+    if Path(args[0]).name == 'check-all.py':
+        assert len(args) == 1
+        if mode == 'tests-failure': sys.exit('Fixture test failure')
+    elif Path(args[0]).name == 'release-source.py':
+        action = args[1]
+        if action == 'capture':
+            if mode == 'source-dirty': sys.exit('Production packaging requires clean source.')
+            Path(args[3]).write_text('source snapshot')
+        else:
+            assert Path(args[3]).read_text() == 'source snapshot'
+            commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()]
+            if mode == 'source-drift' or (mode == 'source-drift-before-notary' and any(command[0] == 'create-dmg.sh' for command in commands)) or (mode == 'source-drift-after-notary' and any(command[0] == 'spctl' for command in commands)):
+                sys.exit('Release source changed during packaging.')
+            print('Revision: ' + 'a' * 40 + '\nWorktree: production clean')
+    elif Path(args[0]).name == 'check-distribution.py':
         if mode == 'check-failure': sys.exit(1)
         print('{}')
     elif Path(args[0]).name == 'notarize-ldac-installer.py':
         assert Path(args[1], 'Contents/Resources/Acouplet LDAC Output.pkg').read_text() == 'fresh final signed installer'
+        assert Path(args[1], 'Contents/Resources/Acouplet LDAC Removal.pkg').read_text() == 'fresh final signed uninstaller'
         if mode == 'installer-notary-failure': sys.exit(1)
     else: sys.exit(subprocess.call(['/usr/bin/python3', *args]))
 else: raise AssertionError(name)
@@ -220,7 +256,7 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True, a
         script.write_text(source)
         prepared = root / '.build/package/Acouplet'
         app = prepared / 'Acouplet.app'
-        for relative in ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist'):
+        for relative in ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/LDACLogObserver', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist'):
             target = app / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('original')
@@ -253,6 +289,11 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True, a
         commands = [json.loads(line) for line in (root / 'commands.jsonl').read_text().splitlines()] if (root / 'commands.jsonl').exists() else []
         assert local_previous.read_text() == 'previous development receipt'
         if succeeds:
+            assert Path(commands[0][1]).name == 'release-source.py' and commands[0][2] == 'capture'
+            tests_index = next(index for index, args in enumerate(commands) if args[0] == 'python3' and Path(args[1]).name == 'check-all.py')
+            package_index = next(index for index, args in enumerate(commands) if args[0] == 'package.sh')
+            assert 0 < tests_index < package_index
+            assert commands[tests_index + 1][2] == 'verify'
             signed = [Path(args[-1]).name for args in commands if args[0] == 'codesign']
             installer_index = next(index for index, args in enumerate(commands) if args[0] == 'build-ldac-output-installer.sh')
             background_index = next(index for index, args in enumerate(commands) if args[0] == 'swift')
@@ -261,7 +302,7 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True, a
             if notarize:
                 notary_index = next(index for index, args in enumerate(commands) if args[0] == 'python3' and Path(args[1]).name == 'notarize-ldac-installer.py')
                 assert installer_index < notary_index < outer_index
-            assert signed == ['SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Acouplet Battery Publisher', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'Acouplet.app', 'Acouplet-0.22.dmg'], signed
+            assert signed == ['SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Acouplet Battery Publisher', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'Acouplet.app', 'Acouplet-0.22.dmg'], signed
             assert previous.read_text() == ('signed image' if notarize else 'previous release')
             assert any(args[:3] == ['xcrun', 'notarytool', 'submit'] for args in commands) == notarize
             assert (prepared / 'Build Receipt.txt').read_text() == 'original receipt'
@@ -274,6 +315,13 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True, a
             if mode == 'background-failure':
                 assert commands[-1][0] == 'swift'
                 assert not any(args[0] == 'codesign' and Path(args[-1]).name == 'Acouplet.app' for args in commands)
+            if mode.startswith('source-'):
+                assert Path(commands[-1][1]).name == 'release-source.py'
+                if mode == 'source-dirty': assert not any(args[0] == 'package.sh' for args in commands)
+                if mode != 'source-drift-after-notary': assert not any(args[:3] == ['xcrun', 'notarytool', 'submit'] for args in commands)
+            if mode == 'tests-failure':
+                assert Path(commands[-1][1]).name == 'check-all.py'
+                assert not any(args[0] in ('package.sh', 'codesign', 'xcrun') for args in commands)
         print('direct release ' + mode + (' notarized' if notarize else '') + ': passed')
 
 
@@ -284,5 +332,5 @@ check_release(signing={'CODE_SIGN_IDENTITY': 'A' * 40})
 check_release(signing={}, succeeds=False)
 check_release(signing={'CODE_SIGN_IDENTITY': 'Apple Development'}, succeeds=False)
 check_release(signing={'CODE_SIGN_IDENTITY': 'Developer ID Application: Example (ABCDE12345)'}, notarize=True, succeeds=False)
-for mode in ('build-failure', 'sign-failure', 'background-failure', 'image-failure', 'check-failure', 'notary-invalid', 'staple-failure', 'gatekeeper-failure', 'installer-notary-failure'):
+for mode in ('tests-failure', 'build-failure', 'sign-failure', 'background-failure', 'image-failure', 'check-failure', 'notary-invalid', 'staple-failure', 'gatekeeper-failure', 'installer-notary-failure', 'source-dirty', 'source-drift', 'source-drift-before-notary', 'source-drift-after-notary'):
     check_release(mode, notarize=True, succeeds=False)

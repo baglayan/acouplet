@@ -343,7 +343,7 @@ final class SonyNativeHUD {
             panel?.contentView = contentView
             self.hostingView = hostingView
         }
-        panel?.title = image == nil ? "Noise Control" : mode
+        panel?.title = image == nil ? String(localized: "Noise Control", bundle: .main) : mode
         #if DEBUG
         logGeometry("hosting updated: \(mode)")
         #endif

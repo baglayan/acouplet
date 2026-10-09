@@ -172,19 +172,24 @@ final class SonyLegacySoundEffectControllerTests: XCTestCase {
     func testQueuedWriteRevalidatesAvailabilityBeforeTransmission() {
         let controller = readyController()
         defer { controller.simulateControlLoss() }
+        let session = controller.simulatedControlSession
         controller.refresh()
         controller.setLegacySoundEffect(.surround, preset: 3)
         XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.surround)])
         deliver([0x45, 1, 1], to: controller)
         acknowledgeAll(controller)
         XCTAssertFalse(payloads(controller).contains { $0.first == 0x48 })
-        XCTAssertFalse(controller.isReady)
-        XCTAssertNotNil(controller.lastErrorMessage)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.settingErrors[.legacySoundEffect(.surround)], "Sound effects became unavailable before the change could be sent.")
         XCTAssertTrue(controller.pendingChanges.isEmpty)
     }
 
-    func testReadDeadlineStartsOnTransmissionAndUnansweredMetadataEndsTheSession() async {
-        for query: [UInt8] in [[0x40, 1, 1], [0x42, 1], [0x46, 1]] {
+    func testReadDeadlineStartsOnTransmissionAndExpiryDisablesOnlyTheAffectedEffect() async throws {
+        for reply in replies {
+            let query: [UInt8] = [reply[0] - 1, reply[1]] + (reply[0] == 0x41 ? [1] : [])
+            let kind = try XCTUnwrap(SonyLegacySoundEffect.Kind(rawValue: reply[1]))
+            let otherKind: SonyLegacySoundEffect.Kind = kind == .surround ? .soundPosition : .surround
             let controller = beginDiscovery()
             defer { controller.simulateControlLoss() }
             let session = controller.simulatedControlSession
@@ -192,19 +197,35 @@ final class SonyLegacySoundEffectControllerTests: XCTestCase {
             for _ in 0..<4 { await Task.yield() }
             XCTAssertTrue(controller.isReady)
             acknowledgeAll(controller)
+            for other in replies where other != reply { deliver(other, to: controller) }
             controller.simulateLegacySoundEffectReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertFalse(controller.isReady)
-            XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            XCTAssertNotNil(controller.lastErrorMessage)
-            for reply in replies { deliver(reply, session: session, to: controller) }
-            XCTAssertFalse(controller.legacySurround.canSet)
-            XCTAssertFalse(controller.legacySoundPosition.canSet)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertTrue(controller.canChangeNoiseControl)
+            XCTAssertFalse(controller.canSetLegacySoundEffect(kind))
+            XCTAssertTrue(controller.canSetLegacySoundEffect(otherKind))
+            XCTAssertEqual(controller.settingErrors[.legacySoundEffect(kind)], "\(kind.title) settings are unavailable.")
+            let reads = payloads(controller).filter { $0 == query }.count
+            for _ in 0..<5 { controller.simulateAutomaticRefresh() }
+            acknowledgeAll(controller)
+            XCTAssertEqual(payloads(controller).filter { $0 == query }.count, reads)
+            deliver(Array(reply.dropLast()), to: controller)
+            acknowledgeAll(controller)
+            XCTAssertEqual(payloads(controller).filter { $0 == query }.count, reads)
+            XCTAssertFalse(controller.canSetLegacySoundEffect(kind))
+            deliver(reply, to: controller)
+            XCTAssertFalse(controller.canSetLegacySoundEffect(kind))
+            acknowledgeAll(controller)
+            XCTAssertEqual(payloads(controller).filter { $0 == query }.count, reads + 1)
+            deliver(reply, to: controller)
+            XCTAssertTrue(controller.canSetLegacySoundEffect(kind))
+            XCTAssertNil(controller.settingErrors[.legacySoundEffect(kind)])
             XCTAssertTrue(controller.pendingChanges.isEmpty)
         }
     }
 
-    func testUnansweredOldPollCannotLeaveANewWritePendingForever() async {
+    func testExpiredOldPollCannotConfirmALaterWriteAndSettingDeadlineRetainsUncertainty() async {
         let controller = readyController()
         defer { controller.simulateControlLoss() }
         controller.refresh()
@@ -216,11 +237,55 @@ final class SonyLegacySoundEffectControllerTests: XCTestCase {
         let session = controller.simulatedControlSession
         controller.simulateLegacySoundEffectReadTimeout([0x46, 2])
         for _ in 0..<4 { await Task.yield() }
-        XCTAssertFalse(controller.isReady)
-        XCTAssertGreaterThan(controller.simulatedControlSession, session)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertNotNil(controller.pendingChanges[.legacySoundEffect(.soundPosition)])
+        controller.simulateLegacySoundEffectSettingTimeout(.soundPosition)
+        for _ in 0..<4 { await Task.yield() }
         XCTAssertTrue(controller.pendingChanges.isEmpty)
-        deliver([0x47, 2, 0x12], session: session, to: controller)
-        XCTAssertNil(controller.legacySoundPosition.presetID)
+        XCTAssertNotNil(controller.settingErrors[.legacySoundEffect(.soundPosition)])
+        deliver([0x47, 2, 0x12], to: controller)
+        XCTAssertEqual(controller.legacySoundPosition.presetID, 0)
+        XCTAssertFalse(controller.canSetLegacySoundEffect(.soundPosition))
+        XCTAssertNotNil(controller.settingErrors[.legacySoundEffect(.soundPosition)])
+        acknowledgeAll(controller)
+        deliver([0x47, 2, 0x12], to: controller)
+        XCTAssertEqual(controller.legacySoundPosition.presetID, 0x12)
+        XCTAssertTrue(controller.canSetLegacySoundEffect(.soundPosition))
+        XCTAssertNil(controller.settingErrors[.legacySoundEffect(.soundPosition)])
+    }
+
+    func testNotificationsRecoverExpiredFieldsAndLateReturnsCannotRewindThem() async {
+        for kind: SonyLegacySoundEffect.Kind in [.surround, .soundPosition] {
+            let cases: [(query: [UInt8], notification: [UInt8], late: [UInt8])] = [
+                ([0x42, kind.rawValue], [0x45, kind.rawValue, 0], [0x43, kind.rawValue, 1]),
+                ([0x46, kind.rawValue], [0x49, kind.rawValue, 2], [0x47, kind.rawValue, 0]),
+            ]
+            for testCase in cases {
+                for notificationFirst in [false, true] {
+                    let controller = beginDiscovery()
+                    defer { controller.simulateControlLoss() }
+                    acknowledgeAll(controller)
+                    for reply in replies where reply.prefix(2) != [testCase.query[0] + 1, kind.rawValue] {
+                        deliver(reply, to: controller)
+                    }
+                    if notificationFirst { deliver(testCase.notification, to: controller) }
+                    controller.simulateLegacySoundEffectReadTimeout(testCase.query)
+                    for _ in 0..<4 { await Task.yield() }
+                    XCTAssertTrue(controller.isReady)
+                    if !notificationFirst {
+                        XCTAssertFalse(controller.canSetLegacySoundEffect(kind))
+                        deliver(testCase.notification, to: controller)
+                    }
+                    XCTAssertTrue(controller.canSetLegacySoundEffect(kind))
+                    XCTAssertNil(controller.settingErrors[.legacySoundEffect(kind)])
+                    let effect = controller.legacySoundEffect(kind)
+                    deliver(testCase.late, to: controller)
+                    XCTAssertEqual(controller.legacySoundEffect(kind), effect)
+                    XCTAssertTrue(controller.canSetLegacySoundEffect(kind))
+                }
+            }
+        }
     }
 
     func testResetDiscardsOldReadsWritesAndDeadlinesWithoutBlockingFreshDiscovery() async {
@@ -261,8 +326,7 @@ final class SonyLegacySoundEffectControllerTests: XCTestCase {
     }
 
     private func negotiate(_ controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [0x01, 0, 2, 0x10]), beginConnection: true)
+        controller.simulateProtocolMessage([0x01, 0, 2, 0x10], beginConnection: true)
         acknowledgeAll(controller)
         let name = Array("WH-1000XM3".utf8)
         deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
@@ -285,7 +349,7 @@ final class SonyLegacySoundEffectControllerTests: XCTestCase {
 
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, session: UInt64? = nil,
                          to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), session: session)
+        controller.simulateProtocolMessage(payload, type: type, session: session)
     }
 
     private func acknowledgeAll(_ controller: SonyHeadphonesController) {

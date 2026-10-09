@@ -32,10 +32,18 @@ if [[ -n "${NOTARY_KEYCHAIN_PATH:-}" ]]; then notary_keychain=(--keychain "$NOTA
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-beta.app/Contents/Developer}"
 mkdir -p "$repo_root/.build/direct-release" "$repo_root/dist"
 release_dir="$(mktemp -d "$repo_root/.build/direct-release/release.XXXXXX")"
+source_record="$release_dir/source-inputs.json"
+/usr/bin/python3 "$repo_root/Packaging/release-source.py" capture "$repo_root" "$source_record"
+if ! /usr/bin/python3 "$repo_root/Packaging/check-all.py" > "$release_dir/checks.log" 2>&1; then
+    tail -n 60 "$release_dir/checks.log"
+    exit 1
+fi
+/usr/bin/python3 "$repo_root/Packaging/release-source.py" verify "$repo_root" "$source_record" > "$release_dir/Source Receipt.txt"
 if ! "$repo_root/Packaging/package.sh" --direct > "$release_dir/build.log" 2>&1; then
     tail -n 60 "$release_dir/build.log"
     exit 1
 fi
+/usr/bin/python3 "$repo_root/Packaging/release-source.py" verify "$repo_root" "$source_record" > "$release_dir/Source Receipt.txt"
 stage="$release_dir/payload"
 mkdir "$stage"
 app="$stage/Acouplet.app"
@@ -47,13 +55,14 @@ sparkle="$app/Contents/Frameworks/Sparkle.framework"
 for sparkle_code in "$sparkle/Versions/B/XPCServices/Installer.xpc" "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app" "$sparkle"; do
     /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --timestamp "$sparkle_code"
 done
-for ldac_code in "$app/Contents/Helpers/LDACSignaling" "$app/Contents/Helpers/LDACMediaTransport" "$app/Contents/Helpers/SonyAudioConnection" "$app/Contents/Helpers/Acouplet Audio.app" "$app/Contents/Helpers/AcoupletLDACOutput.driver"; do
+for ldac_code in "$app/Contents/Helpers/LDACSignaling" "$app/Contents/Helpers/LDACMediaTransport" "$app/Contents/Helpers/SonyAudioConnection" "$app/Contents/Helpers/LDACLogObserver" "$app/Contents/Helpers/Acouplet Audio.app" "$app/Contents/Helpers/AcoupletLDACOutput.driver"; do
     /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --timestamp "$ldac_code"
 done
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
 /bin/sh "$repo_root/Packaging/build-ldac-output-installer.sh" "$app/Contents/Helpers/AcoupletLDACOutput.driver" \
     "$app/Contents/Resources/Acouplet LDAC Output.pkg" "$version"
 if [[ "$notarize" == true ]]; then
+    /usr/bin/python3 "$repo_root/Packaging/release-source.py" verify "$repo_root" "$source_record" > "$release_dir/Source Receipt.txt"
     /usr/bin/python3 "$repo_root/Packaging/notarize-ldac-installer.py" "$app" --profile "$NOTARY_KEYCHAIN_PROFILE" \
         --evidence-dir "$release_dir" "${notary_keychain[@]}"
 fi
@@ -63,7 +72,7 @@ fi
 /usr/bin/codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --timestamp --entitlements "$release_dir/Direct.entitlements" --generate-entitlement-der "$app"
 /usr/bin/python3 "$repo_root/Packaging/check-distribution.py" "$stage" --signatures-only > "$release_dir/signatures.json"
 /bin/cp "$repo_root/.build/package/Acouplet/Build Receipt.txt" "$release_dir/Original Build Receipt.txt"
-for relative in 'Contents/MacOS/Acouplet' 'Contents/Helpers/Acouplet Battery Publisher' 'Contents/Frameworks/SonyNativeHUD.dylib' 'Contents/Helpers/SonyNativeHUDCheck' 'Contents/Resources/Assets.car' 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle' 'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate' 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater' 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer' 'Contents/Helpers/LDACSignaling' 'Contents/Helpers/LDACMediaTransport' 'Contents/Helpers/SonyAudioConnection' 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio' 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput' 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist' 'Contents/Resources/Acouplet LDAC Output.pkg' 'Contents/_CodeSignature/CodeResources'; do
+for relative in 'Contents/MacOS/Acouplet' 'Contents/Helpers/Acouplet Battery Publisher' 'Contents/Frameworks/SonyNativeHUD.dylib' 'Contents/Helpers/SonyNativeHUDCheck' 'Contents/Resources/Assets.car' 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle' 'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate' 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater' 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer' 'Contents/Helpers/LDACSignaling' 'Contents/Helpers/LDACMediaTransport' 'Contents/Helpers/SonyAudioConnection' 'Contents/Helpers/LDACLogObserver' 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio' 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput' 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist' 'Contents/Resources/Acouplet LDAC Output.pkg' 'Contents/Resources/Acouplet LDAC Removal.pkg' 'Contents/_CodeSignature/CodeResources'; do
     /usr/bin/shasum -a 256 "$app/$relative"
 done > "$release_dir/Binary SHA256.txt"
 /usr/bin/ditto "$repo_root/.build/Build/Products/Release/Acouplet.app.dSYM" "$release_dir/Acouplet.app.dSYM"
@@ -77,6 +86,7 @@ dmg="$release_dir/Acouplet-$version.dmg"
 /usr/bin/codesign --sign "$CODE_SIGN_IDENTITY" --timestamp --identifier dev.baglayan.Acouplet.disk-image "$dmg"
 /usr/bin/hdiutil verify "$dmg"
 /usr/bin/python3 "$repo_root/Packaging/check-distribution.py" "$stage" --signatures-only --dmg "$dmg" > "$release_dir/dmg-signatures.json"
+/usr/bin/python3 "$repo_root/Packaging/release-source.py" verify "$repo_root" "$source_record" > "$release_dir/Source Receipt.txt"
 if [[ "$notarize" == true ]]; then
     /usr/bin/xcrun notarytool submit "$dmg" --keychain-profile "$NOTARY_KEYCHAIN_PROFILE" "${notary_keychain[@]}" --wait --output-format json > "$release_dir/notary-result.json"
     submission="$(/usr/bin/python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["id"])' "$release_dir/notary-result.json")"
@@ -86,6 +96,7 @@ if [[ "$notarize" == true ]]; then
     /usr/bin/python3 "$repo_root/Packaging/check-distribution.py" "$stage" --dmg "$dmg" > "$release_dir/distribution.json"
     /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
     /usr/sbin/spctl --assess --type execute --verbose=4 "$app"
+    /usr/bin/python3 "$repo_root/Packaging/release-source.py" verify "$repo_root" "$source_record" > "$release_dir/Source Receipt.txt"
     final_dmg="$repo_root/dist/${dmg:t}"
     digest="$(/usr/bin/shasum -a 256 "$dmg" | /usr/bin/awk '{print $1}')"
     print -r -- "$digest  $final_dmg" > "$release_dir/SHA256.txt"

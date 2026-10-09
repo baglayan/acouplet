@@ -81,7 +81,44 @@ enum SonyBLEIdentity {
         let supportsGATT: Bool
     }
 
+    enum ConnectionTarget: Equatable, Sendable {
+        case verified(hash: String, peripheralIdentifier: UUID?)
+        case paired(peripheralIdentifier: UUID)
+
+        init?(pairedAddress: String, selectedAddress: String, model: SonyDeviceModel,
+              peripheralIdentifier: UUID?, isPaired: Bool) {
+            guard isPaired, model != .unknown, let address = normalizedAddress(pairedAddress),
+                  address == normalizedAddress(selectedAddress), let peripheralIdentifier else { return nil }
+            self = .paired(peripheralIdentifier: peripheralIdentifier)
+        }
+
+        var peripheralIdentifier: UUID? {
+            switch self {
+            case .verified(_, let identifier): identifier
+            case .paired(let identifier): identifier
+            }
+        }
+
+        func matches(hash: String, peripheralIdentifier: UUID?) -> Bool {
+            switch self {
+            case .verified(let expected, _): hash == expected
+            case .paired(let expected): peripheralIdentifier == expected
+            }
+        }
+    }
+
     #if !ACOUPLET_PUBLIC_APIS_ONLY
+    static func classicConnectionState(for device: NSObject) -> Bool? {
+        let peerSelector = NSSelectorFromString("classicPeer")
+        let stateSelector = NSSelectorFromString("state")
+        guard device.responds(to: peerSelector) else { return nil }
+        guard let peer = device.perform(peerSelector)?.takeUnretainedValue() as? NSObject else { return false }
+        guard peer.responds(to: stateSelector) else { return nil }
+        typealias StateGetter = @convention(c) (AnyObject, Selector) -> Int
+        let state = unsafeBitCast(peer.method(for: stateSelector)!, to: StateGetter.self)
+        return state(peer, stateSelector) == 2
+    }
+
     static func classicPeripheralIdentifier(for device: NSObject) -> UUID? {
         let peerSelector = NSSelectorFromString("classicPeer")
         let identifierSelector = NSSelectorFromString("identifier")

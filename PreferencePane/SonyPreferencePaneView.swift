@@ -267,6 +267,10 @@ struct SonyPreferencePaneView: View {
                             if battery.isCharging { Label("Charging", systemImage: "bolt.fill") }
                             Text("\(battery.level)%").monospacedDigit()
                                 .foregroundStyle(battery.level <= 20 ? Color.red : Color.primary)
+                            if battery.id == "case" {
+                                Text("Last reported").foregroundStyle(.secondary)
+                                    .help("Case percentage and charging show the last report received from the headphones.")
+                            }
                         }
                     } label: {
                         Label(battery.title, systemImage: batterySymbol(battery, device: device))
@@ -369,6 +373,10 @@ struct SonyPreferencePaneView: View {
             Text("\(battery.level)%").monospacedDigit()
                 .foregroundStyle(battery.level <= 20 ? Color.red : Color.secondary)
             if battery.isCharging { Image(systemName: "bolt.fill") }
+            if battery.id == "case" {
+                Text("Last reported").font(.caption2)
+                    .help("Case percentage and charging show the last report received from the headphones.")
+            }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(battery.title) battery")
@@ -385,7 +393,8 @@ struct SonyPreferencePaneView: View {
     }
 
     private func batteryValue(_ battery: SonyPreferencePaneDevice.Battery) -> String {
-        "\(battery.level) percent" + (battery.isCharging ? ", charging" : "")
+        String(localized: "\(battery.level) percent\(battery.isCharging ? String(localized: ", charging") : "")")
+            + (battery.id == "case" ? String(localized: ", last reported") : "")
     }
 
     private func identity(_ device: SonyPreferencePaneDevice) -> some View {

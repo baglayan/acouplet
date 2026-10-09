@@ -196,7 +196,7 @@ final class SonyNoiseControlTests: XCTestCase {
 @MainActor
 final class SonyNoiseControlControllerTests: XCTestCase {
     private func deliver(_ payload: [UInt8], to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload)
     }
 
     private func acknowledgeAll(_ controller: SonyHeadphonesController) {
@@ -207,14 +207,13 @@ final class SonyNoiseControlControllerTests: XCTestCase {
         XCTFail("The command queue did not drain.")
     }
 
-    func testHandshakeRequiresOwnedCapabilityAvailabilityAndTerminalState() throws {
+    func testHandshakeRequiresOwnedMetadataAndKeepsChangingNoiseUnavailable() throws {
         for inquiry: UInt8 in [0x17, 0x19] {
             let extra: [UInt8] = inquiry == 0x19 ? [1, 2] : []
             let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
             defer { controller.simulateControlLoss() }
             controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-                payload: [1, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+            controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
             acknowledgeAll(controller)
             deliver([7, 0, 1, inquiry == 0x19 ? 0x6D : 0x6B, 1], to: controller)
             XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x60, inquiry])
@@ -227,7 +226,10 @@ final class SonyNoiseControlControllerTests: XCTestCase {
             deliver([0x63, inquiry, 0], to: controller)
             acknowledgeAll(controller)
             deliver([0x67, inquiry, 0, 1, 1, 0, 8] + extra, to: controller)
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            XCTAssertNil(controller.noiseControlMode)
+            XCTAssertNil(controller.noiseControlDisplayState)
             deliver([0x69, inquiry, 1, 1, 1, 0, 8] + extra, to: controller)
             XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.canChangeNoiseControl)
@@ -296,7 +298,7 @@ final class SonyNoiseControlControllerTests: XCTestCase {
             acknowledgeAll(controller)
             deliver([0x63, inquiry, 0], to: controller)
             let deadline = try XCTUnwrap(controller.simulatedNoiseReadTimeoutID(query))
-            for _ in 0..<2 {
+            for attempt in 0..<2 {
                 let readCount = controller.simulatedTransmittedFrames.filter { $0.payload == query }.count
                 deliver([0x67, inquiry, 0, 1, 0, 0, 12] + extra, to: controller)
                 XCTAssertFalse(controller.canChangeNoiseControl)
@@ -304,7 +306,7 @@ final class SonyNoiseControlControllerTests: XCTestCase {
                 XCTAssertEqual(controller.noiseControlDisplayState?.mode, .ambient)
                 try await Task.sleep(for: .milliseconds(300))
                 acknowledgeAll(controller)
-                XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, readCount + 1)
+                XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, readCount + (attempt == 0 ? 1 : 0))
                 XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
             }
             deliver([0x67, inquiry, 1, 1, 0, 0, 12] + extra, to: controller)
@@ -369,13 +371,294 @@ final class SonyNoiseControlControllerTests: XCTestCase {
             let session = controller.simulatedControlSession
             controller.simulateNoiseReadTimeout([0x66, 0x17])
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertFalse(controller.isReady)
-            XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            if reply.count > 2 {
+                XCTAssertTrue(controller.isReady)
+                XCTAssertEqual(controller.simulatedControlSession, session)
+                XCTAssertFalse(controller.canChangeNoiseControl)
+                XCTAssertNil(controller.simulatedNoiseReadTimeoutID([0x66, 0x17]))
+                deliver([0x67, 0x17, 1, 1, 0, 0, 12], to: controller)
+                XCTAssertFalse(controller.canChangeNoiseControl)
+                deliver([0x69, 0x17, 1, 1, 0, 0, 12], to: controller)
+                XCTAssertTrue(controller.canChangeNoiseControl)
+            } else {
+                XCTAssertFalse(controller.isReady)
+                XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            }
             controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
             try await Task.sleep(for: .milliseconds(300))
             XCTAssertTrue(controller.canChangeNoiseControl)
             XCTAssertNil(controller.simulatedPendingFrame)
         }
+    }
+
+    func testInitialMalformedMetadataKeepsOwnershipUntilAValidReply() throws {
+        for inquiry: UInt8 in [0x17, 0x19] {
+            let malformedReplies: [[UInt8]] = [
+                [0x61, inquiry], [0x61, inquiry, 1, 0, 1, 20, 0],
+                [0x63, inquiry], [0x63, inquiry, 0xFF],
+            ]
+            for malformed in malformedReplies {
+                let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+                defer { controller.simulateControlLoss() }
+                controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+                controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+                acknowledgeAll(controller)
+                deliver([7, 0, 1, inquiry == 0x17 ? 0x6B : 0x6D, 0], to: controller)
+                acknowledgeAll(controller)
+                let query: [UInt8] = [malformed[0] - 1, inquiry]
+                let deadline = try XCTUnwrap(controller.simulatedNoiseReadTimeoutID(query))
+                deliver(malformed, to: controller)
+                XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
+                XCTAssertFalse(controller.isReady)
+                XCTAssertTrue(controller.simulatedHandshakeTimeoutPending)
+                deliver([0x61, inquiry, 1, 0, 1, 20, 1], to: controller)
+                deliver([0x63, inquiry, 0], to: controller)
+                XCTAssertNil(controller.simulatedNoiseReadTimeoutID(query))
+                acknowledgeAll(controller)
+                deliver([0x67, inquiry, 1, 1, 0, 0, 12] + (inquiry == 0x19 ? [0, 0] : []), to: controller)
+                XCTAssertTrue(controller.isReady)
+                XCTAssertTrue(controller.canChangeNoiseControl)
+                XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
+                XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, 1)
+            }
+        }
+    }
+
+    func testMalformedAvailabilityReturnsRetainDeadlineAndDisableWrites() throws {
+        for inquiry: UInt8 in [0x17, 0x19] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: inquiry == 0x17 ? .wfXM5 : nil)
+            controller.refresh()
+            acknowledgeAll(controller)
+            let query: [UInt8] = [0x62, inquiry]
+            let deadline = try XCTUnwrap(controller.simulatedNoiseReadTimeoutID(query))
+            for malformed: [UInt8] in [[0x63, inquiry], [0x63, inquiry, 0xFF]] {
+                deliver(malformed, to: controller)
+                XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
+                XCTAssertNil(controller.noiseControl?.available)
+                XCTAssertFalse(controller.canChangeNoiseControl)
+                XCTAssertTrue(controller.isReady)
+            }
+            deliver([0x63, inquiry, 0], to: controller)
+            XCTAssertNil(controller.simulatedNoiseReadTimeoutID(query))
+            XCTAssertTrue(controller.canChangeNoiseControl)
+        }
+    }
+
+    func testMalformedObsoleteAvailabilityReturnsDoNotConsumeTheReadOrRewindNotifications() throws {
+        for inquiry: UInt8 in [0x17, 0x19] {
+            for notified: UInt8 in [1, 0xFF] {
+                let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+                defer { controller.simulateControlLoss() }
+                controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: inquiry == 0x17 ? .wfXM5 : nil)
+                controller.refresh()
+                acknowledgeAll(controller)
+                let query: [UInt8] = [0x62, inquiry]
+                let deadline = try XCTUnwrap(controller.simulatedNoiseReadTimeoutID(query))
+                deliver([0x65, inquiry, notified], to: controller)
+                let availability = controller.noiseControl?.available
+                XCTAssertFalse(controller.canChangeNoiseControl)
+                deliver([0x63, inquiry], to: controller)
+                XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
+                XCTAssertEqual(controller.noiseControl?.available, availability)
+                let readCount = controller.simulatedTransmittedFrames.filter { $0.payload == query }.count
+                deliver([0x63, inquiry, 0], to: controller)
+                XCTAssertEqual(controller.noiseControl?.available, availability)
+                acknowledgeAll(controller)
+                XCTAssertNotEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
+                XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, readCount + 1)
+                deliver([0x63, inquiry, 0], to: controller)
+                XCTAssertNil(controller.simulatedNoiseReadTimeoutID(query))
+                XCTAssertTrue(controller.canChangeNoiseControl)
+            }
+        }
+    }
+
+    func testInitialChangingNoisePreservesOtherControlsAndBoundsRecoveryReads() async throws {
+        for inquiry: UInt8 in [0x17, 0x19] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+            controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+            acknowledgeAll(controller)
+            deliver([7, 0, 3, inquiry == 0x17 ? 0x6B : 0x6D, 0, 0x23, 0, 0x29, 0], to: controller)
+            acknowledgeAll(controller)
+            deliver([0x61, inquiry, 1, 0, 1, 20, 1], to: controller)
+            deliver([0x63, inquiry, 0], to: controller)
+            acknowledgeAll(controller)
+            let query: [UInt8] = [0x66, inquiry]
+            let deadline = try XCTUnwrap(controller.simulatedNoiseReadTimeoutID(query))
+            let extra: [UInt8] = inquiry == 0x19 ? [0, 0] : []
+            let changing: [UInt8] = [0x67, inquiry, 0, 1, 0, 0, 12] + extra
+            deliver(changing, to: controller)
+            acknowledgeAll(controller)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            XCTAssertNil(controller.noiseControlMode)
+            XCTAssertNil(controller.noiseControlDisplayState)
+            XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
+            deliver([0x23, 0x09, 80, 0, 82, 0], to: controller)
+            XCTAssertEqual(controller.batteries.left?.level, 80)
+            XCTAssertEqual(controller.batteries.right?.level, 82)
+            XCTAssertTrue(controller.canPowerOff)
+            try await Task.sleep(for: .milliseconds(300))
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, 2)
+            for _ in 0..<10 { deliver(changing, to: controller) }
+            try await Task.sleep(for: .milliseconds(300))
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, 2)
+            XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
+            let session = controller.simulatedControlSession
+            controller.simulateNoiseReadTimeout(query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            for _ in 0..<5 { controller.simulateAutomaticRefresh() }
+            acknowledgeAll(controller)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, 2)
+            controller.setNoiseControl(.anc)
+            XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0x68 })
+            deliver([0x67, inquiry, 1, 1, 0, 0, 12] + extra, to: controller)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            deliver([0x69, inquiry, 1, 1, 0, 0, 12] + extra, to: controller)
+            XCTAssertTrue(controller.canChangeNoiseControl)
+            XCTAssertEqual(controller.noiseControlMode, .anc)
+        }
+    }
+
+    func testChangingEpisodeKeepsOtherControlsReadyAfterFollowupSilenceOrMalformedReply() async throws {
+        for malformed in [false, true] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
+            controller.refresh()
+            acknowledgeAll(controller)
+            deliver([0x63, 0x17, 0], to: controller)
+            deliver([0x67, 0x17, 0, 1, 0, 0, 12], to: controller)
+            try await Task.sleep(for: .milliseconds(300))
+            acknowledgeAll(controller)
+            if malformed { deliver([0x67, 0x17], to: controller) }
+            let query: [UInt8] = [0x66, 0x17]
+            let session = controller.simulatedControlSession
+            let reads = controller.simulatedTransmittedFrames.filter { $0.payload == query }.count
+            controller.simulateNoiseReadTimeout(query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertTrue(controller.canPowerOff)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            XCTAssertNil(controller.simulatedNoiseReadTimeoutID(query))
+            for _ in 0..<5 { controller.simulateAutomaticRefresh() }
+            acknowledgeAll(controller)
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, reads)
+            deliver([0x67, 0x17, 1, 1, 0, 0, 12], to: controller)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            deliver([0x69, 0x17, 1, 1, 0, 0, 12], to: controller)
+            XCTAssertTrue(controller.canChangeNoiseControl)
+        }
+    }
+
+    func testChangingNotificationAndObsoleteReplyShareOneRecoveryAndDeadline() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
+        controller.refresh()
+        acknowledgeAll(controller)
+        deliver([0x63, 0x17, 0], to: controller)
+        let query: [UInt8] = [0x66, 0x17]
+        let deadline = try XCTUnwrap(controller.simulatedNoiseReadTimeoutID(query))
+        let reads = controller.simulatedTransmittedFrames.filter { $0.payload == query }.count
+        deliver([0x69, 0x17, 0, 1, 0, 0, 12], to: controller)
+        deliver([0x67, 0x17, 1, 1, 1, 0, 12], to: controller)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
+        try await Task.sleep(for: .milliseconds(300))
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, reads + 1)
+        XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
+        controller.simulateNoiseReadTimeout(query)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        deliver([0x69, 0x17, 1, 1, 0, 0, 12], to: controller)
+        XCTAssertTrue(controller.canChangeNoiseControl)
+    }
+
+    func testChangingEpisodeDeadlineCanExpireBeforeQueuedRecoveryTransmits() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+        controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        acknowledgeAll(controller)
+        deliver([7, 0, 2, 0x6B, 0, 0x29, 0], to: controller)
+        acknowledgeAll(controller)
+        deliver([0x61, 0x17, 1, 0, 1, 20, 1], to: controller)
+        deliver([0x63, 0x17, 0], to: controller)
+        acknowledgeAll(controller)
+        let query: [UInt8] = [0x66, 0x17]
+        let deadline = try XCTUnwrap(controller.simulatedNoiseReadTimeoutID(query))
+        deliver([0x67, 0x17, 0, 1, 0, 0, 12], to: controller)
+        let pending = try XCTUnwrap(controller.simulatedPendingFrame)
+        XCTAssertNotEqual(pending.payload, query)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, 1)
+        controller.simulateNoiseReadTimeout(query)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        acknowledgeAll(controller)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertNil(controller.simulatedNoiseReadTimeoutID(query))
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, 1)
+        deliver([0x67, 0x17, 1, 1, 0, 0, 12], to: controller)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        deliver([0x69, 0x17, 1, 1, 0, 0, 12], to: controller)
+        XCTAssertTrue(controller.canChangeNoiseControl)
+    }
+
+    func testChangingNoiseDeadlineResumesConnectionVerificationOnFreshTransport() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
+        deliver([0x69, 0x17, 0, 1, 0, 0, 12], to: controller)
+        try await Task.sleep(for: .milliseconds(300))
+        acknowledgeAll(controller)
+        XCTAssertNotNil(controller.simulatedNoiseReadTimeoutID([0x66, 0x17]))
+        controller.setConnectionMode(.lowLatency)
+        acknowledgeAll(controller)
+        let session = controller.simulatedControlSession
+        deliver([0xE9, 5, 2, 1], to: controller)
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertEqual(controller.connectionTransition?.phase, .reconnecting)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        controller.simulateNoiseReadTimeout([0x66, 0x17])
+        for _ in 0..<8 { await Task.yield() }
+        XCTAssertGreaterThan(controller.simulatedControlSession, session)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertEqual(controller.connectionTransition?.phase, .recovering)
+        XCTAssertNil(controller.connectionModeError)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xE8, 5, 2, 0] }.count, 1)
+    }
+
+    func testSameTransportHandshakeCannotReuseOutstandingChangingNoiseRead() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
+        deliver([0x69, 0x17, 0, 1, 0, 0, 12], to: controller)
+        try await Task.sleep(for: .milliseconds(300))
+        acknowledgeAll(controller)
+        let session = controller.simulatedControlSession
+        XCTAssertNotNil(controller.simulatedNoiseReadTimeoutID([0x66, 0x17]))
+        controller.simulateSameTransportHandshake()
+        XCTAssertGreaterThan(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.linkState, .disconnected)
+        XCTAssertNil(controller.simulatedNoiseReadTimeoutID([0x66, 0x17]))
+        controller.simulateProtocolMessage([0x67, 0x17, 1, 1, 0, 0, 12], session: session)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertFalse(controller.canChangeNoiseControl)
     }
 
     func testQueuedWriteRejectsChangedPreservedFieldsAtTransmission() {
@@ -409,8 +692,7 @@ final class SonyNoiseControlControllerTests: XCTestCase {
             XCTAssertFalse(controller.isReady)
             XCTAssertGreaterThan(controller.simulatedControlSession, session)
             XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect the headphones to try again."))
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-                payload: [0x67, inquiry, 1, 1, 0, 0, 12] + (inquiry == 0x19 ? [0, 0] : [])), session: session)
+            controller.simulateProtocolMessage([0x67, inquiry, 1, 1, 0, 0, 12] + (inquiry == 0x19 ? [0, 0] : []), session: session)
             XCTAssertFalse(controller.isReady)
             XCTAssertNil(controller.pendingChanges[.noiseControl])
         }
@@ -429,6 +711,21 @@ final class SonyNoiseControlControllerTests: XCTestCase {
         controller.simulateNoiseReadTimeout([0x62, 0x17])
         for _ in 0..<4 { await Task.yield() }
         XCTAssertTrue(controller.isReady)
+    }
+
+    func testDebouncedAmbientFailureDoesNotKeepOtherControlsBusy() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        XCTAssertTrue(controller.canPowerOff)
+        controller.setAmbientLevel(14)
+        XCTAssertFalse(controller.canPowerOff)
+        deliver([0x65, 0x19, 1], to: controller)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNotNil(controller.settingErrors[.noiseControl])
+        XCTAssertTrue(controller.canPowerOff)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0x68 })
     }
 
     func testUnconfirmedWriteBlocksFurtherChangesUntilFreshState() async throws {
@@ -459,5 +756,5 @@ func replyToOrdinaryNoiseMetadata(_ frame: SonyFrame, controller: SonyHeadphones
     case [0x62, 0x17]: reply = [0x63, 0x17, 0]
     default: return
     }
-    controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: reply))
+    controller.simulateProtocolMessage(reply)
 }

@@ -7,10 +7,11 @@
 #include <notify.h>
 #include <xpc/xpc.h>
 #include <CoreAudio/AudioHardware.h>
+#include <Security/Security.h>
 #include "NullAudio.c"
 
 enum { kAcoupletLease = 'xmls', kAcoupletModel = 'xmnm', kAcoupletPriority = 'xmpr', kAcoupletRevision = 'xmvr' };
-static const SInt32 kAcoupletDriverRevision = 3;
+static const SInt32 kAcoupletDriverRevision = 5;
 static UInt64 gLeaseDeadline;
 static pid_t gLeaseOwner;
 static atomic_bool gAvailable;
@@ -25,7 +26,8 @@ static CFStringRef gModel;
 static CFStringRef AcoupletIconName(CFStringRef model) {
     if (CFStringHasPrefix(model, CFSTR("WF-")) || CFStringHasPrefix(model, CFSTR("WI-")))
         return CFSTR("Earbuds");
-    if (CFStringHasPrefix(model, CFSTR("WH-")) || CFStringHasPrefix(model, CFSTR("MDR-")))
+    if (CFStringHasPrefix(model, CFSTR("WH-")) || CFStringHasPrefix(model, CFSTR("MDR-")) ||
+        CFEqual(model, CFSTR("ULT WEAR")) || CFEqual(model, CFSTR("1000X THE COLLEXION")))
         return CFSTR("Headphones");
     return CFSTR("Speaker");
 }
@@ -74,6 +76,36 @@ static char gLeaseQueueKey;
 static void AcoupletLeaseChanged(void);
 static void AcoupletRequestAvailability(void);
 static void AcoupletScheduleLeaseTimer(void);
+
+#ifdef ACOUPLET_PRIORITY_CHECK
+static Boolean (*gClientCheckAuthentication)(pid_t);
+#endif
+
+static Boolean AcoupletClientAuthorized(pid_t client) {
+    if (client <= 0) return false;
+#ifdef ACOUPLET_PRIORITY_CHECK
+    if (gClientCheckAuthentication) return gClientCheckAuthentication(client);
+#endif
+    static dispatch_once_t once;
+    static SecRequirementRef requirement;
+    dispatch_once(&once, ^{
+        SecRequirementCreateWithString(CFSTR("anchor apple generic and identifier \"dev.baglayan.Acouplet\" and certificate leaf[subject.OU] = \"5743Y47SC7\""),
+            kSecCSDefaultFlags, &requirement);
+    });
+    if (!requirement) return false;
+    CFNumberRef pid = CFNumberCreate(NULL, kCFNumberIntType, &client);
+    const void *keys[] = {kSecGuestAttributePid};
+    const void *values[] = {pid};
+    CFDictionaryRef attributes = CFDictionaryCreate(NULL, keys, values, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    SecCodeRef code = NULL;
+    Boolean authorized = SecCodeCopyGuestWithAttributes(NULL, attributes, kSecCSDefaultFlags, &code) == errSecSuccess &&
+        SecCodeCheckValidity(code, kSecCSStrictValidate, requirement) == errSecSuccess;
+    if (code) CFRelease(code);
+    CFRelease(attributes);
+    CFRelease(pid);
+    return authorized;
+}
 
 static void AcoupletPriorityChanged(void) {
     AudioObjectPropertyAddress property = {kAcoupletPriority, kAudioObjectPropertyScopeGlobal,
@@ -147,6 +179,14 @@ static void AcoupletPriorityUncertain(CFStringRef error) {
     AcoupletPriorityPhase(CFSTR("cleanup-required"), error);
 }
 
+static Boolean AcoupletPriorityExpire(void) {
+    if (!gPriorityDeadline || mach_absolute_time() < gPriorityDeadline) return false;
+    if (gPrioritySent) gPriorityPublicationLost = true;
+    AcoupletPriorityClose();
+    AcoupletPriorityUncertain(CFSTR("Bluetooth configuration deadline expired; cleanup is uncertain."));
+    return true;
+}
+
 static void AcoupletPriorityIdle(void) {
     AcoupletPriorityClose();
     gPrioritySent = false;
@@ -169,7 +209,7 @@ static UInt64 gPriorityCheckBootstraps;
 #endif
 
 static Boolean AcoupletPrioritySend(int64_t status) {
-    if (!gPriorityUID) return false;
+    if (AcoupletPriorityExpire() || !gPriorityUID) return false;
     int pending = 0;
 #ifndef ACOUPLET_PRIORITY_CHECK
     if (!gPriorityConnection || gPriorityNotify < 0 ||
@@ -213,6 +253,7 @@ static void AcoupletPriorityStop(void) {
 }
 
 static void AcoupletPriorityNotification(void) {
+    if (AcoupletPriorityExpire()) return;
     int64_t status = gPriorityWaiting;
     if (status < 0) return;
     gPriorityWaiting = -1;
@@ -228,6 +269,7 @@ static void AcoupletPriorityNotification(void) {
 }
 
 static void AcoupletPriorityEvent(xpc_object_t event) {
+    if (AcoupletPriorityExpire() || !gPriorityListening) return;
     if (xpc_get_type(event) == XPC_TYPE_ERROR) {
         gPriorityListening = false;
         gPriorityUIDAfterLoss = false;
@@ -337,20 +379,12 @@ static void AcoupletPriorityStart(void) {
 }
 
 static void AcoupletPriorityTick(void) {
+    AcoupletPriorityExpire();
     if (gPriorityWaiting >= 0 && gPriorityNotify >= 0) {
         int changed = 0;
         if (notify_check(gPriorityNotify, &changed) != NOTIFY_STATUS_OK)
             AcoupletPriorityUncertain(CFSTR("Bluetooth notification observation failed; cleanup is uncertain."));
         else if (changed) AcoupletPriorityNotification();
-    }
-    if (gPriorityDeadline && mach_absolute_time() >= gPriorityDeadline) {
-        gPriorityWaiting = -1;
-        gPriorityDeadline = 0;
-        if (gPrioritySent && !gPriorityStopping) {
-            AcoupletPriorityStop();
-            AcoupletPriorityPhase(CFSTR("cleanup-required"),
-                CFSTR("Bluetooth configuration deadline expired; cleanup is uncertain."));
-        } else AcoupletPriorityUncertain(CFSTR("Bluetooth configuration deadline expired; cleanup is uncertain."));
     }
     pthread_mutex_lock(&gPlugIn_StateMutex);
     Boolean ownerLost = gPriorityOwner && (gPriorityOwner != gLeaseOwner || !gLeaseDeadline ||
@@ -789,13 +823,18 @@ static OSStatus AcoupletGetData(AudioServerPlugInDriverRef driver, AudioObjectID
                 *size = sizeof(CFURLRef);
                 return noErr;
             }
-            case kAcoupletLease:
+            case kAcoupletLease: {
                 pthread_mutex_lock(&gPlugIn_StateMutex);
-                *(CFBooleanRef *)data = CFRetain(client == gLeaseOwner && AcoupletLeaseValid()
+                Boolean ownsLease = client == gLeaseOwner && AcoupletLeaseValid();
+                pthread_mutex_unlock(&gPlugIn_StateMutex);
+                Boolean authorized = ownsLease && AcoupletClientAuthorized(client);
+                pthread_mutex_lock(&gPlugIn_StateMutex);
+                *(CFBooleanRef *)data = CFRetain(authorized && client == gLeaseOwner && AcoupletLeaseValid()
                     ? kCFBooleanTrue : kCFBooleanFalse);
                 pthread_mutex_unlock(&gPlugIn_StateMutex);
                 *size = sizeof(CFBooleanRef);
                 return noErr;
+            }
             case kAcoupletRevision:
                 *(CFNumberRef *)data = CFNumberCreate(NULL, kCFNumberSInt32Type, &kAcoupletDriverRevision);
                 *size = sizeof(CFNumberRef);
@@ -807,12 +846,18 @@ static OSStatus AcoupletGetData(AudioServerPlugInDriverRef driver, AudioObjectID
                 *size = sizeof(CFStringRef);
                 return noErr;
             case kAcoupletPriority: {
+                pthread_mutex_lock(&gPlugIn_StateMutex);
+                Boolean ownsLease = client == gLeaseOwner && AcoupletLeaseValid();
+                pthread_mutex_unlock(&gPlugIn_StateMutex);
+                Boolean authorized = ownsLease && AcoupletClientAuthorized(client);
                 CFMutableDictionaryRef result = CFDictionaryCreateMutable(NULL, 0,
                     &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
                 pthread_mutex_lock(&gPlugIn_StateMutex);
                 CFDictionarySetValue(result, CFSTR("phase"), gPriorityPhase);
-                if (gPriorityAddress) CFDictionarySetValue(result, CFSTR("address"), gPriorityAddress);
-                if (gPriorityError) CFDictionarySetValue(result, CFSTR("error"), gPriorityError);
+                if (authorized && client == gLeaseOwner && AcoupletLeaseValid()) {
+                    if (gPriorityAddress) CFDictionarySetValue(result, CFSTR("address"), gPriorityAddress);
+                    if (gPriorityError) CFDictionarySetValue(result, CFSTR("error"), gPriorityError);
+                }
                 pthread_mutex_unlock(&gPlugIn_StateMutex);
                 *(CFPropertyListRef *)data = result;
                 *size = sizeof(CFPropertyListRef);
@@ -893,12 +938,13 @@ static OSStatus AcoupletGetData(AudioServerPlugInDriverRef driver, AudioObjectID
 
 static OSStatus AcoupletSetRate(pid_t client, Float64 rate) {
     if (!AcoupletSupportedRate(rate)) return kAudioDeviceUnsupportedFormatError;
+    Boolean authorized = AcoupletClientAuthorized(client);
     pthread_mutex_lock(&gPlugIn_StateMutex);
     if (!gPendingRateAction && rate == gDevice_SampleRate) {
         pthread_mutex_unlock(&gPlugIn_StateMutex);
         return noErr;
     }
-    if (gLeaseOwner != client || !AcoupletLeaseValid()) {
+    if (!authorized || gLeaseOwner != client || !AcoupletLeaseValid()) {
         pthread_mutex_unlock(&gPlugIn_StateMutex);
         return kAudioDevicePermissionsError;
     }
@@ -951,6 +997,8 @@ static OSStatus AcoupletSetPriority(pid_t client, CFPropertyListRef value) {
     if (!queue) { CFRelease(address); return kAudioHardwareIllegalOperationError; }
     __block OSStatus status = noErr;
     dispatch_block_t apply = ^{
+        if (!AcoupletClientAuthorized(client)) { status = kAudioDevicePermissionsError; return; }
+        AcoupletPriorityExpire();
         pthread_mutex_lock(&gPlugIn_StateMutex);
         if (gShuttingDown) status = kAudioHardwareIllegalOperationError;
         else if (gLeaseOwner != client || !AcoupletLeaseValid()) status = kAudioDevicePermissionsError;
@@ -1027,10 +1075,14 @@ static OSStatus AcoupletSetData(AudioServerPlugInDriverRef driver, AudioObjectID
         return AcoupletSetPriority(client, *(const CFPropertyListRef *)data);
     }
     if (object == kObjectID_Device && property->mSelector == kAcoupletLease) {
-        if (size != sizeof(CFBooleanRef)) return kAudioHardwareBadPropertySizeError;
-        CFBooleanRef renew = *(const CFBooleanRef *)data;
+        if (size != sizeof(CFDictionaryRef)) return kAudioHardwareBadPropertySizeError;
+        CFDictionaryRef request = *(const CFDictionaryRef *)data;
+        if (!request || CFGetTypeID(request) != CFDictionaryGetTypeID() || CFDictionaryGetCount(request) != 1)
+            return kAudioHardwareIllegalOperationError;
+        CFBooleanRef renew = CFDictionaryGetValue(request, CFSTR("claim"));
         if (!renew || CFGetTypeID(renew) != CFBooleanGetTypeID() || client <= 0)
             return kAudioHardwareIllegalOperationError;
+        if (!AcoupletClientAuthorized(client)) return kAudioDevicePermissionsError;
         pthread_mutex_lock(&gPlugIn_StateMutex);
         AcoupletRefreshLease();
         Boolean claim = CFBooleanGetValue(renew);
@@ -1055,6 +1107,7 @@ static OSStatus AcoupletSetData(AudioServerPlugInDriverRef driver, AudioObjectID
         CFMutableStringRef trimmed = CFStringCreateMutableCopy(NULL, 0, model);
         CFStringTrimWhitespace(trimmed);
         if (!CFStringGetLength(trimmed)) { CFRelease(trimmed); return kAudioHardwareIllegalOperationError; }
+        if (!AcoupletClientAuthorized(client)) { CFRelease(trimmed); return kAudioDevicePermissionsError; }
         pthread_mutex_lock(&gPlugIn_StateMutex);
         if (gLeaseOwner != client || !AcoupletLeaseValid()) {
             pthread_mutex_unlock(&gPlugIn_StateMutex);
@@ -1111,7 +1164,35 @@ static OSStatus AcoupletSetData(AudioServerPlugInDriverRef driver, AudioObjectID
         (object == kObjectID_Mute_Output_Master && property->mSelector == kAudioBooleanControlPropertyValue)) {
         UInt32 count = 0;
         AudioObjectPropertyAddress changed[2];
-        OSStatus status = NullAudio_SetControlPropertyData(driver, object, client, property,
+        OSStatus status = noErr;
+        if (qualifierSize) {
+            if (qualifierSize != sizeof(UInt32) || !qualifier || *(const UInt32 *)qualifier != kAcoupletLease)
+                return kAudioHardwareIllegalOperationError;
+            if (!AcoupletClientAuthorized(client)) return kAudioDevicePermissionsError;
+            pthread_mutex_lock(&gPlugIn_StateMutex);
+            if (gShuttingDown || gLeaseOwner != client || !AcoupletLeaseValid()) status = kAudioDevicePermissionsError;
+            else if (object == kObjectID_Mute_Output_Master) {
+                if (gMute_Output_Master_Value != (*(const UInt32 *)data != 0)) {
+                    gMute_Output_Master_Value = *(const UInt32 *)data != 0;
+                    count = 1;
+                    changed[0] = (AudioObjectPropertyAddress){kAudioBooleanControlPropertyValue,
+                        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+                }
+            } else {
+                Float32 volume = *(const Float32 *)data;
+                if (property->mSelector == kAudioLevelControlPropertyDecibelValue)
+                    volume = sqrtf((volume - kVolume_MinDB) / (kVolume_MaxDB - kVolume_MinDB));
+                if (gVolume_Output_Master_Value != volume) {
+                    gVolume_Output_Master_Value = volume;
+                    count = 2;
+                    changed[0] = (AudioObjectPropertyAddress){kAudioLevelControlPropertyScalarValue,
+                        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+                    changed[1] = (AudioObjectPropertyAddress){kAudioLevelControlPropertyDecibelValue,
+                        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+                }
+            }
+            pthread_mutex_unlock(&gPlugIn_StateMutex);
+        } else status = NullAudio_SetControlPropertyData(driver, object, client, property,
             qualifierSize, qualifier, size, data, &count, changed);
         if (count) {
             gPlugIn_Host->PropertiesChanged(gPlugIn_Host, object, count, changed);

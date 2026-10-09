@@ -2,7 +2,7 @@
 import Darwin
 import Foundation
 
-struct LDACFormat: Equatable, Sendable {
+struct LDACFormat: Equatable, Codable, Sendable {
     let sampleRateHz: Int
     let bitrateKbps: Int
     let channels: Int
@@ -69,7 +69,7 @@ enum LDACState: Equatable, Sendable {
     case failed(String)
 }
 
-enum LDACAudioCaptureAccess: Equatable, Sendable {
+enum LDACAudioCaptureAccess: Equatable, Codable, Sendable {
     case unchecked
     case checking
     case ready
@@ -107,21 +107,21 @@ final class LDACNativeSession: @unchecked Sendable {
         let connection: URL
         let logger: URL
 
-        init(bundle: Bundle, logger: URL = URL(fileURLWithPath: "/usr/bin/log")) {
+        init(bundle: Bundle) {
             let directory = bundle.bundleURL.appendingPathComponent("Contents/Helpers")
             signaling = directory.appendingPathComponent("LDACSignaling")
             media = directory.appendingPathComponent("LDACMediaTransport")
             capture = directory.appendingPathComponent("Acouplet Audio.app/Contents/MacOS/AcoupletAudio")
             connection = directory.appendingPathComponent("SonyAudioConnection")
-            self.logger = logger
+            logger = directory.appendingPathComponent("LDACLogObserver")
         }
 
         var isAvailable: Bool {
-            [signaling, media, capture, connection].allSatisfy { FileManager.default.isExecutableFile(atPath: $0.path) }
+            [signaling, media, capture, connection, logger].allSatisfy { FileManager.default.isExecutableFile(atPath: $0.path) }
         }
     }
 
-    enum Event: Sendable {
+    enum Event: Codable, Sendable {
         case connecting
         case handoffReady
         case active(LDACFormat)
@@ -133,7 +133,7 @@ final class LDACNativeSession: @unchecked Sendable {
         case finished(Completion)
     }
 
-    struct Completion: Sendable {
+    struct Completion: Codable, Sendable {
         let message: String?
         let canRetry: Bool
         let requiresAttention: Bool
@@ -157,7 +157,7 @@ final class LDACNativeSession: @unchecked Sendable {
     private var recoveryReason: String?
     private var pendingPriorityObservation: String?
     private var priorityObservation: String?
-    private var priorityObservationDeadline = Date.distantFuture
+    private var priorityObservationDeadline = DispatchTime.distantFuture
     private var priorityRecoveryFailure: String?
     private var recoverableFailure = false
     private var hardFailure = false
@@ -175,12 +175,12 @@ final class LDACNativeSession: @unchecked Sendable {
     private var preflightReady = false
     private var preflightCompleted = false
     private var preflightStopSent = false
-    private var preflightStopDeadline = Date.distantFuture
+    private var preflightStopDeadline = DispatchTime.distantFuture
     private var loggerReady = false
     private var daemonLost = false
     private var ownerInputsClosed = false
     private var ownerTerminationSent = false
-    private var ownerExitDeadline = Date.distantFuture
+    private var ownerExitDeadline = DispatchTime.distantFuture
     private var shutdownChecked = false
     private var shutdownUnverified = false
     private var unverifiedAcquisitions: Set<String> = []
@@ -190,7 +190,7 @@ final class LDACNativeSession: @unchecked Sendable {
     private var originalConnectionEnded = false
     private var connectorStopSent = false
     private var connectorTerminationSent = false
-    private var connectorStopDeadline = Date.distantFuture
+    private var connectorStopDeadline = DispatchTime.distantFuture
     private var connectorSettlementUnverified = false
     private var nativeAudioFinished = false
     private var mediaPrepared = false
@@ -202,14 +202,17 @@ final class LDACNativeSession: @unchecked Sendable {
     private var startAccepted = false
     private var started = false
     private var priorityPhase = PriorityPhase.unused
-    private var priorityDeadline = Date.distantFuture
-    private var mediaStopDeadline = Date.distantFuture
+    private var priorityDeadline = DispatchTime.distantFuture
+    private var mediaStopDeadline = DispatchTime.distantFuture
     private var active = false
     private var mediaStopSent = false
+    private var mediaStopReady = false
     private var captureStopSent = false
     private var captureDestroyed = false
+    private var captureCancelledBeforeStream = false
     private var feedFinished = false
     private var signalingStopSent = false
+    private var signalingStopConfirmed = false
     private var mediaCloseRequired = false
     private var mediaCloseSent = false
     private var waitingMediaClosed = false
@@ -222,19 +225,20 @@ final class LDACNativeSession: @unchecked Sendable {
     private var restoreDisconnected = false
     private var targetUnavailableBeforeRestore = false
     private var nativeAudioRestored = false
-    private var restoreDeadline = Date.distantFuture
+    private var restoreDeadline = DispatchTime.distantFuture
     private var restoreTerminationSent = false
     private var failure: String?
     private var attentionFailure: String?
     private var publicFailureMessage: String?
     private var capturePermissionFailure: String?
     private var finalized = false
-    private var deadline = Date.distantFuture
-    private var captureStopDeadline = Date.distantFuture
+    private var deadline = DispatchTime.distantFuture
+    private var captureStopDeadline = DispatchTime.distantFuture
     private var pcmRead: Int32 = -1
     private var pcmWrite: Int32 = -1
     private var rawURL: URL?
     private var log: FileHandle?
+    private var diagnosticsLock: FileHandle?
     private var loggedBytes = 0
 
     init(id: UUID, address: String, helpers: Helpers, gain: Double, outputDeviceUID: String? = nil,
@@ -290,6 +294,23 @@ final class LDACNativeSession: @unchecked Sendable {
         lock.unlock()
     }
 
+    #if DEBUG
+    func simulateStartedMediaShutdown(media: LDACNativeChild, capture: LDACNativeChild) {
+        children["media"] = media
+        children["capture"] = capture
+        started = true
+        stop()
+    }
+
+    var simulatedMediaStopDeadline: DispatchTime { mediaStopDeadline }
+
+    func advanceSimulatedShutdown(mediaDeadline: DispatchTime? = nil) {
+        if let mediaDeadline { mediaStopDeadline = mediaDeadline }
+        do { try advance() }
+        catch { fail(error.localizedDescription) }
+    }
+    #endif
+
     private func emit(_ event: Event) {
         let receive = receive
         Task { @MainActor in receive(event) }
@@ -300,8 +321,10 @@ final class LDACNativeSession: @unchecked Sendable {
             do {
                 try log?.close()
                 log = nil
-                if let rawURL { try Self.completeDiagnostics(in: rawURL.deletingLastPathComponent()) }
+                if let rawURL { try Self.completeDiagnostics(in: rawURL.deletingLastPathComponent(), releasing: diagnosticsLock) }
             } catch {}
+            try? diagnosticsLock?.close()
+            diagnosticsLock = nil
         }
         do {
             let sessions = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -310,8 +333,7 @@ final class LDACNativeSession: @unchecked Sendable {
                                                    attributes: [.posixPermissions: 0o700])
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sessions.path)
             let directory = sessions.appendingPathComponent(id.uuidString)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
-                                                   attributes: [.posixPermissions: 0o700])
+            diagnosticsLock = try Self.beginDiagnostics(in: directory)
             rawURL = directory.appendingPathComponent("signaling.bin")
             let logURL = directory.appendingPathComponent("session.log")
             FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
@@ -320,10 +342,10 @@ final class LDACNativeSession: @unchecked Sendable {
                 shutdownChecked = true
                 restoring = true
                 try launch("restore", executable: helpers.connection, arguments: ["--address", address, "--restore"])
-                restoreDeadline = Date().addingTimeInterval(52)
+                restoreDeadline = DispatchTime.now() + 52
             } else {
                 try launch("preflight", executable: helpers.capture, arguments: ["--check-permission"] + captureDeviceArguments)
-                deadline = Date().addingTimeInterval(90)
+                deadline = DispatchTime.now() + 90
             }
         } catch {
             record("START_FAILED \(error.localizedDescription)")
@@ -389,7 +411,8 @@ final class LDACNativeSession: @unchecked Sendable {
     }
 
     private func launch(_ name: String, executable: URL, arguments: [String], pcm: Int32? = nil) throws {
-        children[name] = try LDACNativeChild(executable: executable, arguments: arguments, inheritedPCM: pcm)
+        children[name] = try LDACNativeChild(executable: executable, arguments: arguments, inheritedPCM: pcm,
+                                            blockStopSignals: name == "preflight" || name == "capture")
         record("LAUNCH \(name) \(arguments.joined(separator: " "))")
     }
 
@@ -427,11 +450,15 @@ final class LDACNativeSession: @unchecked Sendable {
             } else if line.hasPrefix("AUDIO_PERMISSION_DENIED ") {
                 capturePermissionDenied()
             } else if line.hasPrefix("AUDIO_PERMISSION_FAILED") {
-                if !shouldStop || LDACChannelGate.captures("^AUDIO_PERMISSION_FAILED cleanup=1 callbacks=([0-9]+) error=0 interrupted=1$", line) == nil {
+                if !shouldStop || LDACChannelGate.captures("^AUDIO_PERMISSION_FAILED cleanup=1 callbacks=([0-9]+) error=0 interrupted=(?:\(SIGINT)|\(SIGTERM))$", line) == nil {
                     failForUser(String(localized: "System audio recording could not be checked. Try LDAC again."))
                 }
             }
         } else if source == "daemon" {
+            if line.contains("Must be admin to run 'stream' command") {
+                failForUser(String(localized: "LDAC requires a macOS administrator account."))
+                return
+            }
             guard line.hasPrefix("Filtering the log data") || line.hasPrefix("Timestamp") ||
                   Self.daemonEventExpression.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil else { return }
             if let values = LDACChannelGate.captures("(?:connectedCB cid:0x|l2capDisconnected for CID: 0x|l2capDataInd for CID: 0x)([0-9a-f]+)\\b", line),
@@ -447,7 +474,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 loggerReady = true
                 if !shouldStop {
                     try launch("disconnect", executable: helpers.connection, arguments: ["--address", address, "--disconnect"])
-                    deadline = Date().addingTimeInterval(45)
+                    deadline = DispatchTime.now() + 45
                 }
             }
             if children["connector"] != nil && !connected &&
@@ -460,7 +487,7 @@ final class LDACNativeSession: @unchecked Sendable {
                     guard let rawURL else { throw LDACSessionError("The LDAC receive file is unavailable.") }
                     try launch("probe", executable: helpers.signaling, arguments: ["--playback-disconnected", rawURL.path, "--address", address, "--continuous"] + configuration.helperArguments)
                     emit(.connecting)
-                    deadline = Date().addingTimeInterval(45)
+                    deadline = DispatchTime.now() + 45
                 }
             }
             if children["connector"] != nil, !restoring,
@@ -510,6 +537,9 @@ final class LDACNativeSession: @unchecked Sendable {
             if line == "RESTORE_CONNECTED native=1 connected=1" ||
                 line == "RESTORE_PRESERVED native=1 connected=1" { nativeAudioRestored = true }
         } else if source == "probe" {
+            if line == "STOP_COMPLETE protocolCleanup=1", lock.withLock({ requestedStop }) {
+                signalingStopConfirmed = true
+            }
             try signalingGate.owned(line)
             if signalingGate.cid == nil, !shouldStop,
                LDACChannelGate.captures("^NO_PLAYBACK realCID=0000 owned=(?:0x0|\\(nil\\)) openExpired=0 openError=(-?[0-9]+)$", line) != nil {
@@ -532,7 +562,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 startAccepted = true
                 if let priority {
                     priorityPhase = .configuring
-                    deadline = Date().addingTimeInterval(45)
+                    deadline = DispatchTime.now() + 45
                     record("PRIORITY_CONFIGURE_REQUESTED")
                     try priority.request(true, false)
                 }
@@ -548,6 +578,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 waitingSignalingClosed = true
             }
         } else if source == "media" {
+            if line == "PCM_STOP_READY started=0", mediaStopSent, !started, shouldStop { mediaStopReady = true }
             if line == "MEDIA_PREPARED" { mediaPrepared = true }
             if line.hasPrefix("READY ") {
                 guard mediaReady == nil,
@@ -627,6 +658,10 @@ final class LDACNativeSession: @unchecked Sendable {
                 captureReady = true
             }
             if line == "DESTROY_TAP status=0" { captureDestroyed = true }
+            if !started, shouldStop,
+               LDACChannelGate.captures("^PCM_CAPTURE_CANCELLED cleanup=1 error=0 interrupted=(\(SIGINT)|\(SIGTERM))$", line) != nil {
+                captureCancelledBeforeStream = true
+            }
         }
     }
 
@@ -638,7 +673,7 @@ final class LDACNativeSession: @unchecked Sendable {
         }
         if let pendingPriority, priorityObservation == nil {
             priorityObservation = pendingPriority
-            priorityObservationDeadline = Date().addingTimeInterval(5)
+            priorityObservationDeadline = DispatchTime.now() + 5
             record("PRIORITY_OBSERVATION_PENDING \(pendingPriority)")
         }
         let recoveryReason = lock.withLock {
@@ -654,34 +689,34 @@ final class LDACNativeSession: @unchecked Sendable {
             } else if originalConnectionEnded {
                 priorityObservation = nil
                 connectionLost(observation)
-            } else if Date() >= priorityObservationDeadline {
+            } else if DispatchTime.now() >= priorityObservationDeadline {
                 priorityObservation = nil
                 fail(observation)
             }
         }
         if shutdownChecked {
             let name = children["restore"] == nil ? "restore-disconnect" : "restore"
-            if let child = children[name], !child.finished, Date() >= restoreDeadline {
+            if let child = children[name], !child.finished, DispatchTime.now() >= restoreDeadline {
                 child.closeInput()
                 child.signal(restoreTerminationSent ? SIGKILL : SIGTERM)
                 record("RESTORE_TERMINATION helper=\(name) signal=\(restoreTerminationSent ? "SIGKILL" : "SIGTERM") restorationVerified=0")
                 fail("Ordinary Bluetooth audio restoration timed out during \(name == "restore" ? "reconnection" : "disconnection").", userMessage: String(localized: "Bluetooth audio could not be restored. Reconnect the headphones in Bluetooth settings."))
-                restoreDeadline = restoreTerminationSent ? .distantFuture : Date().addingTimeInterval(2)
+                restoreDeadline = restoreTerminationSent ? .distantFuture : DispatchTime.now() + 2
                 restoreTerminationSent = true
             }
             return
         }
         if !preflightCompleted, let preflight = children["preflight"] {
-            if !shouldStop && Date() >= deadline {
+            if !shouldStop && DispatchTime.now() >= deadline {
                 failForUser(String(localized: "System audio recording access was not confirmed. Try LDAC again."))
             }
             if shouldStop {
                 if preflight.status == nil && !preflightStopSent {
                     preflight.signal(SIGTERM)
                     preflightStopSent = true
-                    preflightStopDeadline = Date().addingTimeInterval(5)
+                    preflightStopDeadline = DispatchTime.now() + 5
                 }
-                if preflight.status == nil && Date() >= preflightStopDeadline {
+                if preflight.status == nil && DispatchTime.now() >= preflightStopDeadline {
                     preflight.signal(SIGKILL)
                     preflightStopDeadline = .distantFuture
                     failForUser(String(localized: "The system audio access check could not stop cleanly."))
@@ -695,7 +730,7 @@ final class LDACNativeSession: @unchecked Sendable {
             }
             preflightCompleted = true
             emit(.audioCaptureAccess(.ready))
-            deadline = Date().addingTimeInterval(10)
+            deadline = DispatchTime.now() + 10
         }
         if preflightCompleted, children["daemon"] == nil, !shouldStop {
             lock.lock()
@@ -703,14 +738,14 @@ final class LDACNativeSession: @unchecked Sendable {
             lock.unlock()
             if !allowed {
                 if !handoffRequested { handoffRequested = true; emit(.handoffReady) }
-                if Date() >= deadline { throw LDACSessionError("The silent LDAC output could not be selected before Bluetooth handoff.") }
+                if DispatchTime.now() >= deadline { throw LDACSessionError("The silent LDAC output could not be selected before Bluetooth handoff.") }
                 return
             }
             try launch("daemon", executable: helpers.logger, arguments: [
                 "stream", "--style", "syslog", "--level", "info", "--predicate",
                 Self.daemonPredicate
             ])
-            deadline = Date().addingTimeInterval(5)
+            deadline = DispatchTime.now() + 5
         }
         if children["daemon"]?.outputEnded == true && !daemonLost {
             daemonLost = true
@@ -722,7 +757,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 nativeAudioFinished = false
                 let priorityArguments = priority != nil ? (outputDeviceUID.map { ["--priority-device-uid", $0] } ?? []) : []
                 try launch("connector", executable: helpers.connection, arguments: ["--address", address, "--watch-parent"] + priorityArguments)
-                deadline = Date().addingTimeInterval(45)
+                deadline = DispatchTime.now() + 45
             }
         }
         if !shouldStop {
@@ -739,15 +774,15 @@ final class LDACNativeSession: @unchecked Sendable {
                     try launch("capture", executable: helpers.capture, arguments: ["--stream", "3", "0"] + captureDeviceArguments, pcm: pcmWrite)
                     Darwin.close(pcmWrite)
                     pcmWrite = -1
-                    deadline = Date().addingTimeInterval(5)
+                    deadline = DispatchTime.now() + 5
                 }
                 if captureReady && pcmReady {
                     try send("probe", "media-ready \(String(ready.cid, radix: 16)) \(ready.mtu)")
                     readySent = true
-                    deadline = Date().addingTimeInterval(30)
+                    deadline = DispatchTime.now() + 30
                 }
             }
-            if Date() >= deadline { throw LDACSessionError("LDAC did not complete its required connection or live audio readiness checks.") }
+            if DispatchTime.now() >= deadline { throw LDACSessionError("LDAC did not complete its required connection or live audio readiness checks.") }
             if startAccepted && !started {
                 if let priority {
                     let state = try priority.state()
@@ -763,7 +798,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 if priority == nil || priorityPhase == .configured {
                     started = true
                     try send("media", "start live \(gain) 0")
-                    deadline = Date().addingTimeInterval(10)
+                    deadline = DispatchTime.now() + 10
                 }
             }
             for name in ["daemon", "probe", "media", "capture"] {
@@ -792,26 +827,26 @@ final class LDACNativeSession: @unchecked Sendable {
                     }
                     connector.closeInput()
                     connectorStopSent = true
-                    connectorStopDeadline = Date().addingTimeInterval(3)
+                    connectorStopDeadline = DispatchTime.now() + 3
                     record("CONNECTOR_INPUT_CLOSED")
                 }
-                if connector.status == nil && Date() >= connectorStopDeadline {
+                if connector.status == nil && DispatchTime.now() >= connectorStopDeadline {
                     connector.signal(connectorTerminationSent ? SIGKILL : SIGTERM)
                     record("CONNECTOR_TERMINATION signal=\(connectorTerminationSent ? "SIGKILL" : "SIGTERM") settlementVerified=0")
-                    connectorStopDeadline = connectorTerminationSent ? .distantFuture : Date().addingTimeInterval(1)
+                    connectorStopDeadline = connectorTerminationSent ? .distantFuture : DispatchTime.now() + 1
                     connectorTerminationSent = true
                     connectorSettlementUnverified = true
                     fail("The pending Bluetooth connection could not be confirmed stopped.")
                 }
             }
-            if started && !mediaStopSent, let media = children["media"], media.status == nil {
+            if (started || children["capture"] != nil) && !mediaStopSent, let media = children["media"], media.status == nil {
+                mediaStopSent = true
+                mediaStopDeadline = DispatchTime.now() + 5
                 if daemonLost { try? send("media", "stop") }
                 else { try send("media", "stop") }
-                mediaStopSent = true
-                mediaStopDeadline = Date().addingTimeInterval(5)
             }
-            if priority != nil, started, !feedFinished, let media = children["media"], media.status == nil,
-               Date() >= mediaStopDeadline {
+            if mediaStopSent, !feedFinished, !mediaStopReady, let media = children["media"], media.status == nil,
+               DispatchTime.now() >= mediaStopDeadline {
                 media.signal(SIGKILL)
                 mediaStopDeadline = .distantFuture
                 fail("The LDAC audio stream did not stop within five seconds.")
@@ -819,24 +854,26 @@ final class LDACNativeSession: @unchecked Sendable {
             if !started || feedFinished || children["media"]?.finished == true {
                 advancePriorityStop()
             }
-            if (!started || feedFinished || failure != nil) && !captureStopSent, let capture = children["capture"], capture.status == nil {
+            let canStopCapture = started ? feedFinished || failure != nil
+                : children["media"] == nil || mediaStopReady || children["media"]?.finished == true
+            if canStopCapture && !captureStopSent, let capture = children["capture"], capture.status == nil {
                 capture.signal(SIGTERM)
                 captureStopSent = true
-                captureStopDeadline = Date().addingTimeInterval(5)
+                captureStopDeadline = DispatchTime.now() + 5
             }
-            if captureStopSent, let capture = children["capture"], capture.status == nil, Date() >= captureStopDeadline {
+            if captureStopSent, let capture = children["capture"], capture.status == nil, DispatchTime.now() >= captureStopDeadline {
                 capture.signal(SIGKILL)
                 captureStopDeadline = .distantFuture
                 fail("System audio capture did not finish its tap cleanup within five seconds.")
             }
             if children["capture"] == nil || children["capture"]?.finished == true {
-                if let capture = children["capture"], capture.status != 0 || !captureDestroyed {
+                if !captureStoppedCleanly {
                     fail("System audio capture could not confirm clean tap destruction.")
                 }
                 if !daemonLost && priorityCanClose && ownerExitDeadline == .distantFuture && !ownerInputsClosed {
-                    ownerExitDeadline = Date().addingTimeInterval(10)
+                    ownerExitDeadline = DispatchTime.now() + 10
                 }
-                if daemonLost || ownerInputsClosed || Date() >= ownerExitDeadline {
+                if daemonLost || ownerInputsClosed || DispatchTime.now() >= ownerExitDeadline {
                     if priorityPhase != .unused && priorityPhase != .removed && priorityPhase != .uncertain {
                         priorityCleanupFailed("Bluetooth disconnected before playback priority cleanup could be confirmed.")
                     }
@@ -847,15 +884,15 @@ final class LDACNativeSession: @unchecked Sendable {
                         }
                         for name in ["disconnect", "connector", "probe", "media"] { children[name]?.closeInput() }
                         ownerInputsClosed = true
-                        ownerExitDeadline = Date().addingTimeInterval(10)
+                        ownerExitDeadline = DispatchTime.now() + 10
                         record("OWNER_INPUTS_CLOSED reason=\(daemonLost ? "daemon-log-ended" : "shutdown-timeout") closureVerified=0")
                     }
-                    if Date() >= ownerExitDeadline {
+                    if DispatchTime.now() >= ownerExitDeadline {
                         for name in ["disconnect", "connector", "probe", "media"] {
                             children[name]?.signal(ownerTerminationSent ? SIGKILL : SIGTERM)
                         }
                         record("OWNER_TERMINATION signal=\(ownerTerminationSent ? "SIGKILL" : "SIGTERM") closureVerified=0")
-                        ownerExitDeadline = ownerTerminationSent ? .distantFuture : Date().addingTimeInterval(2)
+                        ownerExitDeadline = ownerTerminationSent ? .distantFuture : DispatchTime.now() + 2
                         ownerTerminationSent = true
                     }
                     return
@@ -887,6 +924,11 @@ final class LDACNativeSession: @unchecked Sendable {
         }
     }
 
+    private var captureStoppedCleanly: Bool {
+        guard let capture = children["capture"] else { return true }
+        return captureDestroyed && (capture.status == 0 || capture.exitCode == 1 && captureCancelledBeforeStream)
+    }
+
     private var canRestore: Bool {
         !restoring && shouldStop && priorityCanClose && ["preflight", "disconnect", "connector", "probe", "media", "capture"].allSatisfy {
             children[$0] == nil || children[$0]?.finished == true
@@ -902,7 +944,7 @@ final class LDACNativeSession: @unchecked Sendable {
         do {
             if priorityPhase != .stopping {
                 priorityPhase = .stopping
-                priorityDeadline = Date().addingTimeInterval(45)
+                priorityDeadline = DispatchTime.now() + 45
                 record("PRIORITY_STOP_REQUESTED feedFinished=\(feedFinished) mediaExited=\(children["media"]?.finished == true)")
                 try priority.request(false, false)
             }
@@ -911,7 +953,7 @@ final class LDACNativeSession: @unchecked Sendable {
             if state.phase == "idle" {
                 priorityPhase = .removed
                 record("PRIORITY_CLEANUP_ATTEMPT_COMPLETED controllerAcknowledgment=0")
-            } else if state.phase == "cleanup-required" || Date() >= priorityDeadline {
+            } else if state.phase == "cleanup-required" || DispatchTime.now() >= priorityDeadline {
                 throw LDACSessionError("Bluetooth playback priority cleanup could not be confirmed.")
             }
         } catch {
@@ -936,7 +978,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 return true
             }
             if let error = state.error { throw LDACSessionError(error) }
-            if Date() >= priorityDeadline {
+            if DispatchTime.now() >= priorityDeadline {
                 throw LDACSessionError("Bluetooth playback priority cleanup is still pending after reconnection.")
             }
             return false
@@ -968,7 +1010,7 @@ final class LDACNativeSession: @unchecked Sendable {
                     record("SHUTDOWN_ERROR \(error.localizedDescription)")
                     fail(error.localizedDescription)
                 }
-                let interruptedPlayback = recoverableFailure || active && lock.withLock({ requestedStop })
+                let interruptedPlayback = recoverableFailure || (active || signalingStopConfirmed) && lock.withLock({ requestedStop })
                 if (children["probe"]?.status != 0 && !(interruptedPlayback && children["probe"]?.exitCode == 5)) || (children["media"] != nil && children["media"]?.status != 0 && !(interruptedPlayback && children["media"]?.exitCode == 5)) {
                     fail("The LDAC transport exited with an error.")
                 }
@@ -982,8 +1024,10 @@ final class LDACNativeSession: @unchecked Sendable {
         if children["disconnect"] == nil { restoring = true; finish(); return }
         if !originalConnectionEnded {
             if children["restore-disconnect"] == nil {
-                try launch("restore-disconnect", executable: helpers.connection, arguments: ["--address", address, "--disconnect", "--restore"])
-                restoreDeadline = Date().addingTimeInterval(12)
+                var arguments = ["--address", address, "--disconnect", "--restore"]
+                if let connectorHandle { arguments += ["--expected-handle", String(format: "%04X", connectorHandle)] }
+                try launch("restore-disconnect", executable: helpers.connection, arguments: arguments)
+                restoreDeadline = DispatchTime.now() + 12
                 restoreTerminationSent = false
             }
             guard let disconnect = children["restore-disconnect"], disconnect.finished else { return }
@@ -997,14 +1041,14 @@ final class LDACNativeSession: @unchecked Sendable {
         }
         if let priority, priorityPhase != .unused && priorityPhase != .removed {
             priorityPhase = .removing
-            priorityDeadline = Date().addingTimeInterval(45)
+            priorityDeadline = DispatchTime.now() + 45
             record("PRIORITY_REMOVAL_REQUESTED oldACLDisconnected=1")
             do { try priority.request(false, true) }
             catch { priorityCleanupFailed(error.localizedDescription) }
         }
         if recover || !restoreAudio { restoring = true; return }
         try launch("restore", executable: helpers.connection, arguments: ["--address", address, "--restore"])
-        restoreDeadline = Date().addingTimeInterval(52)
+        restoreDeadline = DispatchTime.now() + 52
         restoreTerminationSent = false
         restoring = true
     }
@@ -1063,8 +1107,8 @@ final class LDACNativeSession: @unchecked Sendable {
         children["daemon"]?.signal(SIGTERM)
         children["daemon"]?.closeInput()
         for child in children.values { child.closeInput() }
-        let loggerDeadline = Date().addingTimeInterval(2)
-        while let daemon = children["daemon"], daemon.status == nil, Date() < loggerDeadline {
+        let loggerDeadline = DispatchTime.now() + 2
+        while let daemon = children["daemon"], daemon.status == nil, DispatchTime.now() < loggerDeadline {
             daemon.reap()
             if daemon.status == nil { Thread.sleep(forTimeInterval: 0.01) }
         }
@@ -1072,6 +1116,20 @@ final class LDACNativeSession: @unchecked Sendable {
             daemon.signal(SIGKILL)
             daemon.wait()
             fail("The Bluetooth log observer did not stop cleanly.")
+        }
+        for (name, child) in children where child.status == nil {
+            child.signal(SIGTERM)
+            record("HELPER_TERMINATION helper=\(name) signal=SIGTERM")
+        }
+        let childDeadline = DispatchTime.now() + 2
+        while children.values.contains(where: { $0.status == nil }), DispatchTime.now() < childDeadline {
+            for child in children.values { child.reap() }
+            if children.values.contains(where: { $0.status == nil }) { Thread.sleep(forTimeInterval: 0.01) }
+        }
+        for (name, child) in children where child.status == nil {
+            child.signal(SIGKILL)
+            child.wait()
+            fail("The \(name) audio helper did not stop cleanly.")
         }
         if pcmRead >= 0 { Darwin.close(pcmRead); pcmRead = -1 }
         if pcmWrite >= 0 { Darwin.close(pcmWrite); pcmWrite = -1 }
@@ -1088,7 +1146,7 @@ final class LDACNativeSession: @unchecked Sendable {
         let safe = recoverableFailure && !hardFailure
             && !shutdownUnverified && !connectorSettlementUnverified && unverifiedAcquisitions.isEmpty
             && (priorityPhase == .unused || priorityPhase == .removed)
-            && (children["capture"] == nil || children["capture"]?.status == 0 && captureDestroyed)
+            && captureStoppedCleanly
             && (children["connector"] == nil || connectorSettled && [0, 4].contains(children["connector"]?.exitCode ?? -1))
             && (children["disconnect"] == nil || children["disconnect"]?.status == 0)
             && (children["restore-disconnect"] == nil || children["restore-disconnect"]?.status == 0 && restoreDisconnected)
@@ -1119,21 +1177,70 @@ final class LDACNativeSession: @unchecked Sendable {
                                   waitForReconnect: (originalConnectionEnded || targetUnavailableBeforeRestore) && !nativeAudioRestored)))
     }
 
-    static func completeDiagnostics(in directory: URL) throws {
+    static func beginDiagnostics(in directory: URL) throws -> FileHandle {
+        let retention = try lockDiagnostics(at: directory.deletingLastPathComponent().appendingPathComponent("retention.lock"))
+        defer { try? retention.close() }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        let active = try lockDiagnostics(at: directory.appendingPathComponent("active.lock"), nonblocking: true)
+        try pruneDiagnostics(in: directory)
+        return active
+    }
+
+    static func completeDiagnostics(in directory: URL, releasing active: FileHandle? = nil) throws {
+        let retention = try lockDiagnostics(at: directory.deletingLastPathComponent().appendingPathComponent("retention.lock"))
+        defer { try? retention.close() }
         try Data().write(to: directory.appendingPathComponent("completed"), options: .atomic)
+        try active?.close()
+        try pruneDiagnostics(in: directory)
+    }
+
+    private static func lockDiagnostics(at url: URL, nonblocking: Bool = false) throws -> FileHandle {
+        let descriptor = Darwin.open(url.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        guard flock(descriptor, LOCK_EX | (nonblocking ? LOCK_NB : 0)) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            try? handle.close()
+            throw error
+        }
+        return handle
+    }
+
+    private static func pruneDiagnostics(in directory: URL) throws {
         let manager = FileManager.default
         let directories = try manager.contentsOfDirectory(at: directory.deletingLastPathComponent(),
-            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-        let completed = directories.compactMap { candidate -> (url: URL, date: Date)? in
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey])
+        let inactive = directories.compactMap { candidate -> (url: URL, date: Date)? in
             guard candidate.lastPathComponent != directory.lastPathComponent,
                   UUID(uuidString: candidate.lastPathComponent) != nil,
-                  let values = try? candidate.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  let values = try? candidate.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey]),
                   values.isDirectory == true, values.isSymbolicLink == false,
-                  let date = try? candidate.appendingPathComponent("completed")
-                    .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate else { return nil }
+                  let directoryDate = values.contentModificationDate else { return nil }
+            let completedDate = try? candidate.appendingPathComponent("completed")
+                .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            let activeURL = candidate.appendingPathComponent("active.lock")
+            if manager.fileExists(atPath: activeURL.path) {
+                guard let active = try? lockDiagnostics(at: activeURL, nonblocking: true) else { return nil }
+                try? active.close()
+            } else if completedDate == nil {
+                return nil
+            }
+            let date = completedDate ?? directoryDate
             return (candidate, date)
         }.sorted { $0.date == $1.date ? $0.url.lastPathComponent > $1.url.lastPathComponent : $0.date > $1.date }
-        for candidate in completed.dropFirst(7) { try manager.removeItem(at: candidate.url) }
+        for candidate in inactive.dropFirst(7) {
+            let activeURL = candidate.url.appendingPathComponent("active.lock")
+            let active: FileHandle?
+            if manager.fileExists(atPath: activeURL.path) {
+                active = try? lockDiagnostics(at: activeURL, nonblocking: true)
+                if active == nil { continue }
+            } else {
+                active = nil
+            }
+            defer { try? active?.close() }
+            try manager.removeItem(at: candidate.url)
+        }
     }
 
     private func record(_ line: String) {
@@ -1256,13 +1363,20 @@ final class LDACNativeChild {
         return (status >> 8) & 0xFF
     }
 
-    init(executable: URL, arguments: [String], inheritedPCM: Int32?) throws {
+    init(executable: URL, arguments: [String], inheritedPCM: Int32?, blockStopSignals: Bool = false, mergeDiagnostics: Bool = true) throws {
         var incoming: [Int32] = [0, 0]
         var outgoing: [Int32] = [0, 0]
         guard pipe(&incoming) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         guard pipe(&outgoing) == 0 else {
             for fd in incoming { Darwin.close(fd) }
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard fcntl(incoming[1], F_SETNOSIGPIPE, 1) != -1,
+              fcntl(incoming[1], F_SETFL, O_NONBLOCK) != -1,
+              fcntl(outgoing[0], F_SETFL, O_NONBLOCK) != -1 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            for fd in incoming + outgoing { Darwin.close(fd) }
+            throw error
         }
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
@@ -1274,11 +1388,16 @@ final class LDACNativeChild {
         }
         var signalMask = sigset_t()
         sigemptyset(&signalMask)
+        if blockStopSignals {
+            sigaddset(&signalMask, SIGINT)
+            sigaddset(&signalMask, SIGTERM)
+        }
         posix_spawnattr_setsigmask(&attributes, &signalMask)
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK))
+        posix_spawnattr_setpgroup(&attributes, 0)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETPGROUP))
         posix_spawn_file_actions_adddup2(&actions, incoming[0], STDIN_FILENO)
         posix_spawn_file_actions_adddup2(&actions, outgoing[1], STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(&actions, outgoing[1], STDERR_FILENO)
+        posix_spawn_file_actions_adddup2(&actions, mergeDiagnostics ? outgoing[1] : STDERR_FILENO, STDERR_FILENO)
         if let inheritedPCM { posix_spawn_file_actions_adddup2(&actions, inheritedPCM, 3) }
         var strings = ([executable.path] + arguments).map { strdup($0) }
         strings.append(nil)
@@ -1300,9 +1419,6 @@ final class LDACNativeChild {
         pid = identifier
         input = incoming[1]
         output = outgoing[0]
-        fcntl(input, F_SETNOSIGPIPE, 1)
-        fcntl(input, F_SETFL, O_NONBLOCK)
-        fcntl(output, F_SETFL, O_NONBLOCK)
     }
 
     func readLines() throws -> [String] {
@@ -1339,7 +1455,10 @@ final class LDACNativeChild {
     func reap() {
         guard status == nil else { return }
         var value: Int32 = 0
-        if waitpid(pid, &value, WNOHANG) == pid { status = value == 0 ? 0 : value }
+        if waitpid(pid, &value, WNOHANG) == pid {
+            status = value == 0 ? 0 : value
+            kill(-pid, SIGKILL)
+        }
     }
 
     func signal(_ value: Int32) {
@@ -1351,6 +1470,7 @@ final class LDACNativeChild {
         var value: Int32 = 0
         while waitpid(pid, &value, 0) < 0 && errno == EINTR {}
         status = value == 0 ? 0 : value
+        kill(-pid, SIGKILL)
     }
 
     func closeInput() {

@@ -1,8 +1,9 @@
 # Development
 
-Use Xcode 27.2 with the macOS 27.2 SDK. The deployment target is macOS 15.4.
-The native HUD requires that SDK's private framework; older systems use a fallback.
-Select Xcode 27.2 under Xcode > Settings > Locations > Command Line Tools.
+Use Xcode 27.0 with the macOS 27.0 SDK. The deployment target is macOS 15.4.
+The native HUD is checked at launch and falls back when unavailable.
+Select Xcode under Xcode > Settings > Locations > Command Line Tools before
+running the commands below.
 
 ## Build
 
@@ -45,13 +46,13 @@ DerivedData; the source tree is unchanged.
 ## Tests
 
 ```sh
-xcodebuild -project Acouplet.xcodeproj -scheme Acouplet \
-  -configuration Debug -destination 'platform=macOS' \
-  -parallel-testing-enabled NO -only-testing:AcoupletTests test
-python3 Packaging/check-localizations.py
-python3 Packaging/check-package.py
-python3 Packaging/check-install.py
+Packaging/fetch-sparkle.sh
+python3 Packaging/check-all.py
 ```
 
-UI tests use simulated devices. Bluetooth, audio and connection recovery need
-separate testing with real hardware.
+This runs XCTest, offline native helper and driver checks, localization checks,
+and packaging fixtures. It stops at the first failure. `Packaging/direct.sh`
+runs the same checks before packaging a production release.
+
+UI tests, native HUD presentation and the launch service check run separately.
+Bluetooth, audio and connection recovery still need testing with real hardware.

@@ -3,6 +3,19 @@ import SwiftUI
 
 @main
 @MainActor
+enum AcoupletMain {
+    static func main() {
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        if CommandLine.arguments == [CommandLine.arguments[0], "--ldac-owner"] {
+            LDACOwnerWorker.run()
+            return
+        }
+        #endif
+        AcoupletApp.main()
+    }
+}
+
+@MainActor
 struct AcoupletApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.openWindow) private var openWindow
@@ -233,9 +246,24 @@ struct UITestHostView: View {
             if CommandLine.arguments.contains("--connection-lifecycle") {
                 HStack {
                     Button("Connect WF") { headphones.simulateDeviceConnection(named: "WF-1000XM5") }
+                        .accessibilityIdentifier("test.connectWF")
                     Button("Controls Busy") { headphones.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true) }
+                        .accessibilityIdentifier("test.controlsBusy")
+                    Button("Schedule Retry") { headphones.simulateScheduledRetry() }
+                        .accessibilityIdentifier("test.scheduleRetry")
                     Button("Connect WH") { headphones.simulateDeviceConnection(named: "WH-1000XM5") }
                     Button("Disconnect") { headphones.simulateDeviceConnection(named: nil) }
+                }
+                .controlSize(.mini)
+            }
+            if CommandLine.arguments.contains("--optional-read-timeout") {
+                HStack {
+                    Button("Open Settings", action: showSettings)
+                        .accessibilityIdentifier("test.optionalRead.settings")
+                    ForEach(["begin", "expire", "rehandshake", "recover"], id: \.self) { action in
+                        Button(action) { headphones.simulateOptionalReadUITest(action) }
+                            .accessibilityIdentifier("test.optionalRead.\(action)")
+                    }
                 }
                 .controlSize(.mini)
             }

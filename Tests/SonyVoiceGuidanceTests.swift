@@ -174,9 +174,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
     func testLiveWFFunction42RepliesEnableSilentVolumeWithOwnedConfirmation() throws {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         defer { controller.simulateControlLoss() }
-        controller.simulateDeviceConnection(named: "WF-1000XM5")
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [7, 0, 1, 0x42, 1]))
-        acknowledgeSimulatedCommands(controller)
+        negotiateGuidance(to: controller)
         for query: [UInt8] in [[0x40, 1], [0x42, 1, 0], [0x46, 1], [0x46, 0x20]] {
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == query }.count, 1)
         }
@@ -185,7 +183,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
             [0x41, 0x01, 0x03, 0, 0, 0, 1, 0x0F, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0x0A, 0x0B, 0x0D, 0x0F, 0x10, 0xF0],
             [0x43, 0x01, 0, 0], [0x47, 0x01, 0, 1], [0x47, 0x20, 1],
         ] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload, type: 0x0E)
         }
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
         XCTAssertEqual(controller.voiceGuidance.volume, 1)
@@ -198,21 +196,21 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains(write))
         XCTAssertEqual(controller.pendingChanges[.voiceGuidanceVolume], [0xFE])
         XCTAssertEqual(controller.voiceGuidance.volume, 1)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 0x20, 0xFE]))
+        controller.simulateProtocolMessage([0x47, 0x20, 0xFE], type: 0x0E)
         XCTAssertEqual(controller.pendingChanges[.voiceGuidanceVolume], [0xFE])
         XCTAssertEqual(controller.voiceGuidance.volume, 1)
         controller.refresh()
         acknowledgeSimulatedCommands(controller)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x46, 0x20] }.count, 2)
         XCTAssertEqual(controller.pendingChanges[.voiceGuidanceVolume], [0xFE])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 0x20, 0xFE]))
+        controller.simulateProtocolMessage([0x47, 0x20, 0xFE], type: 0x0E)
         XCTAssertNil(controller.pendingChanges[.voiceGuidanceVolume])
         XCTAssertEqual(controller.voiceGuidance.volume, -2)
         for status: UInt8 in [1, 0xFF] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x45, 1, 0, status]))
+            controller.simulateProtocolMessage([0x45, 1, 0, status], type: 0x0E)
             XCTAssertEqual(controller.voiceGuidance.volumeAvailable, status == 1 ? false : nil)
             for command: UInt8 in [0x43, 0x45] {
-                controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [command, 0x20, 0]))
+                controller.simulateProtocolMessage([command, 0x20, 0], type: 0x0E)
                 XCTAssertEqual(controller.voiceGuidance.volumeAvailable, status == 1 ? false : nil)
             }
             controller.setVoiceGuidanceVolume(0)
@@ -236,20 +234,20 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
         controller.refresh()
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x47, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x47, 1, 1, 1])
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
         XCTAssertNotNil(controller.pendingChanges[.voiceGuidance])
         for payload: [UInt8] in [[0x47, 1, 1], [0x49, 1, 1, 1], [0x47, 1, 2, 1], [0x47, 1, 0, 1]] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload, type: 0x0E)
             XCTAssertNotNil(controller.pendingChanges[.voiceGuidance])
         }
         controller.refresh()
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E)
         XCTAssertNil(controller.pendingChanges[.voiceGuidance])
         XCTAssertEqual(controller.voiceGuidance.enabled, false)
         XCTAssertEqual(controller.voiceGuidance.currentLanguage, 1)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 0x20, 0]))
+        controller.simulateProtocolMessage([0x47, 0x20, 0], type: 0x0E)
         controller.setVoiceGuidanceVolume(-2)
         let volumeFrame = try XCTUnwrap(controller.simulatedPendingFrame)
         XCTAssertEqual(volumeFrame.type, 0x0E)
@@ -259,15 +257,15 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         XCTAssertNotNil(controller.pendingChanges[.voiceGuidanceVolume])
         controller.refresh()
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x47, 0x20, 0xFE]))
+        controller.simulateProtocolMessage([0x47, 0x20, 0xFE])
         XCTAssertEqual(controller.voiceGuidance.volume, 0)
         XCTAssertNotNil(controller.pendingChanges[.voiceGuidanceVolume])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 0x20, 3]))
+        controller.simulateProtocolMessage([0x47, 0x20, 3], type: 0x0E)
         XCTAssertNil(controller.voiceGuidance.volume)
         XCTAssertNotNil(controller.pendingChanges[.voiceGuidanceVolume])
         controller.refresh()
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 0x20, 0xFE]))
+        controller.simulateProtocolMessage([0x47, 0x20, 0xFE], type: 0x0E)
         XCTAssertNil(controller.pendingChanges[.voiceGuidanceVolume])
         XCTAssertEqual(controller.voiceGuidance.volume, -2)
         XCTAssertEqual(controller.voiceGuidance.currentLanguage, 1)
@@ -299,13 +297,13 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains(frame))
         XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E)
         XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
         acknowledgeSimulatedCommands(controller)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x46, 1] }.count, 2)
         XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E)
         XCTAssertNil(controller.pendingChanges[.voiceGuidance])
         XCTAssertNil(controller.settingErrors[.voiceGuidance])
         XCTAssertEqual(controller.voiceGuidance.enabled, false)
@@ -325,6 +323,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
                     else { controller.setVoiceGuidance(false) }
                     XCTAssertEqual(controller.pendingChanges[setting], [1])
                 }
+                let session = controller.simulatedControlSession
                 controller.setSourceKeeping(!(try XCTUnwrap(controller.multipoint.keeping)))
                 XCTAssertEqual(controller.sourceTransition?.isFinished, false)
                 if !queued {
@@ -334,7 +333,9 @@ final class SonyVoiceGuidanceTests: XCTestCase {
                 acknowledgeSimulatedCommands(controller)
                 XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x48 })
                 XCTAssertNil(controller.pendingChanges[setting])
-                XCTAssertEqual(controller.isReady, !queued)
+                XCTAssertTrue(controller.isReady)
+                XCTAssertEqual(controller.simulatedControlSession, session)
+                if queued { XCTAssertNotNil(controller.settingErrors[setting]) }
             }
         }
     }
@@ -348,6 +349,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
                 controller.simulateDeviceConnection(named: "WF-1000XM5")
                 let inquiry: UInt8 = volume ? 0x20 : 1
                 let setting: SonyHeadphonesController.Setting = volume ? .voiceGuidanceVolume : .voiceGuidance
+                let session = controller.simulatedControlSession
                 controller.refresh()
                 if change == 2 {
                     while let frame = controller.simulatedPendingFrame, frame.type != 0x0E || frame.payload != [0x46, inquiry] {
@@ -360,10 +362,12 @@ final class SonyVoiceGuidanceTests: XCTestCase {
                 XCTAssertEqual(controller.pendingChanges[setting], [1])
                 let reply: [UInt8] = change == 2 ? [0x47, inquiry, volume ? 3 : 0xFF] + (volume ? [] : [1])
                     : [0x45, 1, 0, change == 0 ? 1 : 0xFF]
-                controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: reply))
+                controller.simulateProtocolMessage(reply, type: 0x0E)
                 acknowledgeSimulatedCommands(controller)
                 XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x48 })
-                XCTAssertFalse(controller.isReady)
+                XCTAssertTrue(controller.isReady)
+                XCTAssertEqual(controller.simulatedControlSession, session)
+                XCTAssertNotNil(controller.settingErrors[setting])
                 XCTAssertNil(controller.pendingChanges[setting])
             }
         }
@@ -392,16 +396,14 @@ final class SonyVoiceGuidanceTests: XCTestCase {
                 else { controller.setVoiceGuidance(false) }
                 XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload.first == 0x48 }.count, 1)
             }
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0,
-                payload: [0x47, inquiry, 1] + (testCase.volume ? [] : [1])))
+            controller.simulateProtocolMessage([0x47, inquiry, 1] + (testCase.volume ? [] : [1]), type: 0x0E)
             XCTAssertEqual(controller.voiceGuidance.enabled, true)
             XCTAssertEqual(controller.voiceGuidance.volume, 0)
             if testCase.expires { XCTAssertNotNil(controller.settingErrors[setting]) }
             else { XCTAssertEqual(controller.pendingChanges[setting], [1]) }
             acknowledgeSimulatedCommands(controller)
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x46, inquiry] }.count, 2)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0,
-                payload: [0x47, inquiry, testCase.expires ? 0 : 1] + (testCase.volume ? [] : [1])))
+            controller.simulateProtocolMessage([0x47, inquiry, testCase.expires ? 0 : 1] + (testCase.volume ? [] : [1]), type: 0x0E)
             XCTAssertNil(controller.pendingChanges[setting])
             XCTAssertNil(controller.settingErrors[setting])
             if testCase.expires {
@@ -421,15 +423,15 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         controller.simulateDeviceConnection(named: "WF-1000XM5")
         controller.refresh()
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x45, 1, 0, 1]))
+        controller.simulateProtocolMessage([0x45, 1, 0, 1], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.available, false)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x43, 1, 0, 0]))
+        controller.simulateProtocolMessage([0x43, 1, 0, 0], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.available, false)
         acknowledgeSimulatedCommands(controller)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x42, 1, 0] }.count, 2)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x43, 1, 0, 1]))
+        controller.simulateProtocolMessage([0x43, 1, 0, 1], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.available, false)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x49, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x49, 1, 1, 1], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
     }
 
@@ -445,13 +447,13 @@ final class SonyVoiceGuidanceTests: XCTestCase {
             for _ in 0..<4 { await Task.yield() }
             XCTAssertTrue(controller.isReady)
             controller.defersSimulatedWrites = false
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]))
+            controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E)
             XCTAssertEqual(controller.voiceGuidance.enabled, true)
             controller.completeSimulatedWrite()
             acknowledgeSimulatedCommands(controller)
             let unknown: [UInt8] = query[0] == 0x46 ? [0x47, query[1], query[1] == 1 ? 0xFF : 3] + (query[1] == 1 ? [1] : [])
                 : [0x43, query[1]] + (query[1] == 1 ? [0] : []) + [0xFF]
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: unknown))
+            controller.simulateProtocolMessage(unknown, type: 0x0E)
             let session = controller.simulatedControlSession
             controller.simulateVoiceGuidanceReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
@@ -466,8 +468,8 @@ final class SonyVoiceGuidanceTests: XCTestCase {
             }
             controller.simulateControlLoss()
             controller.simulateDeviceConnection(named: "WF-1000XM5")
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]), session: session)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]))
+            controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E, session: session)
+            controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E)
             XCTAssertEqual(controller.voiceGuidance.enabled, true)
             controller.refresh()
             acknowledgeSimulatedCommands(controller)
@@ -485,7 +487,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
             acknowledgeSimulatedCommands(controller)
             XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == query })
             let malformed = [query[0] + 1, query[1]]
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: malformed))
+            controller.simulateProtocolMessage(malformed, type: 0x0E)
             let session = controller.simulatedControlSession
             controller.simulateVoiceGuidanceReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
@@ -504,11 +506,11 @@ final class SonyVoiceGuidanceTests: XCTestCase {
             let prior = controller.voiceGuidance
             let reply: [UInt8] = query[0] == 0x46 ? [0x47, query[1], 0] + (query[1] == 1 ? [1] : [])
                 : [0x43, query[1]] + (query[1] == 1 ? [0] : []) + [0]
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: reply))
+            controller.simulateProtocolMessage(reply, type: 0x0E)
             XCTAssertEqual(controller.voiceGuidance, prior)
             acknowledgeSimulatedCommands(controller)
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == query }.count, 2)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: reply))
+            controller.simulateProtocolMessage(reply, type: 0x0E)
             XCTAssertEqual(controller.voiceGuidance, readyGuidance())
         }
     }
@@ -528,8 +530,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
             acknowledgeSimulatedCommands(controller)
             XCTAssertEqual(controller.pendingChanges[setting], [1])
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x46, inquiry] }.count, 1)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0,
-                payload: [0x47, inquiry, volume ? 3 : 0xFF] + (volume ? [] : [1])))
+            controller.simulateProtocolMessage([0x47, inquiry, volume ? 3 : 0xFF] + (volume ? [] : [1]), type: 0x0E)
             XCTAssertEqual(controller.pendingChanges[setting], [1])
             let session = controller.simulatedControlSession
             controller.simulateVoiceGuidanceReadTimeout([0x46, inquiry])
@@ -544,8 +545,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload.first == 0x48 }.count, 1)
             acknowledgeSimulatedCommands(controller)
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x46, inquiry] }.count, 2)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0,
-                payload: [0x47, inquiry, 1] + (volume ? [] : [1])))
+            controller.simulateProtocolMessage([0x47, inquiry, 1] + (volume ? [] : [1]), type: 0x0E)
             XCTAssertNil(controller.settingErrors[setting])
             if volume { controller.setVoiceGuidanceVolume(-1) }
             else { controller.setVoiceGuidance(true) }
@@ -557,13 +557,11 @@ final class SonyVoiceGuidanceTests: XCTestCase {
     func testUnknownGuidanceCapabilityCountsAsReceivedAndLeavesUnsupportedSwitchDisabled() async {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         defer { controller.simulateControlLoss() }
-        controller.simulateDeviceConnection(named: "WF-1000XM5")
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [7, 0, 1, 0x42, 1]))
-        acknowledgeSimulatedCommands(controller)
+        negotiateGuidance(to: controller)
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x40, 1] })
         var capability = syntheticCapability
         capability[6] = 0xFF
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: capability))
+        controller.simulateProtocolMessage(capability, type: 0x0E)
         XCTAssertNil(controller.voiceGuidance.supportsOnOffSwitch)
         XCTAssertEqual(controller.voiceGuidance.supportedLanguages, [1, 0x10])
         XCTAssertNil(controller.voiceGuidance.setEnabledPayload(false))
@@ -580,8 +578,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         defer { controller.simulateControlLoss() }
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [0x01, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         negotiateGuidanceAndConnection(to: controller, mode: 0)
         XCTAssertTrue(controller.isReady)
         XCTAssertTrue(controller.canChangeConnectionMode)
@@ -590,7 +587,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         acknowledgeSimulatedCommands(controller)
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == [0xE8, 5, 1, 0] })
         let session = controller.simulatedControlSession
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 5, 1, 2]))
+        controller.simulateProtocolMessage([0xE9, 5, 1, 2])
         for _ in 0..<4 { await Task.yield() }
         XCTAssertEqual(controller.connectionTransition?.phase, .reconnecting)
         XCTAssertEqual(controller.simulatedControlSession, session)
@@ -599,7 +596,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         XCTAssertGreaterThan(controller.simulatedControlSession, session)
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x00, 0])
         XCTAssertEqual(controller.connectionTransition?.phase, .verifying)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x01, 0, 3, 0, 0x30, 0x18, 0, 0]))
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0])
         negotiateGuidanceAndConnection(to: controller, mode: 1)
         XCTAssertTrue(controller.isReady)
         XCTAssertEqual(controller.connectionTransition?.phase, .confirmed)
@@ -608,11 +605,11 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         controller.setVoiceGuidance(false)
         XCTAssertNil(controller.pendingChanges[.voiceGuidance])
         XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x48 })
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 0, 1]))
+        controller.simulateProtocolMessage([0x47, 1, 0, 1], type: 0x0E)
         XCTAssertNil(controller.voiceGuidance.enabled)
         acknowledgeSimulatedCommands(controller)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x46, 1] }.count, 2)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 0, 1]))
+        controller.simulateProtocolMessage([0x47, 1, 0, 1], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
         controller.setVoiceGuidance(false)
         let write = try XCTUnwrap(controller.simulatedPendingFrame)
@@ -623,13 +620,13 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         acknowledgeSimulatedCommands(controller)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x46, 1] }.count, 3)
         XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.enabled, false)
         XCTAssertNil(controller.pendingChanges[.voiceGuidance])
     }
 
     @MainActor
-    func testGuidanceCapabilityLossCancelsQueuedAndTransmittedChanges() {
+    func testUnownedTable2RepliesPreserveQueuedAndTransmittedGuidanceChanges() {
         for queued in [false, true] {
             let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
             defer { controller.simulateControlLoss() }
@@ -637,12 +634,20 @@ final class SonyVoiceGuidanceTests: XCTestCase {
             if queued { controller.refreshEqualizer() }
             controller.setVoiceGuidance(false)
             XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0,
-                payload: [7, 0, 3, 0x31, 1, 0x32, 1, 0x53, 1]))
+            let session = controller.simulatedControlSession
+            let guidance = controller.voiceGuidance
+            let functions = controller.supportedFunctions2
+            for payload: [UInt8] in [[7, 0, 3, 0x31, 1, 0x32, 1, 0x53, 1], [7, 0, 0]] {
+                controller.simulateProtocolMessage(payload, type: 0x0E)
+                XCTAssertEqual(controller.voiceGuidance, guidance)
+                XCTAssertEqual(controller.supportedFunctions2, functions)
+                XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
+            }
             acknowledgeSimulatedCommands(controller)
-            XCTAssertFalse(controller.isReady)
-            XCTAssertNil(controller.pendingChanges[.voiceGuidance])
-            XCTAssertEqual(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x48, 1, 1] }, !queued)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
+            XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x48, 1, 1] })
         }
     }
 
@@ -663,10 +668,25 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x46, 0x20] })
         XCTAssertNil(controller.pendingChanges[.voiceGuidanceVolume])
         XCTAssertEqual(controller.voiceGuidance.volume, -2)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [7, 0, 1, 0x42, 1]))
-        XCTAssertTrue(controller.voiceGuidance.supportsGuidance)
-        XCTAssertNil(controller.voiceGuidance.enabled)
-        XCTAssertNil(controller.voiceGuidance.volume)
+        let guidance = controller.voiceGuidance
+        controller.simulateProtocolMessage([7, 0, 1, 0x42, 1], type: 0x0E)
+        XCTAssertEqual(controller.voiceGuidance, guidance)
+    }
+
+    @MainActor
+    private func negotiateGuidance(to controller: SonyHeadphonesController) {
+        controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        let name = Array("WF-1000XM5".utf8)
+        for payload: [UInt8] in [[0x05, 1, UInt8(name.count)] + name, [0x05, 3, 0, 1], [0x07, 0, 0]] {
+            controller.simulateProtocolMessage(payload)
+        }
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x06, 0] })
+        controller.simulateProtocolMessage([0x07, 0, 1, 0x42, 1], type: 0x0E)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(controller.isReady)
     }
 
     @MainActor
@@ -675,19 +695,19 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         let name = Array("WF-1000XM5".utf8)
         for payload: [UInt8] in [[0x05, 1, UInt8(name.count)] + name, [0x05, 3, 0, 1],
                                  [0x07, 0, 3, 0x6B, 0, 0x90, 0, 0xE7, 0]] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload)
         }
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x67, 0x17, 1, 1, 0, 0, 10]))
+        controller.simulateProtocolMessage([0x67, 0x17, 1, 1, 0, 0, 10])
         acknowledgeSimulatedCommands(controller)
         for payload: [UInt8] in [[0x05, 2, 5] + Array("1.0.0".utf8), [0xE1, 5, 3, 0, 1, 2, 1, 0],
                                  [0xE3, 5, 0, 0], [0xE7, 5, mode]] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload)
         }
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x07, 0, 1, 0x42, 1]))
+        controller.simulateProtocolMessage([0x07, 0, 1, 0x42, 1], type: 0x0E)
         acknowledgeSimulatedCommands(controller)
         for payload: [UInt8] in [syntheticCapability, [0x43, 1, 0, 0], [0x47, 0x20, 0]] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload, type: 0x0E)
         }
         acknowledgeSimulatedCommands(controller)
     }
@@ -699,8 +719,8 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         negotiateLegacyGuidance(to: controller, functions: [0x62, 0x42])
         XCTAssertFalse(controller.voiceGuidance.supportsGuidance)
         XCTAssertFalse(controller.voiceGuidance.supportsVolume)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x41, 1, 1, 0]))
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x49, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x41, 1, 1, 0], type: 0x0E)
+        controller.simulateProtocolMessage([0x49, 1, 1, 1], type: 0x0E)
         XCTAssertNil(controller.voiceGuidance.enabled)
         controller.setVoiceGuidance(true)
         XCTAssertNil(controller.pendingChanges[.voiceGuidance])
@@ -713,18 +733,21 @@ final class SonyVoiceGuidanceTests: XCTestCase {
             let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
             defer { controller.simulateControlLoss() }
             negotiateLegacyGuidance(to: controller)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x41, 1, 1, 0]))
+            controller.simulateProtocolMessage([0x41, 1, 1, 0], type: 0x0E)
             acknowledgeSimulatedCommands(controller)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x43, 1, 1, 0]))
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]))
+            controller.simulateProtocolMessage([0x43, 1, 1, 0], type: 0x0E)
+            controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E)
+            let session = controller.simulatedControlSession
             controller.refresh()
             controller.setVoiceGuidance(false)
             XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x45, 1, 1, status]))
+            controller.simulateProtocolMessage([0x45, 1, 1, status], type: 0x0E)
             acknowledgeSimulatedCommands(controller)
             XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x48 })
             XCTAssertNil(controller.pendingChanges[.voiceGuidance])
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertNotNil(controller.settingErrors[.voiceGuidance])
         }
     }
 
@@ -733,16 +756,16 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         defer { controller.simulateControlLoss() }
         negotiateLegacyGuidance(to: controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x41, 1, 1, 0]))
+        controller.simulateProtocolMessage([0x41, 1, 1, 0], type: 0x0E)
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x43, 1, 1, 0]))
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x43, 1, 1, 0], type: 0x0E)
+        controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E)
         controller.setVoiceGuidance(false)
         acknowledgeSimulatedCommands(controller)
         controller.refresh()
         acknowledgeSimulatedCommands(controller)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x46, 1, 1] }.count, 2)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 0xFF]))
+        controller.simulateProtocolMessage([0x47, 1, 1, 0xFF], type: 0x0E)
         XCTAssertNil(controller.voiceGuidance.enabled)
         XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
         let session = controller.simulatedControlSession
@@ -755,12 +778,12 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         acknowledgeSimulatedCommands(controller)
         XCTAssertNil(controller.pendingChanges[.voiceGuidance])
         XCTAssertNotNil(controller.settingErrors[.voiceGuidance])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x49, 1, 1, 0xFF]))
+        controller.simulateProtocolMessage([0x49, 1, 1, 0xFF], type: 0x0E)
         XCTAssertNotNil(controller.settingErrors[.voiceGuidance])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x49, 1, 1, 0]))
+        controller.simulateProtocolMessage([0x49, 1, 1, 0], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.enabled, false)
         XCTAssertNil(controller.settingErrors[.voiceGuidance])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x45, 1, 1, 0xFF]))
+        controller.simulateProtocolMessage([0x45, 1, 1, 0xFF], type: 0x0E)
         XCTAssertNil(controller.voiceGuidance.available)
         controller.setVoiceGuidance(true)
         XCTAssertNil(controller.pendingChanges[.voiceGuidance])
@@ -772,14 +795,14 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         defer { controller.simulateControlLoss() }
         negotiateLegacyGuidance(to: controller)
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x40, 1] })
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x41, 1, 1, 0]))
+        controller.simulateProtocolMessage([0x41, 1, 1, 0], type: 0x0E)
         acknowledgeSimulatedCommands(controller)
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x42, 1, 1] })
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x46, 1, 1] })
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x43, 1, 1, 0]))
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x47, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x43, 1, 1, 0], type: 0x0E)
+        controller.simulateProtocolMessage([0x47, 1, 1, 1])
         XCTAssertNil(controller.voiceGuidance.enabled)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x47, 1, 1, 1], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
         XCTAssertNil(controller.voiceGuidance.currentLanguage)
         XCTAssertNil(controller.voiceGuidance.volume)
@@ -793,12 +816,12 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         acknowledgeSimulatedCommands(controller)
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains(frame))
         XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 0]))
+        controller.simulateProtocolMessage([0x47, 1, 1, 0], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
         XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [1])
         acknowledgeSimulatedCommands(controller)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x46, 1, 1] }.count, 3)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x47, 1, 1, 0]))
+        controller.simulateProtocolMessage([0x47, 1, 1, 0], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.enabled, false)
         XCTAssertNil(controller.pendingChanges[.voiceGuidance])
         controller.setVoiceGuidanceVolume(1)
@@ -806,15 +829,15 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         controller.defersSimulatedWrites = true
         controller.setVoiceGuidance(true)
         controller.defersSimulatedWrites = false
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x49, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x49, 1, 1, 1], type: 0x0E)
         XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [0])
         XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x48, 1, 1, 1] })
         controller.completeSimulatedWrite()
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x49, 1, 1, 0xFF]))
+        controller.simulateProtocolMessage([0x49, 1, 1, 0xFF], type: 0x0E)
         XCTAssertNil(controller.voiceGuidance.enabled)
         XCTAssertEqual(controller.pendingChanges[.voiceGuidance], [0])
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x49, 1, 1, 1]))
+        controller.simulateProtocolMessage([0x49, 1, 1, 1], type: 0x0E)
         XCTAssertEqual(controller.voiceGuidance.enabled, true)
         XCTAssertNil(controller.pendingChanges[.voiceGuidance])
     }
@@ -822,16 +845,15 @@ final class SonyVoiceGuidanceTests: XCTestCase {
     @MainActor
     private func negotiateLegacyGuidance(to controller: SonyHeadphonesController, functions: [UInt8] = [0x62, 0x39]) {
         controller.simulateDeviceConnection(named: "WH-1000XM3", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [1, 0, 2, 0x10]), beginConnection: true)
+        controller.simulateProtocolMessage([1, 0, 2, 0x10], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
         let name = Array("WH-1000XM3".utf8)
         for payload: [UInt8] in [[5, 1, UInt8(name.count)] + name, [5, 3, 0x20, 0], [7, 0, UInt8(functions.count)] + functions] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload)
         }
         acknowledgeSimulatedCommands(controller)
         for payload: [UInt8] in [[0x61, 2, 2, 3, 1, 2, 0, 20, 1, 15], [0x63, 2, 0], [0x67, 2, 1, 2, 0, 1, 0, 12]] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload)
         }
         acknowledgeSimulatedCommands(controller)
         XCTAssertTrue(controller.isReady)

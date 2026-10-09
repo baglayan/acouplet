@@ -28,12 +28,14 @@ if (( ${+CODE_SIGN_IDENTITY} )) && [[ -z "$CODE_SIGN_IDENTITY" ]]; then
     print -u2 "CODE_SIGN_IDENTITY is empty. Choose an existing Apple signing identity, or use '-' explicitly for ad-hoc signing."
     exit 1
 fi
-signing_identity="${CODE_SIGN_IDENTITY:-Apple Development}"
+default_signing_identity='Developer ID Application'
+if [[ "$local_update" == true ]]; then default_signing_identity='Apple Development'; fi
+signing_identity="${CODE_SIGN_IDENTITY:-$default_signing_identity}"
 signing_settings=("CODE_SIGN_IDENTITY=$signing_identity" CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO ENABLE_HARDENED_RUNTIME=YES)
 if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
     signing_settings+=("DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM")
 fi
-if [[ "$signing_identity" != - ]] && { (( ${+CODE_SIGN_IDENTITY} )) || [[ -z "${DEVELOPMENT_TEAM:-}" ]]; }; then
+if [[ "$signing_identity" != - ]] && { [[ "$local_update" == false ]] || (( ${+CODE_SIGN_IDENTITY} )) || [[ -z "${DEVELOPMENT_TEAM:-}" ]]; }; then
     signing_settings+=(CODE_SIGN_STYLE=Manual)
 fi
 
@@ -70,13 +72,18 @@ if [[ ! "$marketing_version" =~ '^[0-9]+(\.[0-9]+){1,2}$' ]]; then
     print -u2 "ACOUPLET_MARKETING_VERSION must contain two or three numeric components. The previous package was kept."
     exit 1
 fi
+source_record="$(mktemp "$repo_root/.build/package-source.XXXXXX")"
+trap 'rm -f "$source_record"' EXIT
+source_options=()
+if [[ "$local_update" == true ]]; then source_options=(--development); fi
+/usr/bin/python3 "$repo_root/Packaging/release-source.py" capture "$repo_root" "$source_record" "${source_options[@]}"
 if ! (( ${+ACOUPLET_BUILD_NUMBER} )); then
     print -r -- "$build_number" > "$build_counter.tmp"
     mv "$build_counter.tmp" "$build_counter"
 fi
 if [[ "$local_update" == false ]]; then mkdir -p "$repo_root/dist"; fi
 rm -rf "$build_app/Contents/PlugIns/Acouplet Controls.appex"
-rm -f "$build_app/Contents/Resources/Acouplet LDAC Output.pkg"
+rm -f "$build_app/Contents/Resources/Acouplet LDAC Output.pkg" "$build_app/Contents/Resources/Acouplet LDAC Removal.pkg"
 /bin/zsh "$repo_root/Packaging/fetch-sparkle.sh"
 print "Building Acouplet…"
 if ! /usr/bin/xcrun xcodebuild \
@@ -125,7 +132,7 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ldac_driver/Co
     print -u2 "The signed app must contain the owned LDAC output driver and unchanged Apple source/license. The previous package was kept."
     exit 1
 fi
-ldac_codes=("$build_app/Contents/Helpers/LDACSignaling" "$build_app/Contents/Helpers/LDACMediaTransport" "$build_app/Contents/Helpers/SonyAudioConnection" "$ldac_audio" "$ldac_driver")
+ldac_codes=("$build_app/Contents/Helpers/LDACSignaling" "$build_app/Contents/Helpers/LDACMediaTransport" "$build_app/Contents/Helpers/SonyAudioConnection" "$build_app/Contents/Helpers/LDACLogObserver" "$ldac_audio" "$ldac_driver")
 for signed_bundle in "$build_app" "$helper" "$hud" "$hud_check" "$sparkle/Versions/B/XPCServices/Installer.xpc" "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app" "$sparkle" "${ldac_codes[@]}"; do
     signature="$(/usr/bin/codesign --display --verbose=2 "$signed_bundle" 2>&1)"
     signature_flags="$(print -r -- "$signature" | /usr/bin/sed -n 's/^CodeDirectory .*flags=[^(]*(\([^)]*\)).*/\1/p')"
@@ -157,6 +164,10 @@ for signed_bundle in "$build_app" "$helper" "$hud" "$hud_check" "$sparkle/Versio
         print -u2 "The app and helper must share the new package build number. The previous package was kept."
         exit 1
     fi
+    if [[ "$local_update" == false ]] && ! /usr/bin/codesign --verify --strict --all-architectures --test-requirement='=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "$signed_bundle"; then
+        print -u2 "Production packages require Developer ID Application signatures. Use --local for development signing. The previous package was kept."
+        exit 1
+    fi
     if [[ "$signing_identity" != - ]]; then
         if ! /usr/bin/codesign --verify --strict --test-requirement='=anchor apple generic' "$signed_bundle"; then
             print -u2 "The requested Apple certificate signature is missing or invalid. The previous package was kept."
@@ -175,6 +186,7 @@ done
     "$build_app/Contents/Resources/Acouplet LDAC Output.pkg" "$marketing_version"
 /usr/bin/codesign --force --sign "$signing_identity" --options runtime --preserve-metadata=entitlements --generate-entitlement-der "$build_app"
 /usr/bin/codesign --verify --deep --strict "$build_app"
+/usr/bin/python3 "$repo_root/Packaging/release-source.py" verify "$repo_root" "$source_record" > /dev/null
 rm -rf "$package_dir"
 mkdir -p "$package_dir"
 /usr/bin/ditto "$build_app" "$package_dir/Acouplet.app"
@@ -186,15 +198,12 @@ cp "$repo_root/LICENSE" "$package_dir/LICENSE"
 cp "$repo_root/THIRD-PARTY-NOTICES.md" "$package_dir/THIRD-PARTY-NOTICES.md"
 chmod +x "$package_dir/Install.command" "$package_dir/Uninstall Service.command" "$package_dir/Uninstall LDAC Output.command"
 /usr/bin/codesign --verify --deep --strict "$package_dir/Acouplet.app"
-revision="$(/usr/bin/git -C "$repo_root" rev-parse HEAD 2>/dev/null || print unversioned)"
-worktree=clean
-if [[ -n "$(/usr/bin/git -C "$repo_root" status --porcelain 2>/dev/null)" ]]; then worktree=dirty; fi
+source_provenance="$(/usr/bin/python3 "$repo_root/Packaging/release-source.py" verify "$repo_root" "$source_record")"
 receipt="$package_dir/Build Receipt.txt"
 if [[ "$local_update" == true ]]; then receipt="$package_dir/Local Build Receipt.txt"; fi
 {
     print "Prepared UTC: $(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
-    print -r -- "Revision: $revision"
-    print -r -- "Worktree: $worktree"
+    print -r -- "$source_provenance"
     print -r -- "Signing identity: $signing_identity"
     print -r -- "Build number: $build_number"
     print -r -- "Distribution: $actual_distribution"
@@ -212,7 +221,7 @@ if [[ "$local_update" == true ]]; then receipt="$package_dir/Local Build Receipt
     else
         print "Release app: Acouplet.app"
     fi
-    for relative in "Contents/MacOS/Acouplet" "Contents/Helpers/Acouplet Battery Publisher" "Contents/Frameworks/SonyNativeHUD.dylib" "Contents/Helpers/SonyNativeHUDCheck" "Contents/Resources/Assets.car" "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater" "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer" "Contents/Helpers/LDACSignaling" "Contents/Helpers/LDACMediaTransport" "Contents/Helpers/SonyAudioConnection" "Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist" "Contents/Resources/Acouplet LDAC Output.pkg" "Contents/_CodeSignature/CodeResources"; do
+    for relative in "Contents/MacOS/Acouplet" "Contents/Helpers/Acouplet Battery Publisher" "Contents/Frameworks/SonyNativeHUD.dylib" "Contents/Helpers/SonyNativeHUDCheck" "Contents/Resources/Assets.car" "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater" "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer" "Contents/Helpers/LDACSignaling" "Contents/Helpers/LDACMediaTransport" "Contents/Helpers/SonyAudioConnection" "Contents/Helpers/LDACLogObserver" "Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist" "Contents/Resources/Acouplet LDAC Output.pkg" "Contents/Resources/Acouplet LDAC Removal.pkg" "Contents/_CodeSignature/CodeResources"; do
         /usr/bin/cmp "$build_app/$relative" "$package_dir/Acouplet.app/$relative"
         digest="$(/usr/bin/shasum -a 256 "$build_app/$relative" | /usr/bin/awk '{print $1}')"
         print -r -- $'SHA256\t'"$digest"$'\t'"$relative"
@@ -231,7 +240,9 @@ elif [[ "$direct_release" == true ]]; then
     print -r -- "Production build staged for website release: $package_dir"
     print -r -- "Build receipt: $receipt"
 else
-    /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$package_dir" "$archive_path"
+    /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$package_dir" "$archive_path.pending"
+    /usr/bin/python3 "$repo_root/Packaging/release-source.py" verify "$repo_root" "$source_record" > /dev/null
+    mv "$archive_path.pending" "$archive_path"
     print "Package: $archive_path"
 fi
 print "Extracted installer: $package_dir/Install.command"

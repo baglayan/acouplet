@@ -7,7 +7,9 @@ extension SonyDeviceCoordinator {
         guard !isRunning else { return }
         isRunning = true
         isSystemSleeping = false
-        refreshDiscovery()
+        reportBluetoothAuthorization(CBManager.authorization)
+        bluetoothAuthorizationManager = CBCentralManager(delegate: self, queue: .main,
+            options: [CBCentralManagerOptionShowPowerAlertKey: false])
     }
 
     func stop() {
@@ -15,6 +17,8 @@ extension SonyDeviceCoordinator {
         nativeBatteryPublisher?.stop()
         #endif
         isRunning = false
+        bluetoothAuthorizationManager?.delegate = nil
+        bluetoothAuthorizationManager = nil
         discoveryGeneration += 1
         isDiscovering = false
         discoveryTimer?.invalidate()
@@ -60,10 +64,12 @@ extension SonyDeviceCoordinator {
 
     func refreshDiscovery() {
         guard isRunning, !isSystemSleeping, !isDiscovering else { return }
+        let authorization = CBManager.authorization
+        reportBluetoothAuthorization(authorization)
+        guard authorization == .allowedAlways else { return }
         isDiscovering = true
         discoveryGeneration += 1
         let generation = discoveryGeneration
-        reportBluetoothAuthorization(CBManager.authorization)
         SonyHeadphonesController.initializeBluetooth(authorization: { CBManager.authorization },
             initialize: { _ = IOBluetoothDevice.pairedDevices() }) { [weak self] authorization in
                 guard let self, self.isRunning, !self.isSystemSleeping,
@@ -112,8 +118,12 @@ extension SonyDeviceCoordinator {
         #endif
     }
 
-    private func refreshPairedInventory() {
-        guard isRunning, !isSystemSleeping, CBManager.authorization == .allowedAlways else { return }
+    func refreshPairedInventory(authorization: CBManagerAuthorization = CBManager.authorization) {
+        guard isRunning, !isSystemSleeping else { return }
+        guard authorization == .allowedAlways else {
+            reportBluetoothAuthorization(authorization)
+            return
+        }
         let saved = SonyBLEIdentity.savedDevices(in: .standard)
         let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
         var connected: Set<String> = []
@@ -132,9 +142,16 @@ extension SonyDeviceCoordinator {
                 model = identity.model
             }
             guard let descriptor = SonyConnectedDevice(address: address, name: device.name ?? model.name, model: model) else { return nil }
-            if device.isConnected() { connected.insert(address) }
+            if device.isClassicConnected() { connected.insert(address) }
             return descriptor
         }
         reconcileDiscoveredDevices(devices, connectedAddresses: connected, pairedDeviceInventory: paired)
+    }
+}
+
+extension SonyDeviceCoordinator: @preconcurrency CBCentralManagerDelegate {
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        guard central === bluetoothAuthorizationManager, isRunning, !isSystemSleeping else { return }
+        if reportBluetoothAuthorization(CBManager.authorization) { refreshDiscovery() }
     }
 }

@@ -1,0 +1,23 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "NSAudioCaptureUsageDescription": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play Mac audio through your headphones using LDAC. Ordinary playback is temporarily muted while LDAC is on and resumes when it stops. Audio is streamed locally and is not recorded to a file."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac’inizdeki sesi LDAC kullanarak kulaklığınızdan çalın. LDAC açıkken normal ses çalma geçici olarak sessize alınır ve LDAC durdurulduğunda devam eder. Ses yerel olarak aktarılır ve dosyaya kaydedilmez."
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

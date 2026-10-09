@@ -101,10 +101,10 @@ final class SonyNoiseModeHUDTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let executable = directory.appending(path: "probe")
         let pidFile = directory.appending(path: "pid")
-        let script = "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\nexec /bin/sleep 30\n"
+        let script = "#!/bin/sh\necho $$ > \"${0%/*}/pid\"\nexec /bin/sleep 30\n"
         try script.write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-        let probe = SonyNativeHUDProbe(executableURL: executable, timeout: 0.3)
+        let probe = SonyNativeHUDProbe(executableURL: executable, timeout: 1)
         let start = ContinuousClock.now
         let attempt = Task { await probe.check() }
         try await Task.sleep(for: .milliseconds(50))
@@ -178,7 +178,7 @@ final class SonyNoiseModeHUDTests: XCTestCase {
         controller.simulateDeviceConnection(named: "WF-1000XM5")
         XCTAssertTrue(changes.isEmpty)
         let anc: [UInt8] = [0x69, 0x19, 1, 1, 0, 0, 12, 0, 0]
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: anc))
+        controller.simulateProtocolMessage(anc)
         XCTAssertEqual(controller.noiseControlMode, .anc)
         XCTAssertTrue(changes.isEmpty)
     }

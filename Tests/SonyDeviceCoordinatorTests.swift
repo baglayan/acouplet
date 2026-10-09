@@ -195,7 +195,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         defer { observation.cancel() }
         for type: UInt8 in [0x0C, 0x0E] {
             for payload: [UInt8] in [[0xFF, 0], [0x51, 0], [0x13, 0x02], [0x43, 0x20]] {
-                controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload))
+                controller.simulateProtocolMessage(payload, type: type)
             }
         }
         XCTAssertEqual(changes, 0)
@@ -222,7 +222,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         var changes = 0
         let observation = coordinator.objectWillChange.sink { changes += 1 }
         defer { observation.cancel() }
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x39, 0x02]))
+        controller.simulateProtocolMessage([0x39, 0x02], type: 0x0E)
         XCTAssertTrue(controller.multipoint.inventoryIsStale)
         XCTAssertGreaterThan(changes, 0)
     }
@@ -536,11 +536,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
             coordinator.reconcileConnectedDevices([first, second])
             let owner = try XCTUnwrap(coordinator.controller(for: firstAddress))
             let other = try XCTUnwrap(coordinator.controller(for: secondAddress))
-            owner.simulateDeviceConnection(named: first.name, simulatedAddress: firstAddress, galleryModel: .wfXM5)
-            let firmware = Array("6.1.0".utf8)
-            deliver([0x05, 2, UInt8(firmware.count)] + firmware, to: owner)
-            XCTAssertTrue(owner.beginEarbudFinder())
-            let finder = try XCTUnwrap(owner.earbudFinder)
+            let finder = try prepareFinder(owner)
             defer {
                 finder.dismiss()
                 finder.simulateTransportFailure()
@@ -548,6 +544,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
             }
             finder.play(.left)
             finder.simulateConnectionOpened()
+            try authorizeFinding(finder)
             let ring = try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30)?.message.encoded)
             let stop = try XCTUnwrap(FastPairRingCommand.stop.message.encoded)
             XCTAssertEqual(finder.simulatedSentMessages, [ring])
@@ -589,6 +586,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         finder.play(.left)
         let firstSessionID = try XCTUnwrap(finder.session?.id)
         finder.simulateConnectionOpened()
+        try authorizeFinding(finder)
         let ring = try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30)?.message.encoded)
         let stop = try XCTUnwrap(FastPairRingCommand.stop.message.encoded)
         XCTAssertEqual(finder.simulatedSentMessages, [ring])
@@ -615,6 +613,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         next.play(.right)
         XCTAssertNotEqual(next.session?.id, firstSessionID)
         next.simulateConnectionOpened()
+        try authorizeFinding(next)
         XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
         XCTAssertEqual(next.session?.phase, .stopping)
         try acknowledgeFindingStop(next)
@@ -631,6 +630,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         defer { finishFinding(coordinator) }
         finder.play(.left)
         finder.simulateConnectionOpened()
+        try authorizeFinding(finder)
         let ring = try XCTUnwrap(FastPairRingCommand.ring(.left, timeoutSeconds: 30)?.message.encoded)
         let stop = try XCTUnwrap(FastPairRingCommand.stop.message.encoded)
         finder.simulateTransportFailure()
@@ -661,6 +661,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         defer { finishFinding(coordinator) }
         finder.play(.left)
         finder.simulateConnectionOpened()
+        try authorizeFinding(finder)
         var completions = 0
         XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
         XCTAssertEqual(finder.session?.phase, .stopping)
@@ -678,14 +679,13 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
 
     @MainActor
     func testTerminationCancelsAuthenticationAndRejectsItsLateSuccess() async throws {
-        let (coordinator, owner, finder) = try findingCoordinator()
+        let (coordinator, owner, finder) = try findingCoordinator(simulatedTable2Functions: [0xF0])
         defer { finishFinding(coordinator) }
-        owner.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0x07, 0, 1, 0xF0, 0]))
         acknowledgeFindingQueries(owner)
         finder.play(.left)
         finder.simulateConnectionOpened()
         acknowledgeFindingQueries(owner)
-        owner.simulateProtocolData(SonyFrameCodec.encode(type: 0x0E, sequence: 0, payload: [0xF3, 0, 0]))
+        owner.simulateProtocolMessage([0xF3, 0, 0], type: 0x0E)
         await receiveFindingUpdates()
         XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
         let sessionID = try XCTUnwrap(finder.session?.id)
@@ -730,8 +730,10 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         let right = try prepareFinder(try XCTUnwrap(coordinator.controller(for: secondAddress)))
         left.play(.left)
         left.simulateConnectionOpened()
+        try authorizeFinding(left)
         right.play(.right)
         right.simulateConnectionOpened()
+        try authorizeFinding(right)
         left.simulateTransportFailure()
         var completions = 0
         XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
@@ -748,6 +750,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         let next = try prepareFinder(try XCTUnwrap(coordinator.controller(for: firstAddress)))
         next.play(.left)
         next.simulateConnectionOpened()
+        try authorizeFinding(next)
         XCTAssertTrue(coordinator.prepareEarbudFindingForTermination { completions += 1 })
         coordinator.resetEarbudFindingTermination()
         try acknowledgeFindingStop(next)
@@ -756,20 +759,40 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
     }
 
     @MainActor
-    private func findingCoordinator() throws -> (SonyDeviceCoordinator, SonyHeadphonesController, EarbudFinderController) {
+    private func findingCoordinator(simulatedTable2Functions: Set<UInt8>? = nil) throws -> (SonyDeviceCoordinator, SonyHeadphonesController, EarbudFinderController) {
         let coordinator = makeCoordinator()
         coordinator.reconcileConnectedDevices([try device(firstAddress, name: "WF-1000XM5", model: .wfXM5)])
         let owner = try XCTUnwrap(coordinator.controller(for: firstAddress))
-        return (coordinator, owner, try prepareFinder(owner))
+        return (coordinator, owner, try prepareFinder(owner, simulatedTable2Functions: simulatedTable2Functions))
     }
 
     @MainActor
-    private func prepareFinder(_ owner: SonyHeadphonesController) throws -> EarbudFinderController {
-        owner.simulateDeviceConnection(named: "WF-1000XM5", simulatedAddress: owner.address, galleryModel: .wfXM5)
+    private func prepareFinder(_ owner: SonyHeadphonesController, simulatedTable2Functions: Set<UInt8>? = nil) throws -> EarbudFinderController {
+        owner.simulateDeviceConnection(named: "WF-1000XM5", simulatedAddress: owner.address, galleryModel: .wfXM5,
+                                       simulatedTable2Functions: simulatedTable2Functions)
         let firmware = Array("6.1.0".utf8)
         deliver([0x05, 2, UInt8(firmware.count)] + firmware, to: owner)
         XCTAssertTrue(owner.beginEarbudFinder())
-        return try XCTUnwrap(owner.earbudFinder)
+        let finder = try XCTUnwrap(owner.earbudFinder)
+        XCTAssertEqual(finder.wearingDetectionIsUnavailable, simulatedTable2Functions?.contains(0xF0) != true)
+        return finder
+    }
+
+    @MainActor
+    private func authorizeFinding(_ finder: EarbudFinderController) throws {
+        XCTAssertEqual(finder.session?.phase, .awaitingWearingConfirmation)
+        XCTAssertNil(finder.session?.wearingConfirmationStatus)
+        let sessionID = try XCTUnwrap(finder.session?.id)
+        let sentMessages = finder.simulatedSentMessages
+        finder.confirmWearingOverride(sessionID: sessionID)
+        XCTAssertEqual(finder.simulatedSentMessages, sentMessages)
+        finder.authenticateWearingOverride(sessionID: sessionID)
+        finder.simulateAuthorizationCompletion(sessionID: sessionID, succeeded: true)
+        XCTAssertEqual(finder.simulatedSentMessages, sentMessages)
+        finder.confirmWearingOverride(sessionID: sessionID)
+        XCTAssertEqual(finder.session?.startedWithWearingOverride, true)
+        XCTAssertEqual(finder.simulatedAuthorizationEvents.last, sessionID)
+        XCTAssertEqual(finder.simulatedSentMessages.count, sentMessages.count + 1)
     }
 
     @MainActor
@@ -809,6 +832,6 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload)
     }
 }

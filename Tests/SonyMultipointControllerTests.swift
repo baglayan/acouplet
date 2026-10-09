@@ -170,6 +170,34 @@ final class SonyMultipointControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testExpiredEqualizerOrInventoryReadDoesNotDisableMultipointRecovery() async {
+        for equalizer in [false, true] {
+            let controller = preparedController()
+            defer { controller.simulateControlLoss() }
+            controller.setMultipointEnabled(false)
+            acknowledgeAll(controller)
+            controller.simulateMultipointTimeout()
+            acknowledgeAll(controller)
+            deliver([0xD7, 0xD2, 0, 0], to: controller)
+            XCTAssertEqual(controller.multipointTransition?.phase, .failed)
+            if equalizer { controller.refreshEqualizer() }
+            else { controller.refreshDevices() }
+            acknowledgeAll(controller)
+            XCTAssertFalse(controller.canCheckMultipointChange)
+            if equalizer { controller.simulateEqualizerReadTimeout() }
+            else { controller.simulateInventoryReadTimeout() }
+            for _ in 0..<10 { await Task.yield() }
+            XCTAssertTrue(controller.canCheckMultipointChange)
+            let session = controller.simulatedControlSession
+            controller.checkMultipointChange()
+            XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            XCTAssertFalse(controller.isReady)
+            XCTAssertEqual(controller.multipointTransition?.phase, .recovering)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
+        }
+    }
+
+    @MainActor
     func testCheckWithUnansweredReadClosesControlsBeforeRecovery() {
         let controller = preparedController()
         controller.setMultipointEnabled(false)
@@ -184,8 +212,7 @@ final class SonyMultipointControllerTests: XCTestCase {
         XCTAssertFalse(controller.isReady)
         XCTAssertNil(controller.simulatedPendingFrame)
         XCTAssertGreaterThan(controller.simulatedControlSession, oldSession)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [0xD7, 0xD2, 0, 1]), session: oldSession)
+        controller.simulateProtocolMessage([0xD7, 0xD2, 0, 1], session: oldSession)
         XCTAssertEqual(controller.multipointTransition?.phase, .recovering)
         recover(controller, hash: "ABCDEF12", slot: 0xD2)
         deliver([0xD7, 0xD2, 0, 1], to: controller)
@@ -374,6 +401,57 @@ final class SonyMultipointControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testCombinedConfirmationSendsBothRepliesThroughQueueBeforeOwnedReadback() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        deliver([0xD9, 0xD2, 0, 1], to: controller)
+        controller.setMultipointEnabled(true)
+        acknowledgeAll(controller)
+        deliver([0x99, 0, 7, 1], to: controller)
+        let first = try XCTUnwrap(controller.multipointTransition?.alert)
+        controller.respondToMultipointAlert(first, action: .positive, confirmsSoundQualityWarning: true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x98, 0, 7, 1])
+        deliver([0x99, 0, 0x70, 1], to: controller)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x98, 0, 7, 1])
+        XCTAssertNil(controller.multipointTransition?.alert)
+        XCTAssertEqual(controller.multipointTransition?.expectedPayload, [0x98, 0, 0x70, 1])
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.multipointTransition?.phase, .awaitingResponse)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xD6 })
+        deliver([0xD7, 0xD2, 0, 0], to: controller)
+        XCTAssertEqual(controller.multipointTransition?.phase, .awaitingResponse)
+        deliver([0xD9, 0xD2, 0, 0], to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.multipointTransition?.phase, .verifying)
+        deliver([0xD7, 0xD2, 0, 0], to: controller)
+        XCTAssertEqual(controller.multipointTransition?.phase, .complete)
+        XCTAssertEqual(controller.systemFeatures.multipoint?.enabled, true)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x98, 0, 7, 1] }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x98, 0, 0x70, 1] }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xD6, 0xD2] }.count, 1)
+    }
+
+    @MainActor
+    func testAutomaticSimulationCompletesMultipointWithOneCombinedConfirmation() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulatedReady: true)
+        defer { controller.simulateControlLoss() }
+        deliver([0xD9, 0xD2, 0, 1], to: controller)
+        controller.setMultipointEnabled(true)
+        try await Task.sleep(for: .milliseconds(350))
+        let first = try XCTUnwrap(controller.multipointTransition?.alert)
+        XCTAssertEqual(first.messageID, 7)
+        controller.respondToMultipointAlert(first, action: .positive, confirmsSoundQualityWarning: true)
+        try await Task.sleep(for: .milliseconds(800))
+        XCTAssertNil(controller.multipointTransition?.alert)
+        XCTAssertEqual(controller.multipointTransition?.phase, .complete)
+        XCTAssertEqual(controller.systemFeatures.multipoint?.enabled, true)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x98, 0, 7, 1] }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x98, 0, 0x70, 1] }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xD6, 0xD2] }.count, 1)
+    }
+
+    @MainActor
     func testMultipointRecoveryWaitsForClassicConnectionWhenBluetoothIsDown() throws {
         let controller = preparedController()
         defer { controller.simulateControlLoss() }
@@ -441,6 +519,57 @@ final class SonyMultipointControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testMultipointUIHidesEmptyFailedRecoveryButRetainsOffAndPendingSettings() {
+        var empty = SonyMultipoint(supportedFunctions: [0x31, 0x32])
+        XCTAssertFalse(MultipointControls.isVisible(for: empty))
+        XCTAssertTrue(empty.update([0x37, 2, 0, 0]))
+        XCTAssertFalse(MultipointControls.isVisible(for: empty))
+
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        XCTAssertTrue(MultipointControls.isVisible(for: controller.multipoint))
+        deliver([0xD9, 0xD2, 0, 1], to: controller)
+        XCTAssertEqual(MultipointSettingControl.enabled(for: controller), false)
+        controller.setMultipointEnabled(true)
+        acknowledgeAll(controller)
+        controller.simulateControlLoss(deviceConnected: false)
+        XCTAssertEqual(controller.multipointTransition?.phase, .recovering)
+        XCTAssertEqual(MultipointSettingControl.enabled(for: controller), false)
+        controller.simulateMultipointTimeout()
+        XCTAssertEqual(controller.multipointTransition?.phase, .failed)
+        XCTAssertNil(MultipointSettingControl.enabled(for: controller))
+        XCTAssertFalse(MultipointControls.isVisible(for: controller.multipoint))
+    }
+
+    @MainActor
+    func testExplicitReconnectReleasesFailedMultipointRecoveryWithoutReplayingSetter() {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        controller.setMultipointEnabled(false)
+        acknowledgeAll(controller)
+        controller.simulateControlLoss(deviceConnected: true)
+        controller.simulateMultipointTimeout()
+        XCTAssertEqual(controller.multipointTransition?.phase, .failed)
+        XCTAssertTrue(controller.canCheckMultipointChange)
+        controller.simulateAutomaticRefresh()
+        XCTAssertNil(controller.simulatedPendingFrame)
+        let issue = controller.lastErrorMessage
+
+        controller.connect()
+        XCTAssertNil(controller.multipointTransition)
+        XCTAssertNil(controller.simulatedMultipointRecoveryUsesBLE)
+        XCTAssertEqual(controller.lastErrorMessage, issue)
+        controller.simulateAutomaticRefresh()
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0, 0])
+        recover(controller, hash: "ABCDEF12", slot: 0xD2)
+        deliver([0xD7, 0xD2, 0, 0], to: controller)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.systemFeatures.multipoint?.enabled, true)
+        XCTAssertNil(controller.lastErrorMessage)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xD8 }.count, 1)
+    }
+
+    @MainActor
     private func preparedController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
@@ -449,8 +578,7 @@ final class SonyMultipointControllerTests: XCTestCase {
 
     @MainActor
     private func recover(_ controller: SonyHeadphonesController, hash: String, slot: UInt8) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [0x01, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeAll(controller)
         let functions: [UInt8] = [0x6B, 0x14, 0x90, slot]
         deliver([0x07, 0, UInt8(functions.count)] + functions.flatMap { [$0, 0] }, to: controller)
@@ -478,6 +606,6 @@ final class SonyMultipointControllerTests: XCTestCase {
 
     @MainActor
     private func deliver(_ payload: [UInt8], to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+        controller.simulateProtocolMessage(payload)
     }
 }

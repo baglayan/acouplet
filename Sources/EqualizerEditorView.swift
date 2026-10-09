@@ -108,8 +108,6 @@ struct EqualizerEditorView: View {
                 .help("Read the headphone equalizer into this draft.")
                 .disabled(!canRead || headphones.isEqualizerUpdatePending || headphones.pendingChanges[.equalizerReadback] != nil)
         }
-        .onAppear { alignDraftLayout() }
-        .onChange(of: headphones.equalizer.flatSettings) { _, _ in alignDraftLayout() }
         .onChange(of: headphones.equalizerReadbackID) { _, _ in finishSync() }
         .onChange(of: settings.customEqualizerDraft) { _, _ in syncDraft = nil }
         .onChange(of: presetChange?.id) { _, id in
@@ -225,12 +223,6 @@ struct EqualizerEditorView: View {
         }
     }
 
-    private func alignDraftLayout() {
-        guard let flat = headphones.equalizer.flatSettings,
-              settings.customEqualizerDraft.layout != flat.layout || settings.customEqualizerDraft.levelSteps != flat.levelSteps else { return }
-        settings.customEqualizerDraft = headphones.equalizer.settings ?? flat
-    }
-
     private func equalizerColumn(_ title: String, value: Binding<Double>) -> some View {
         VStack(spacing: 8) {
             Text(title).font(.caption).foregroundStyle(.primary)
@@ -247,7 +239,7 @@ struct EqualizerEditorView: View {
     private func apply(_ equalizer: EqualizerSettings) {
         syncDraft = nil
         settings.customEqualizerDraft = equalizer
-        if !headphones.equalizer.requiresManualSelection {
+        if headphones.equalizer.canEdit {
             headphones.setCustomEqualizer(equalizer)
         }
     }

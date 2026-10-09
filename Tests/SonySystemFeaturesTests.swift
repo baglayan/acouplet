@@ -284,26 +284,26 @@ final class SonySystemFeaturesTests: XCTestCase {
         XCTAssertEqual(controller.systemFeatures.automaticPowerOff?.current?.rawValue, 0x10)
         acknowledgeSimulatedCommands(controller)
         for payload: [UInt8] in [[0x29, 4, 0x11, 0], [0x29, 5, 0x11, 1]] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload)
             XCTAssertEqual(controller.pendingChanges[.automaticPowerOff], [5, 0x11, 0])
         }
         XCTAssertEqual(controller.systemFeatures.automaticPowerOff?.last?.rawValue, 1)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x27, 5, 0x11, 0]))
+        controller.simulateProtocolMessage([0x27, 5, 0x11, 0])
         XCTAssertNotNil(controller.pendingChanges[.automaticPowerOff])
         XCTAssertEqual(controller.systemFeatures.automaticPowerOff?.last?.rawValue, 1)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x29, 5, 0x11, 0]))
+        controller.simulateProtocolMessage([0x29, 5, 0x11, 0])
         XCTAssertNil(controller.pendingChanges[.automaticPowerOff])
         controller.refreshEqualizer()
         controller.setSidetone(true)
-        let reply = SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xD9, 0xD1, 0, 0])
-        controller.simulateProtocolData(reply)
+        let reply: [UInt8] = [0xD9, 0xD1, 0, 0]
+        controller.simulateProtocolMessage(reply)
         XCTAssertNotNil(controller.pendingChanges[.sidetone])
         acknowledgeSimulatedCommands(controller)
         for payload: [UInt8] in [[0xD9, 0xD2, 0, 0], [0xD9, 0xD1, 1, 0]] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload)
             XCTAssertEqual(controller.pendingChanges[.sidetone], [0xD1, 0, 0])
         }
-        controller.simulateProtocolData(reply)
+        controller.simulateProtocolMessage(reply)
         XCTAssertNil(controller.pendingChanges[.sidetone])
         XCTAssertEqual(controller.systemFeatures.sidetone?.enabled, true)
         controller.simulateControlLoss()
@@ -322,13 +322,13 @@ final class SonySystemFeaturesTests: XCTestCase {
         controller.setConnectionMode(.lowLatency)
         acknowledgeSimulatedCommands(controller)
         let oldSession = controller.simulatedControlSession
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xE9, 5, 2, 1]))
+        controller.simulateProtocolMessage([0xE9, 5, 2, 1])
         await Task.yield()
         XCTAssertGreaterThan(controller.simulatedControlSession, oldSession)
         XCTAssertTrue(controller.pendingChanges.isEmpty)
         try await Task.sleep(for: .milliseconds(350))
         XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xD6, 0xD1] })
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xD9, 0xD1, 0, 0]), session: oldSession)
+        controller.simulateProtocolMessage([0xD9, 0xD1, 0, 0], session: oldSession)
         XCTAssertTrue(controller.pendingChanges.isEmpty)
         XCTAssertTrue(controller.settingErrors.isEmpty)
         controller.simulateControlLoss()
@@ -487,8 +487,8 @@ final class SonySystemFeaturesTests: XCTestCase {
         let medium = SonySpeakToChatDelay(rawValue: 1)
         controller.refreshEqualizer()
         controller.setSpeakToChatOptions(sensitivity: high, delay: medium)
-        let reply = SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xFD, 0x0C, 1, 1])
-        controller.simulateProtocolData(reply)
+        let reply: [UInt8] = [0xFD, 0x0C, 1, 1]
+        controller.simulateProtocolMessage(reply)
         XCTAssertNotNil(controller.pendingChanges[.speakToChatOptions])
         controller.setSystemFeature(.speakToChat, enabled: true)
         XCTAssertNil(controller.pendingChanges[.system(.speakToChat)])
@@ -496,10 +496,10 @@ final class SonySystemFeaturesTests: XCTestCase {
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0C && $0.payload == [0xFC, 0x0C, 1, 1] })
         for (type, payload): (UInt8, [UInt8]) in [(0x0E, [0xFD, 0x0C, 1, 1]), (0x0C, [0xFD, 0x02, 1, 1]),
                                                  (0x0C, [0xFD, 0x0C, 1, 2]), (0x0C, [0xFB, 0x0C, 0, 1])] {
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload, type: type)
             XCTAssertEqual(controller.pendingChanges[.speakToChatOptions], [0x0C, 1, 1])
         }
-        controller.simulateProtocolData(reply)
+        controller.simulateProtocolMessage(reply)
         XCTAssertNil(controller.pendingChanges[.speakToChatOptions])
         XCTAssertEqual(controller.systemFeatures.speakToChatOptions?.sensitivity, high)
         XCTAssertEqual(controller.systemFeatures.speakToChatOptions?.delay, medium)
@@ -509,8 +509,8 @@ final class SonySystemFeaturesTests: XCTestCase {
         controller.setSpeakToChatOptions(sensitivity: high, delay: SonySpeakToChatDelay(rawValue: 3))
         XCTAssertNil(controller.pendingChanges[.speakToChatOptions])
         acknowledgeSimulatedCommands(controller)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF9, 0x0C, 0, 1]))
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xF5, 0x0C, 1, 0]))
+        controller.simulateProtocolMessage([0xF9, 0x0C, 0, 1])
+        controller.simulateProtocolMessage([0xF5, 0x0C, 1, 0])
         controller.setSpeakToChatOptions(sensitivity: high, delay: SonySpeakToChatDelay(rawValue: 3))
         XCTAssertNil(controller.pendingChanges[.speakToChatOptions])
         controller.simulateControlLoss()
@@ -526,10 +526,14 @@ final class SonySystemFeaturesTests: XCTestCase {
             controller.refreshEqualizer()
             controller.setSpeakToChatOptions(sensitivity: SonySpeechSensitivity(rawValue: 1), delay: SonySpeakToChatDelay(rawValue: 1))
             XCTAssertNotNil(controller.pendingChanges[.speakToChatOptions])
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: invalidation))
+            let session = controller.simulatedControlSession
+            controller.simulateProtocolMessage(invalidation)
             acknowledgeSimulatedCommands(controller)
             XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xFC })
-            XCTAssertEqual(controller.lastErrorMessage, "Speak-to-Chat settings changed while waiting. Reconnect the headphones and try again.")
+            XCTAssertNotNil(controller.settingErrors[.speakToChatOptions])
+            XCTAssertNil(controller.lastErrorMessage)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
             XCTAssertTrue(controller.pendingChanges.isEmpty)
         }
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
@@ -595,7 +599,7 @@ final class SonySystemFeaturesTests: XCTestCase {
             XCTAssertNotNil(controller.pendingChanges[.system(feature)])
             let suffix: [UInt8] = feature == .speakToChat ? [0x01] : []
             let payload: [UInt8] = [0xF9, feature.rawValue, enabled ? 0x00 : 0x01] + suffix
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: payload))
+            controller.simulateProtocolMessage(payload)
             XCTAssertEqual(controller.systemFeatures[feature]?.enabled, enabled)
             XCTAssertNil(controller.pendingChanges[.system(feature)])
         }
@@ -744,7 +748,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             deliver(change, to: controller)
             acknowledgeSimulatedCommands(controller)
             XCTAssertFalse(payloads(controller).contains([0xF8, 4, 0x31]))
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertNil(controller.pendingChanges[.voiceAssistant])
         }
         let controller = readyAssistantController()
@@ -778,7 +782,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         XCTAssertFalse(controller.canSetVoiceAssistant)
         acknowledgeSimulatedCommands(controller)
         XCTAssertFalse(payloads(controller).contains([0xF8, 4, 0x31]))
-        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.isReady)
     }
 
     func testAssistantReadDeadlinesRequireTransmissionAndKnownExactReplies() async {
@@ -800,10 +804,10 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
                 let session = controller.simulatedControlSession
                 controller.simulateSystemReadTimeout(testCase.query)
                 for _ in 0..<4 { await Task.yield() }
-                XCTAssertEqual(controller.isReady, response == testCase.valid)
+                XCTAssertTrue(controller.isReady)
                 if response != testCase.valid {
                     XCTAssertTrue(controller.isDeviceConnected)
-                    XCTAssertGreaterThan(controller.simulatedControlSession, session)
+                    XCTAssertEqual(controller.simulatedControlSession, session)
                 }
             }
         }
@@ -813,8 +817,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         defer { controller.simulateControlLoss() }
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [1, 0, 2, 0x10]), beginConnection: true)
+        controller.simulateProtocolMessage([1, 0, 2, 0x10], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
         let model = Array("WF-1000XM4".utf8)
         deliver([5, 1, UInt8(model.count)] + model, to: controller)
@@ -901,7 +904,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             deliver(changed, to: controller)
             acknowledgeSimulatedCommands(controller)
             XCTAssertFalse(payloads(controller).contains([0xD8, 0xD1, 0, 0]))
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertNil(controller.pendingChanges[.sidetone])
         }
     }
@@ -1020,9 +1023,9 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             let session = controller.simulatedControlSession
             controller.simulateSystemReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.isDeviceConnected)
-            XCTAssertGreaterThan(controller.simulatedControlSession, session)
+            XCTAssertEqual(controller.simulatedControlSession, session)
             controller.simulateDeviceConnection(named: "WF-1000XM5")
             deliver([0xD9, 0xD1, 0, 0], session: session, to: controller)
             controller.simulateSystemReadTimeout(query)
@@ -1060,7 +1063,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         XCTAssertEqual(controller.sourceTransition?.isFinished, false)
         acknowledgeSimulatedCommands(controller)
         XCTAssertFalse(payloads(controller).contains([0xD8, 0xD1, 0, 0]))
-        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.isReady)
         XCTAssertNil(controller.pendingChanges[.sidetone])
     }
 
@@ -1198,7 +1201,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             deliver(changed, to: controller)
             acknowledgeSimulatedCommands(controller)
             XCTAssertFalse(payloads(controller).contains { $0.first == 0x28 })
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.pendingChanges.isEmpty)
         }
     }
@@ -1221,10 +1224,11 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
                 let session = controller.simulatedControlSession
                 controller.simulateSystemReadTimeout(query)
                 for _ in 0..<4 { await Task.yield() }
-                XCTAssertFalse(controller.isReady)
+                XCTAssertTrue(controller.isReady)
                 XCTAssertTrue(controller.isDeviceConnected)
-                XCTAssertGreaterThan(controller.simulatedControlSession, session)
-                XCTAssertNil(controller.systemFeatures.automaticPowerOff)
+                XCTAssertEqual(controller.simulatedControlSession, session)
+                XCTAssertFalse(controller.canSetAutomaticPowerOff)
+                XCTAssertNotNil(controller.noiseControlMode)
                 controller.simulateDeviceConnection(named: "WF-1000XM5")
                 deliver([0x29, 5, 0x11, 4], session: session, to: controller)
                 controller.simulateSystemReadTimeout(query)
@@ -1317,7 +1321,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             XCTAssertTrue(controller.isReady)
             controller.simulateSystemReadTimeout(testCase.query)
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.isDeviceConnected)
         }
         let controller = readyWakeWordController()
@@ -1329,7 +1333,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         XCTAssertFalse(controller.canSetSystemFeature(.voiceAssistantWakeWord))
         controller.simulateSystemReadTimeout([0xF2, 5])
         for _ in 0..<4 { await Task.yield() }
-        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.isReady)
     }
 
     func testUnknownNotificationsCannotBeReplacedByOlderKnownReturns() {
@@ -1525,7 +1529,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             deliver([0xF5, 0x0F, unavailable], to: controller)
             acknowledgeSimulatedCommands(controller)
             XCTAssertFalse(payloads(controller).contains([0xF8, 0x0F, 0]))
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.pendingChanges.isEmpty)
         }
         let controller = readyWakeWordController()
@@ -1537,7 +1541,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         XCTAssertEqual(controller.systemFeatures[.voiceAssistantWakeWord]?.isVisible, false)
         acknowledgeSimulatedCommands(controller)
         XCTAssertFalse(payloads(controller).contains([0xF8, 5, 0]))
-        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.isReady)
         XCTAssertTrue(controller.pendingChanges.isEmpty)
     }
 
@@ -1557,13 +1561,17 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             let session = controller.simulatedControlSession
             controller.simulateSystemReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.isDeviceConnected)
-            XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            XCTAssertTrue(controller.systemFeatures.queryPayloads.isEmpty)
-            deliver([0xF9, 0x0F, 0], session: session, to: controller)
-            XCTAssertNil(controller.systemFeatures[.headGestures])
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertNotNil(controller.noiseControlMode)
+            if query[0] == 0xFA {
+                XCTAssertFalse(controller.canSetSpeakToChatOptions)
+            } else {
+                XCTAssertFalse(controller.canSetSystemFeature(SonySystemFeature(rawValue: query[1])!))
+            }
             controller.simulateDeviceConnection(named: "WF-1000XM5")
+            deliver([0xF9, 0x0F, 0], session: session, to: controller)
             controller.simulateSystemReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
             XCTAssertTrue(controller.isReady)
@@ -1571,11 +1579,85 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         }
     }
 
+    func testExpiredFeatureReadKeepsOwnershipUntilValidLateReplyAndFreshRead() async {
+        for notification in [false, true] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            controller.refresh()
+            acknowledgeSimulatedCommands(controller)
+            let session = controller.simulatedControlSession
+            let query: [UInt8] = [0xF6, 0x0F]
+            let reads = payloads(controller).filter { $0 == query }.count
+            controller.simulateSystemReadTimeout(query)
+            for _ in 0..<4 { await Task.yield() }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertNil(controller.systemFeatureState(.headGestures)?.enabled)
+            XCTAssertFalse(controller.canSetSystemFeature(.headGestures))
+            XCTAssertNotNil(controller.settingErrors[.system(.headGestures)])
+            XCTAssertTrue(controller.canSetSystemFeature(.pauseOnRemoval))
+            if notification { deliver([0xF9, 0x0F, 0], to: controller) }
+            for _ in 0..<5 { controller.simulateAutomaticRefresh() }
+            acknowledgeSimulatedCommands(controller)
+            deliver([0xF7, 0x0F], to: controller)
+            acknowledgeSimulatedCommands(controller)
+            XCTAssertEqual(payloads(controller).filter { $0 == query }.count, reads)
+            deliver([0xF7, 0x0F, 1], to: controller)
+            XCTAssertEqual(controller.systemFeatureState(.headGestures)?.enabled, notification ? true : nil)
+            acknowledgeSimulatedCommands(controller)
+            XCTAssertEqual(payloads(controller).filter { $0 == query }.count, reads + 1)
+            deliver([0xF7, 0x0F, 1], to: controller)
+            XCTAssertEqual(controller.systemFeatureState(.headGestures)?.enabled, false)
+            XCTAssertTrue(controller.canSetSystemFeature(.headGestures))
+            XCTAssertNil(controller.settingErrors[.system(.headGestures)])
+            XCTAssertEqual(controller.simulatedControlSession, session)
+        }
+    }
+
+    func testObsoleteFeatureReadTimeoutPreservesNewerNotification() async {
+        let controller = readyController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeSimulatedCommands(controller)
+        let session = controller.simulatedControlSession
+        deliver([0xF9, 0x0F, 0], to: controller)
+        controller.simulateSystemReadTimeout([0xF6, 0x0F])
+        for _ in 0..<4 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertEqual(controller.systemFeatureState(.headGestures)?.enabled, true)
+        XCTAssertTrue(controller.canSetSystemFeature(.headGestures))
+    }
+
+    func testExpiredFeatureReadCancelsQueuedSetterAndAdvancesUnrelatedChange() async {
+        let controller = readyController()
+        defer { controller.simulateControlLoss() }
+        controller.refresh()
+        acknowledgeSimulatedCommands(controller)
+        controller.setSystemFeature(.pauseOnRemoval, enabled: false)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF8, 1, 1])
+        controller.setSystemFeature(.headGestures, enabled: true)
+        controller.setSidetone(true)
+        XCTAssertNotNil(controller.pendingChanges[.system(.headGestures)])
+        XCTAssertNotNil(controller.pendingChanges[.sidetone])
+        let session = controller.simulatedControlSession
+        controller.simulateSystemReadTimeout([0xF6, 0x0F])
+        for _ in 0..<4 { await Task.yield() }
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertNil(controller.pendingChanges[.system(.headGestures)])
+        XCTAssertFalse(payloads(controller).contains([0xF8, 0x0F, 0]))
+        XCTAssertTrue(payloads(controller).contains([0xD8, 0xD1, 0, 0]))
+        deliver([0xD9, 0xD1, 0, 0], to: controller)
+        XCTAssertNil(controller.pendingChanges[.sidetone])
+        XCTAssertEqual(controller.systemFeatures.sidetone?.enabled, true)
+    }
+
     private func beginAssistantController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [1, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
         let functions: [UInt8] = [0x6B, 0xF4, 0xF5, 0x12]
         deliver([7, 0, UInt8(functions.count)] + functions.flatMap { [$0, 1] }, to: controller)
@@ -1599,8 +1681,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
     private func beginSidetoneController(additionalSlot: Bool = false) -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [1, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
         let functions: [UInt8] = additionalSlot ? [0x6B, 0xD1, 0xD2] : [0x6B, 0xD1]
         deliver([7, 0, UInt8(functions.count)] + functions.flatMap { [$0, 1] }, to: controller)
@@ -1613,8 +1694,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
     private func beginPowerPolicyController(inquiry: UInt8) -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [1, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
         deliver([7, 0, 2, 0x6B, 1, inquiry == 4 ? 0x24 : 0x25, 1], to: controller)
         acknowledgeSimulatedCommands(controller)
@@ -1643,8 +1723,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
     private func readyWakeWordController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0,
-            payload: [1, 0, 3, 0, 0x30, 0x18, 0, 0]), beginConnection: true)
+        controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
         deliver([7, 0, 2, 0x6B, 1, 0xF5, 1], to: controller)
         acknowledgeSimulatedCommands(controller)
@@ -1668,7 +1747,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
 
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, session: UInt64? = nil,
                          to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), session: session)
+        controller.simulateProtocolMessage(payload, type: type, session: session)
     }
 
     private func payloads(_ controller: SonyHeadphonesController) -> [[UInt8]] {

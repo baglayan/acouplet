@@ -12,6 +12,7 @@ final class SonyNativeBatteryPublisherTests: XCTestCase {
             var exitedWithoutPublishing = false
             var exitedSuccessfully = false
             var withdrewAfterNativeDisconnect = false
+            var withdrewAfterLeaseExpiry = false
         }
 
         var date = Date(timeIntervalSince1970: 1_000)
@@ -22,6 +23,12 @@ final class SonyNativeBatteryPublisherTests: XCTestCase {
         var launches: [String: Int] = [:]
         var children: [SonyNativeBatteryPublication.Identity: Child] = [:]
         var receivers: [SonyNativeBatteryPublication.Identity: @MainActor @Sendable (Data) -> Void] = [:]
+        var caseSent: [Data] = []
+        var caseCloses = 0
+        var caseLaunches = 0
+        var caseChild: Child?
+        var caseReceive: (@MainActor @Sendable (Data) -> Void)?
+        var launchDelay: TimeInterval = 0
         var failsWrite = false
         var failsLaunch = false
 
@@ -30,9 +37,23 @@ final class SonyNativeBatteryPublisherTests: XCTestCase {
                 let index = self.timers.count
                 self.timers.append((date, action))
                 return AnyCancellable { self.cancelled.insert(index) }
+            }, launchCase: { publication, receive in
+                self.caseLaunches += 1
+                self.date.addTimeInterval(self.launchDelay)
+                let child = Child()
+                self.caseChild = child
+                self.caseReceive = receive
+                return SonyNativeBatteryPublisher.Connection(send: { data in
+                    if self.failsWrite { throw POSIXError(.EPIPE) }
+                    self.caseSent.append(data)
+                }, close: { self.caseCloses += 1 }, isRunning: { child.isRunning },
+                    didExitWithoutPublishing: { !child.isRunning && child.exitedWithoutPublishing },
+                    didExitSuccessfully: { !child.isRunning && child.exitedSuccessfully },
+                    didWithdrawAfterNativeDisconnect: { !child.isRunning && child.withdrewAfterNativeDisconnect })
             }, launch: { publication, receive in
                 let address = publication.address
                 self.launches[address, default: 0] += 1
+                self.date.addTimeInterval(self.launchDelay)
                 if self.failsLaunch { throw POSIXError(.EACCES) }
                 let child = Child()
                 self.children[publication.identity] = child
@@ -43,7 +64,8 @@ final class SonyNativeBatteryPublisherTests: XCTestCase {
                 }, close: { self.closes[address, default: 0] += 1 }, isRunning: { child.isRunning },
                     didExitWithoutPublishing: { !child.isRunning && child.exitedWithoutPublishing },
                     didExitSuccessfully: { !child.isRunning && child.exitedSuccessfully },
-                    didWithdrawAfterNativeDisconnect: { !child.isRunning && child.withdrewAfterNativeDisconnect })
+                    didWithdrawAfterNativeDisconnect: { !child.isRunning && child.withdrewAfterNativeDisconnect },
+                    didWithdrawAfterLeaseExpiry: { !child.isRunning && child.withdrewAfterLeaseExpiry })
             })
         }
 
@@ -107,10 +129,506 @@ final class SonyNativeBatteryPublisherTests: XCTestCase {
         XCTAssertNil(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: now.addingTimeInterval(-6)))
         let value = try XCTUnwrap(SonyNativeBatteryPublication(address: address.lowercased(), controlSession: 1, snapshot: snapshot, at: now))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any])
-        XCTAssertEqual(Set(object.keys), ["address", "identifier", "controlSession", "left", "right"])
+        XCTAssertEqual(Set(object.keys), ["address", "identifier", "controlSession", "name", "left", "right"])
         XCTAssertEqual(value.expiresAt, now.addingTimeInterval(45))
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true, simulatedReady: true)
         XCTAssertNil(controller.nativeBatteryPublication(at: now))
+    }
+
+    private func casePublication(_ harness: Harness, level: UInt8 = 43, observedAt: Date? = nil, session: UInt64 = 1) throws -> SonyNativeCaseBatteryPublication {
+        var batteries = SonyBatteries()
+        var snapshot = SonyNativeBatterySnapshot(identifier: identifier, name: "WF-1000XM5")
+        XCTAssertTrue(batteries.update([0x25, 0x0A, level, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: observedAt ?? harness.date)
+        return try XCTUnwrap(SonyNativeCaseBatteryPublication(address: address, controlSession: session, snapshot: snapshot, at: harness.date))
+    }
+
+    private func acknowledgeCase(_ value: SonyNativeCaseBatteryPublication, harness: Harness, update: UInt64 = 1) throws {
+        let sample = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
+        var data = try JSONSerialization.data(withJSONObject: ["event": "refresh-completed", "sample": sample, "update": update])
+        data.append(0x0A)
+        harness.caseReceive?(data)
+    }
+
+    func testCaseIsIndependentOfMissingOrExpiredBuds() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        let value = try casePublication(harness)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["address", "identifier", "controlSession", "name", "caseBattery"])
+        XCTAssertEqual(value.caseBattery.level, 43)
+        XCTAssertEqual(value.expiresAt, harness.date.addingTimeInterval(45))
+        publisher.reconcile([], cases: [value])
+        try acknowledgeCase(value, harness: harness)
+        XCTAssertTrue(publisher.ownedAddresses.isEmpty)
+        XCTAssertEqual(publisher.ownedCaseAddresses, [address])
+        XCTAssertTrue(harness.sent.isEmpty)
+        harness.date.addTimeInterval(45)
+        harness.fireDueTimers()
+        XCTAssertEqual(harness.caseCloses, 1)
+        XCTAssertTrue(publisher.ownedCaseAddresses.isEmpty)
+        publisher.stop()
+    }
+
+    func testCapturedCaseZeroWithdrawsCasePublicationWhileKeepingThePair() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        defer { publisher.stop() }
+        var batteries = SonyBatteries()
+        var snapshot = SonyNativeBatterySnapshot(identifier: identifier, name: "WF-1000XM5")
+        XCTAssertTrue(batteries.update([0x23, 0x09, 0x46, 0, 0x40, 0, 0x64, 0x64]))
+        snapshot.update(batteries, type: 0x09, observedAt: harness.date)
+        XCTAssertTrue(batteries.update([0x23, 0x0A, 43, 0, 0x1E]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        let pair = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        let caseValue = try XCTUnwrap(SonyNativeCaseBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([pair], cases: [caseValue])
+        try harness.acknowledge(pair)
+        try acknowledgeCase(caseValue, harness: harness)
+        harness.date.addTimeInterval(1)
+        XCTAssertTrue(batteries.update([0x23, 0x0A, 0, 0, 0x1E]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        XCTAssertNil(snapshot.caseBattery)
+        XCTAssertNil(snapshot.freshReadings(at: harness.date)["Case"])
+        let nextCase = SonyNativeCaseBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date)
+        XCTAssertNil(nextCase)
+        let nextPair = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        XCTAssertEqual(nextPair.left, pair.left)
+        XCTAssertEqual(nextPair.right, pair.right)
+        XCTAssertNil(nextPair.caseBattery)
+        XCTAssertEqual(pair.left.level, 70)
+        XCTAssertEqual(pair.right.level, 64)
+        publisher.reconcile([nextPair], cases: [nextCase].compactMap { $0 })
+        XCTAssertEqual(harness.caseCloses, 1)
+        XCTAssertTrue(publisher.ownedCaseAddresses.isEmpty)
+        XCTAssertEqual(publisher.ownedAddresses, [address])
+        XCTAssertNil(harness.closes[address])
+    }
+
+    func testCaseRefreshCannotExtendBudsAndBudsCannotExtendCase() throws {
+        for refreshingCase in [true, false] {
+            let harness = Harness(), publisher = harness.publisher()
+            let pair = publication(harness), caseValue = try casePublication(harness, level: 63)
+            publisher.reconcile([pair], cases: [caseValue])
+            try harness.acknowledge(pair)
+            try acknowledgeCase(caseValue, harness: harness)
+            harness.date.addTimeInterval(30)
+            let nextPair = refreshingCase ? pair : publication(harness)
+            let nextCase = refreshingCase ? try casePublication(harness, level: 63) : caseValue
+            publisher.reconcile([nextPair], cases: [nextCase])
+            if refreshingCase { try acknowledgeCase(nextCase, harness: harness, update: 2) }
+            else { try harness.acknowledge(nextPair, update: 2) }
+            harness.date.addTimeInterval(15)
+            harness.fireDueTimers()
+            XCTAssertEqual(publisher.ownedAddresses.isEmpty, refreshingCase)
+            XCTAssertEqual(publisher.ownedCaseAddresses.isEmpty, !refreshingCase)
+            publisher.stop()
+        }
+    }
+
+    func testCaseRequiresAcknowledgmentAndConfirmedCleanupBeforeFreshResume() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        let first = try casePublication(harness)
+        publisher.reconcile([], cases: [first])
+        try acknowledgeCase(first, harness: harness)
+        harness.date.addTimeInterval(30)
+        let second = try casePublication(harness, level: 1)
+        publisher.reconcile([], cases: [second])
+        harness.date.addTimeInterval(10)
+        harness.fireDueTimers()
+        XCTAssertTrue(publisher.ownedCaseAddresses.isEmpty)
+        XCTAssertEqual(harness.caseCloses, 1)
+        harness.caseChild?.isRunning = false
+        harness.caseChild?.exitedSuccessfully = true
+        harness.caseReceive?(Data())
+        harness.date.addTimeInterval(20)
+        publisher.reconcile([], cases: [try casePublication(harness, level: 2)])
+        XCTAssertEqual(harness.caseLaunches, 1)
+        publisher.stop()
+    }
+
+    func testCaseCleanExpiryResumesOnlyAfterEOFAndNewObservationAndCooldown() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        let first = try casePublication(harness)
+        publisher.reconcile([], cases: [first])
+        try acknowledgeCase(first, harness: harness)
+        harness.date.addTimeInterval(45)
+        harness.fireDueTimers()
+        let newer = try casePublication(harness, level: 63)
+        publisher.reconcile([], cases: [newer])
+        XCTAssertEqual(harness.caseLaunches, 1)
+        harness.caseChild?.isRunning = false
+        harness.caseChild?.exitedSuccessfully = true
+        publisher.reconcile([], cases: [newer])
+        XCTAssertEqual(harness.caseLaunches, 1)
+        harness.caseReceive?(Data())
+        publisher.reconcile([], cases: [newer])
+        XCTAssertEqual(harness.caseLaunches, 1)
+        harness.date.addTimeInterval(15)
+        publisher.reconcile([], cases: [newer])
+        XCTAssertEqual(harness.caseLaunches, 2)
+        XCTAssertEqual(publisher.ownedCaseAddresses, [address])
+        publisher.stop()
+    }
+
+    func testCaseMalformedAndFailedCleanupCannotRepublish() throws {
+        for failure in ["malformed", "partial", "death", "revoke"] {
+            let harness = Harness(), publisher = harness.publisher()
+            let value = try casePublication(harness)
+            publisher.reconcile([], cases: [value])
+            try acknowledgeCase(value, harness: harness)
+            if failure == "malformed" { harness.caseReceive?(Data("invalid\n".utf8)) }
+            if failure == "partial" { harness.caseReceive?(Data("{".utf8)) }
+            if failure == "revoke" { publisher.revoke() }
+            harness.caseChild?.isRunning = false
+            harness.caseChild?.exitedSuccessfully = failure != "death"
+            harness.caseReceive?(Data())
+            harness.date.addTimeInterval(20)
+            publisher.reconcile([], cases: [try casePublication(harness, level: 100)])
+            XCTAssertEqual(harness.caseLaunches, 1, failure)
+            XCTAssertTrue(publisher.ownedCaseAddresses.isEmpty, failure)
+            publisher.stop()
+        }
+    }
+
+    func testSubmissionMarginRejectsOldSamplesWithoutLatchingAnAttempt() throws {
+        for age in [18.0, 18.001, 20.0] {
+            let harness = Harness(), publisher = harness.publisher()
+            let pair = publication(harness), caseValue = try casePublication(harness)
+            harness.date.addTimeInterval(age)
+            publisher.reconcile([pair], cases: [caseValue])
+            XCTAssertEqual(harness.launches[address, default: 0], age <= 18 ? 1 : 0)
+            XCTAssertEqual(harness.caseLaunches, age <= 18 ? 1 : 0)
+            if age > 18 {
+                publisher.reconcile([publication(harness)], cases: [try casePublication(harness)])
+                XCTAssertEqual(harness.launches[address], 1)
+                XCTAssertEqual(harness.caseLaunches, 1)
+            }
+            publisher.stop()
+        }
+    }
+
+    func testStartupLatencyBeforeFirstWriteCanRetryOnlyConfirmedUnpublishedExit() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        let pair = publication(harness), caseValue = try casePublication(harness)
+        harness.date.addTimeInterval(17)
+        harness.launchDelay = 3
+        publisher.reconcile([pair], cases: [caseValue])
+        XCTAssertTrue(harness.sent.isEmpty)
+        XCTAssertTrue(harness.caseSent.isEmpty)
+        XCTAssertTrue(publisher.ownedAddresses.isEmpty)
+        XCTAssertTrue(publisher.ownedCaseAddresses.isEmpty)
+        harness.exit(pair.identity, withoutPublishing: true)
+        harness.caseChild?.isRunning = false
+        harness.caseChild?.exitedWithoutPublishing = true
+        harness.caseReceive?(Data())
+        harness.date.addTimeInterval(15)
+        harness.launchDelay = 0
+        publisher.reconcile([publication(harness)], cases: [try casePublication(harness, level: 1)])
+        XCTAssertEqual(harness.launches[address], 2)
+        XCTAssertEqual(harness.caseLaunches, 2)
+        publisher.stop()
+    }
+
+    func testCasePrerequisiteRefusalWaitsForEOFNewTelemetryAndCooldown() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        let first = try casePublication(harness)
+        publisher.reconcile([], cases: [first])
+        harness.caseChild?.isRunning = false
+        harness.caseChild?.exitedWithoutPublishing = true
+        harness.date.addTimeInterval(15)
+        let newer = try casePublication(harness, level: 1)
+        publisher.reconcile([], cases: [newer])
+        XCTAssertEqual(harness.caseLaunches, 1)
+        harness.caseReceive?(Data())
+        publisher.reconcile([], cases: [newer])
+        XCTAssertEqual(harness.caseLaunches, 1)
+        harness.date.addTimeInterval(15)
+        publisher.reconcile([], cases: [newer])
+        XCTAssertEqual(harness.caseLaunches, 2)
+        for level in 2...5 {
+            harness.caseChild?.isRunning = false
+            harness.caseChild?.exitedWithoutPublishing = true
+            harness.caseReceive?(Data())
+            harness.date.addTimeInterval(15)
+            publisher.reconcile([], cases: [try casePublication(harness, level: UInt8(level))])
+            XCTAssertEqual(harness.caseLaunches, level + 1)
+        }
+        publisher.stop()
+    }
+
+    func testCasePrerequisiteRefusalCannotOverrideRevokeOrMalformedOutput() throws {
+        for failure in ["revoke", "malformed", "partial"] {
+            let harness = Harness(), publisher = harness.publisher()
+            let first = try casePublication(harness)
+            publisher.reconcile([], cases: [first])
+            if failure == "revoke" { publisher.revoke() }
+            if failure == "malformed" { harness.caseReceive?(Data("invalid\n".utf8)) }
+            if failure == "partial" { harness.caseReceive?(Data("{".utf8)) }
+            harness.caseChild?.isRunning = false
+            harness.caseChild?.exitedWithoutPublishing = true
+            harness.caseReceive?(Data())
+            harness.date.addTimeInterval(20)
+            publisher.reconcile([], cases: [try casePublication(harness, level: 1)])
+            XCTAssertEqual(harness.caseLaunches, 1, failure)
+            publisher.stop()
+        }
+    }
+
+    func testCaseAcknowledgmentQueuedAfterCleanDisconnectUsesExitClassification() throws {
+        for reconcileFirst in [false, true] {
+            for fragmented in [false, true] {
+                let harness = Harness(), publisher = harness.publisher()
+                let first = try casePublication(harness)
+                publisher.reconcile([], cases: [first])
+                let sample = try JSONSerialization.jsonObject(with: JSONEncoder().encode(first))
+                var acknowledgment = try JSONSerialization.data(withJSONObject: ["event": "refresh-completed", "sample": sample, "update": 1])
+                acknowledgment.append(0x0A)
+                if fragmented { harness.caseReceive?(Data(acknowledgment.prefix(20))) }
+                harness.caseChild?.isRunning = false
+                harness.caseChild?.exitedSuccessfully = true
+                harness.caseChild?.withdrewAfterNativeDisconnect = true
+                if reconcileFirst { publisher.reconcile([], cases: [first]) }
+                harness.caseReceive?(fragmented ? Data(acknowledgment.dropFirst(20)) : acknowledgment)
+                XCTAssertTrue(publisher.ownedCaseAddresses.isEmpty)
+                XCTAssertTrue(harness.deadlines.isEmpty)
+                harness.caseReceive?(Data())
+                harness.date.addTimeInterval(15)
+                publisher.reconcile([], cases: [try casePublication(harness, level: 1)])
+                XCTAssertEqual(harness.caseLaunches, 2, "\(reconcileFirst) \(fragmented)")
+                publisher.stop()
+            }
+        }
+    }
+
+    func testSnapshotDisplayNamesTravelWithPairAndCaseSamples() throws {
+        let harness = Harness()
+        var batteries = SonyBatteries()
+        var snapshot = SonyNativeBatterySnapshot(identifier: identifier, name: "Renamed Sony earbuds")
+        XCTAssertTrue(batteries.update([0x25, 0x09, 40, 0, 36, 0]))
+        snapshot.update(batteries, type: 0x09, observedAt: harness.date)
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 43, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        let pair = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        let caseValue = try XCTUnwrap(SonyNativeCaseBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        XCTAssertEqual(pair.name, snapshot.name)
+        XCTAssertEqual(caseValue.name, snapshot.name)
+        XCTAssertEqual(pair.identity, caseValue.identity)
+    }
+
+    func testDisplayNameChangeWaitsForEachPartsNewTelemetryWithoutWithdrawing() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        let pair = publication(harness), caseValue = try casePublication(harness)
+        publisher.reconcile([pair], cases: [caseValue])
+        try harness.acknowledge(pair)
+        try acknowledgeCase(caseValue, harness: harness)
+        var pairObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(pair)) as? [String: Any])
+        var caseObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(caseValue)) as? [String: Any])
+        pairObject["name"] = "Renamed Sony earbuds"
+        caseObject["name"] = "Renamed Sony earbuds"
+        let renamedPair = try JSONDecoder().decode(SonyNativeBatteryPublication.self, from: JSONSerialization.data(withJSONObject: pairObject))
+        let renamedCase = try JSONDecoder().decode(SonyNativeCaseBatteryPublication.self, from: JSONSerialization.data(withJSONObject: caseObject))
+        publisher.reconcile([renamedPair], cases: [renamedCase])
+        XCTAssertEqual(publisher.ownedAddresses, [address])
+        XCTAssertEqual(publisher.ownedCaseAddresses, [address])
+        XCTAssertEqual(harness.sent[address]?.count, 1)
+        XCTAssertEqual(harness.caseSent.count, 1)
+        XCTAssertEqual(harness.deadlines.sorted(), [pair.expiresAt, caseValue.expiresAt].sorted())
+        publisher.stop()
+    }
+
+    func testIntegratedCaseAppearanceUsesThePairPipeWithoutRefreshingBuds() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        var snapshot = snapshot(at: harness.date)
+        let first = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([first])
+        try harness.acknowledge(first)
+        harness.date.addTimeInterval(25)
+        var batteries = SonyBatteries()
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 63, 1]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        let next = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([next])
+        XCTAssertEqual(harness.sent[address]?.count, 2)
+        XCTAssertEqual(harness.caseLaunches, 0)
+        XCTAssertEqual(next.left, first.left)
+        XCTAssertEqual(next.right, first.right)
+        XCTAssertEqual(next.expiresAt, first.expiresAt)
+        let data = try XCTUnwrap(harness.sent[address]?.last)
+        XCTAssertEqual(try JSONDecoder().decode(SonyNativeBatteryPublication.self, from: data), next)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["address", "identifier", "controlSession", "name", "left", "right", "caseBattery"])
+        try harness.acknowledge(next, update: 2)
+        harness.date = first.expiresAt
+        harness.fireDueTimers()
+        XCTAssertTrue(publisher.ownedAddresses.isEmpty)
+        XCTAssertEqual(harness.closes[address], 1)
+    }
+
+    func testOldCaseAtStartupCannotPreventFreshLRPublication() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        var snapshot = snapshot(at: harness.date)
+        var batteries = SonyBatteries()
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 63, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date.addingTimeInterval(-25))
+        var value = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        XCTAssertNotNil(value.caseBattery)
+        publisher.reconcile([value])
+        value.caseBattery = nil
+        let data = try XCTUnwrap(harness.sent[address]?.last)
+        XCTAssertEqual(try JSONDecoder().decode(SonyNativeBatteryPublication.self, from: data), value)
+        try harness.acknowledge(value)
+        XCTAssertEqual(publisher.ownedAddresses, [address])
+        XCTAssertEqual(harness.caseLaunches, 0)
+        publisher.stop()
+    }
+
+    func testIntegratedCaseUnknownWithdrawsOnlyCaseAndRejectsDelayedResurrection() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        var snapshot = snapshot(at: harness.date)
+        var batteries = SonyBatteries()
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 63, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        let first = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([first])
+        try harness.acknowledge(first)
+        harness.date.addTimeInterval(1)
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 0, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        let withdrawn = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([withdrawn])
+        try harness.acknowledge(withdrawn, update: 2)
+        publisher.reconcile([first])
+        XCTAssertEqual(harness.sent[address]?.count, 2)
+        XCTAssertEqual(publisher.ownedAddresses, [address])
+        XCTAssertNil(harness.closes[address])
+        harness.date.addTimeInterval(1)
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 62, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        let returned = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([returned])
+        try harness.acknowledge(returned, update: 3)
+        XCTAssertEqual(harness.sent[address]?.count, 3)
+        XCTAssertEqual(returned.left, first.left)
+        XCTAssertEqual(returned.right, first.right)
+        publisher.stop()
+    }
+
+    func testIntegratedCaseExpiryWithdrawsWithoutAnotherReconcileOrLRChange() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        var snapshot = snapshot(at: harness.date)
+        var batteries = SonyBatteries()
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 63, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        let first = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([first])
+        try harness.acknowledge(first)
+        harness.date.addTimeInterval(30)
+        XCTAssertTrue(batteries.update([0x25, 0x09, 39, 0, 35, 1]))
+        snapshot.update(batteries, type: 0x09, observedAt: harness.date)
+        let next = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([next])
+        try harness.acknowledge(next, update: 2)
+        harness.date = Date(timeIntervalSince1970: first.caseBattery!.observedAt + 45)
+        harness.fireDueTimers()
+        let data = try XCTUnwrap(harness.sent[address]?.last)
+        let withdrawn = try JSONDecoder().decode(SonyNativeBatteryPublication.self, from: data)
+        XCTAssertNil(withdrawn.caseBattery)
+        XCTAssertEqual(withdrawn.left, next.left)
+        XCTAssertEqual(withdrawn.right, next.right)
+        XCTAssertEqual(withdrawn.expiresAt, next.expiresAt)
+        XCTAssertEqual(harness.sent[address]?.count, 3)
+        try harness.acknowledge(withdrawn, update: 3)
+        XCTAssertEqual(publisher.ownedAddresses, [address])
+        XCTAssertNil(harness.closes[address])
+        publisher.stop()
+    }
+
+    func testAgedNewCaseCannotRestoreExpiredCaseOrWithdrawFreshBuds() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        var snapshot = snapshot(at: harness.date)
+        var batteries = SonyBatteries()
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 63, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        let first = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([first])
+        try harness.acknowledge(first)
+        harness.date.addTimeInterval(30)
+        XCTAssertTrue(batteries.update([0x25, 0x09, 39, 0, 35, 1]))
+        snapshot.update(batteries, type: 0x09, observedAt: harness.date)
+        let next = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([next])
+        try harness.acknowledge(next, update: 2)
+        harness.date.addTimeInterval(16)
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 62, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date.addingTimeInterval(-19))
+        XCTAssertTrue(batteries.update([0x25, 0x09, 38, 0, 34, 1]))
+        snapshot.update(batteries, type: 0x09, observedAt: harness.date)
+        var expected = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([expected])
+        expected.caseBattery = nil
+        let data = try XCTUnwrap(harness.sent[address]?.last)
+        XCTAssertEqual(try JSONDecoder().decode(SonyNativeBatteryPublication.self, from: data), expected)
+        try harness.acknowledge(expected, update: 3)
+        XCTAssertEqual(publisher.ownedAddresses, [address])
+        XCTAssertNil(harness.closes[address])
+        publisher.stop()
+    }
+
+    func testIntegratedCaseUpdatesQueueAndOnlyMatchingAcknowledgmentsAdvanceThem() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        var snapshot = snapshot(at: harness.date)
+        let first = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([first])
+        try harness.acknowledge(first)
+        var batteries = SonyBatteries()
+        harness.date.addTimeInterval(1)
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 63, 0]))
+        snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+        let pending = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([pending])
+        harness.date.addTimeInterval(1)
+        XCTAssertTrue(batteries.update([0x25, 0x09, 39, 0, 35, 1]))
+        snapshot.update(batteries, type: 0x09, observedAt: harness.date)
+        let queued = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+        publisher.reconcile([queued])
+        XCTAssertEqual(harness.sent[address]?.count, 2)
+        try harness.acknowledge(pending, update: 2)
+        XCTAssertEqual(harness.sent[address]?.count, 3)
+        try harness.acknowledge(queued, update: 3)
+        XCTAssertEqual(publisher.ownedAddresses, [address])
+        try harness.acknowledge(pending, update: 3)
+        XCTAssertTrue(publisher.ownedAddresses.isEmpty)
+        XCTAssertEqual(harness.closes[address], 1)
+    }
+
+    func testIntegratedCaseCannotSurvivePeerWithdrawalStopOrHelperFailure() throws {
+        for failure in ["peer", "stop", "helper", "timeout", "write"] {
+            let harness = Harness(), publisher = harness.publisher()
+            var snapshot = snapshot(at: harness.date)
+            var batteries = SonyBatteries()
+            XCTAssertTrue(batteries.update([0x25, 0x0A, 63, 0]))
+            snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+            let value = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+            publisher.reconcile([value])
+            try harness.acknowledge(value)
+            switch failure {
+            case "peer": publisher.reconcile([])
+            case "stop": publisher.stop()
+            case "helper": harness.exit(value.identity)
+            case "timeout", "write":
+                harness.date.addTimeInterval(1)
+                XCTAssertTrue(batteries.update([0x25, 0x0A, 62, 0]))
+                snapshot.update(batteries, type: 0x0A, observedAt: harness.date)
+                let next = try XCTUnwrap(SonyNativeBatteryPublication(address: address, controlSession: 1, snapshot: snapshot, at: harness.date))
+                harness.failsWrite = failure == "write"
+                publisher.reconcile([next])
+                if failure == "timeout" { harness.date.addTimeInterval(10); harness.fireDueTimers() }
+            default: XCTFail(failure)
+            }
+            XCTAssertTrue(publisher.ownedAddresses.isEmpty, failure)
+            XCTAssertTrue(publisher.ownedCaseAddresses.isEmpty, failure)
+            XCTAssertEqual(harness.closes[address], 1, failure)
+            XCTAssertEqual(harness.caseLaunches, 0, failure)
+        }
     }
 
     func testOnlyAcknowledgedUpdateReplacesExpiryWhileReplayCannotExtendIt() throws {
@@ -137,6 +655,43 @@ final class SonyNativeBatteryPublisherTests: XCTestCase {
         harness.fireDueTimers()
         XCTAssertTrue(publisher.ownedAddresses.isEmpty)
         XCTAssertEqual(harness.closes[address], 1)
+        publisher.reconcile([publication(harness)])
+        XCTAssertEqual(harness.launches[address], 1)
+        publisher.stop()
+    }
+
+    func testPairCleanLeaseExpiryResumesAfterConfirmedAbsenceWithNewReadings() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        let first = publication(harness)
+        publisher.reconcile([first])
+        try harness.acknowledge(first)
+        harness.date.addTimeInterval(45)
+        harness.fireDueTimers()
+        let newer = publication(harness)
+        harness.children[first.identity]?.withdrewAfterLeaseExpiry = true
+        harness.exit(first.identity, successfully: true, outputComplete: false)
+        publisher.reconcile([newer])
+        XCTAssertEqual(harness.launches[address], 1)
+        harness.receivers[first.identity]?(Data())
+        publisher.reconcile([newer])
+        XCTAssertEqual(harness.launches[address], 1)
+        harness.date.addTimeInterval(15)
+        publisher.reconcile([newer])
+        XCTAssertEqual(harness.launches[address], 2)
+        publisher.stop()
+    }
+
+    func testPairLeaseExpiryCannotOverrideRevokeDuringRetirement() throws {
+        let harness = Harness(), publisher = harness.publisher()
+        let first = publication(harness)
+        publisher.reconcile([first])
+        try harness.acknowledge(first)
+        harness.date.addTimeInterval(45)
+        harness.fireDueTimers()
+        publisher.revoke()
+        harness.children[first.identity]?.withdrewAfterLeaseExpiry = true
+        harness.exit(first.identity, successfully: true)
+        harness.date.addTimeInterval(20)
         publisher.reconcile([publication(harness)])
         XCTAssertEqual(harness.launches[address], 1)
         publisher.stop()
@@ -709,13 +1264,17 @@ final class SonyNativeBatteryPublisherTests: XCTestCase {
         let second = publication(harness)
         harness.date.addTimeInterval(1)
         let queued = publication(harness)
-        harness.date.addTimeInterval(19)
+        harness.date.addTimeInterval(17)
         publisher.reconcile([second])
         harness.date.addTimeInterval(1)
         publisher.reconcile([queued])
         harness.date.addTimeInterval(8)
         try harness.acknowledge(second, update: 2)
         XCTAssertEqual(harness.sent[address]?.count, 2)
+        XCTAssertEqual(publisher.ownedAddresses, [address])
+        XCTAssertEqual(harness.closes[address, default: 0], 0)
+        harness.date.addTimeInterval(18)
+        harness.fireDueTimers()
         XCTAssertTrue(publisher.ownedAddresses.isEmpty)
         XCTAssertEqual(harness.closes[address], 1)
     }
@@ -943,7 +1502,7 @@ final class SonyNativeBatteryPublisherTests: XCTestCase {
                 XCTAssertEqual(acknowledgment["event"] as? String, "refresh-completed")
                 XCTAssertEqual(acknowledgment["update"] as? Int, 1)
                 let sample = try XCTUnwrap(acknowledgment["sample"] as? [String: Any])
-                XCTAssertEqual(Set(sample.keys), ["address", "identifier", "controlSession", "left", "right"])
+                XCTAssertEqual(Set(sample.keys), ["address", "identifier", "controlSession", "name", "left", "right"])
                 XCTAssertEqual(try JSONDecoder().decode(SonyNativeBatteryPublication.self,
                     from: JSONSerialization.data(withJSONObject: sample)), value)
             }

@@ -10,13 +10,14 @@ final class SonyWearingStatusControllerTests: XCTestCase {
         XCTAssertNil(controller.refreshWearingStatus())
         deliver([0xF5, 0, 4], to: controller)
         XCTAssertNil(controller.wearingStatus.state)
-        advertiseChecker(on: controller)
-        XCTAssertTrue(controller.wearingStatus.isSupported)
-        for _ in 0..<5 { controller.simulateAutomaticRefresh() }
-        acknowledgeAll(controller)
-        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == SonyWearingStatus.queryPayload })
-        XCTAssertNil(controller.wearingStatus.state)
-        XCTAssertNil(controller.wearingStatusReadID)
+        let supported = readyController()
+        defer { supported.simulateControlLoss() }
+        XCTAssertTrue(supported.wearingStatus.isSupported)
+        for _ in 0..<5 { supported.simulateAutomaticRefresh() }
+        acknowledgeAll(supported)
+        XCTAssertFalse(supported.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == SonyWearingStatus.queryPayload })
+        XCTAssertNil(supported.wearingStatus.state)
+        XCTAssertNil(supported.wearingStatusReadID)
     }
 
     func testOnlyWrittenOwnedReplySatisfiesFreshRead() throws {
@@ -87,7 +88,7 @@ final class SonyWearingStatusControllerTests: XCTestCase {
         XCTAssertNil(controller.wearingStatus.rightWorn)
     }
 
-    func testConnectionAndCapabilityChangesRetirePendingRead() throws {
+    func testConnectionChangeRetiresReadAndUnownedCapabilitiesCannotChangeSupport() throws {
         let controller = readyController()
         defer { controller.simulateControlLoss() }
         deliver([0x15, 1, 1, 1], type: 0x0C, to: controller)
@@ -99,15 +100,15 @@ final class SonyWearingStatusControllerTests: XCTestCase {
         deliver([0xF3, 0, 4], to: controller)
         XCTAssertNil(controller.wearingStatusReadID)
         XCTAssertNil(controller.wearingStatus.state)
-        XCTAssertNotNil(controller.refreshWearingStatus())
+        let request = try XCTUnwrap(controller.refreshWearingStatus())
         acknowledgeAll(controller)
         deliver([0x07, 0, 0], to: controller)
-        XCTAssertFalse(controller.wearingStatus.isSupported)
-        advertiseChecker(on: controller)
+        XCTAssertTrue(controller.wearingStatus.isSupported)
         XCTAssertNil(controller.refreshWearingStatus())
         deliver([0xF3, 0, 4], to: controller)
-        XCTAssertNil(controller.wearingStatusReadID)
-        XCTAssertNil(controller.wearingStatus.state)
+        XCTAssertEqual(controller.wearingStatusReadID, request)
+        XCTAssertEqual(controller.wearingStatus.leftWorn, false)
+        XCTAssertEqual(controller.wearingStatus.rightWorn, false)
         XCTAssertNotNil(controller.refreshWearingStatus())
     }
 
@@ -122,8 +123,7 @@ final class SonyWearingStatusControllerTests: XCTestCase {
         XCTAssertFalse(controller.wearingStatus.isSupported)
         XCTAssertNil(controller.wearingStatusReadID)
         XCTAssertNil(controller.refreshWearingStatus())
-        controller.simulateDeviceConnection(named: "WF-1000XM5")
-        advertiseChecker(on: controller)
+        controller.simulateDeviceConnection(named: "WF-1000XM5", simulatedTable2Functions: [0xF0])
         let request = try XCTUnwrap(controller.refreshWearingStatus())
         controller.completeSimulatedWrite()
         deliver([0xF3, 0, 4], session: oldSession, to: controller)
@@ -135,13 +135,8 @@ final class SonyWearingStatusControllerTests: XCTestCase {
 
     private func readyController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
-        controller.simulateDeviceConnection(named: "WF-1000XM5")
-        advertiseChecker(on: controller)
+        controller.simulateDeviceConnection(named: "WF-1000XM5", simulatedTable2Functions: [0xF0])
         return controller
-    }
-
-    private func advertiseChecker(on controller: SonyHeadphonesController) {
-        deliver([0x07, 0, 1, 0xF0, 0], to: controller)
     }
 
     private func acknowledgeAll(_ controller: SonyHeadphonesController) {
@@ -153,6 +148,6 @@ final class SonyWearingStatusControllerTests: XCTestCase {
     }
 
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0E, session: UInt64? = nil, to controller: SonyHeadphonesController) {
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: type, sequence: 0, payload: payload), session: session)
+        controller.simulateProtocolMessage(payload, type: type, session: session)
     }
 }

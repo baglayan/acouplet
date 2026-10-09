@@ -18,6 +18,7 @@ final class AppEnvironment {
     let ldac: LDACController
     #endif
     private var cancellables = Set<AnyCancellable>()
+    private var equalizerObservation: AnyCancellable?
     #if !ACOUPLET_PUBLIC_APIS_ONLY
     private var noiseModeObservers: [ObjectIdentifier: [AnyCancellable]] = [:]
     #endif
@@ -31,7 +32,7 @@ final class AppEnvironment {
         self.devices = devices
         self.audioRoute = audioRoute
         #if !ACOUPLET_PUBLIC_APIS_ONLY
-        ldac = LDACController(devices: devices, audioRoute: audioRoute)
+        ldac = LDACController(devices: devices, audioRoute: audioRoute, defaults: settings.defaults)
         notifications = SonyNotificationService(settings: settings, devices: devices,
                                                 presentLowBattery: { [weak devices, noiseModeHUD] warning, _ in
             guard let headphones = devices?.controller(for: warning.deviceID) else { return false }
@@ -87,12 +88,18 @@ final class AppEnvironment {
         #endif
         devices.$selectedAddress
             .removeDuplicates()
-            .sink { [weak devices, weak settings] address in
+            .sink { [weak self, weak devices, weak settings] address in
+                self?.equalizerObservation = nil
                 for controller in devices?.controllers ?? [] where controller.address != address {
                     controller.earbudFinder?.dismiss()
                 }
                 guard let address, let controller = devices?.controller(for: address) else { return }
-                settings?.selectEqualizerDevice(address: address, defaultDraft: controller.equalizer.settings ?? controller.equalizer.flatSettings ?? .flat)
+                self?.equalizerObservation = controller.$equalizer
+                    .map(\.settings)
+                    .removeDuplicates()
+                    .sink { [weak settings] draft in
+                        settings?.selectEqualizerDevice(address: address, defaultDraft: draft)
+                    }
             }
             .store(in: &cancellables)
     }

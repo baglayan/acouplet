@@ -59,6 +59,48 @@ final class MacAudioRouteTests: XCTestCase {
         XCTAssertThrowsError(try drain(child))
     }
 
+    func testLDACShutdownKeepsDeadlineWhenMediaInputIsFull() throws {
+        let media = try LDACNativeChild(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["60"], inheritedPCM: nil)
+        defer { media.signal(SIGKILL); media.wait() }
+        let capture = try LDACNativeChild(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["60"], inheritedPCM: nil)
+        defer { capture.signal(SIGKILL); capture.wait() }
+        var blocked = false
+        for _ in 0..<262_144 {
+            do { try media.send("stop") }
+            catch let error as POSIXError where error.code == .EAGAIN {
+                blocked = true
+                break
+            }
+        }
+        XCTAssertTrue(blocked)
+        guard blocked else { return }
+
+        let failure = expectation(description: "The failed stop command is reported")
+        let session = LDACNativeSession(id: UUID(), address: "02-00-00-00-00-01", helpers: .init(bundle: .main), gain: 0,
+            priority: LDACPriorityControl(request: { _, _ in }, state: { .init(phase: "idle", error: nil) })) { event in
+                if case .failed = event { failure.fulfill() }
+            }
+        session.simulateStartedMediaShutdown(media: media, capture: capture)
+        let began = DispatchTime.now()
+        session.advanceSimulatedShutdown()
+        XCTAssertGreaterThanOrEqual(session.simulatedMediaStopDeadline, began)
+        XCTAssertLessThanOrEqual(session.simulatedMediaStopDeadline, DispatchTime.now() + 5)
+
+        session.advanceSimulatedShutdown()
+        XCTAssertTrue(try drain(capture).isEmpty)
+        guard capture.outputEnded else { return }
+        capture.wait()
+        XCTAssertNotNil(capture.status)
+        XCTAssertNil(media.status)
+
+        session.advanceSimulatedShutdown(mediaDeadline: DispatchTime(uptimeNanoseconds: 0))
+        XCTAssertTrue(try drain(media).isEmpty)
+        guard media.outputEnded else { return }
+        media.wait()
+        XCTAssertEqual(try XCTUnwrap(media.status) & 0x7F, SIGKILL)
+        wait(for: [failure], timeout: 1)
+    }
+
     private func drain(_ child: LDACNativeChild) throws -> [String] {
         let deadline = Date().addingTimeInterval(2)
         var lines: [String] = []
