@@ -371,6 +371,26 @@ final class SonyMultipointTests: XCTestCase {
         XCTAssertNil(multipoint.selectedSource)
     }
 
+    // Record layout captured from WH-1000XM4 on 12 Oct 2026 (reply to `0E 36 01`): 8 records, states 1, 2, then six 0,
+    // name lengths 0x0B 0x08 0x0F 0x08 0x14 0x0B 0x09 0x08. Addresses and names are invented.
+    func testLegacyListParsesTheCapturedWH1000XM4EightRecordLayout() {
+        let records: [(String, UInt8, String)] = [
+            ("02:00:00:00:00:B1", 1, "Test Mac 01"), ("02:00:00:00:00:B2", 2, "Test Pad"),
+            ("02:00:00:00:00:B3", 0, "Test Desktop PC"), ("02:00:00:00:00:B4", 0, "Test Mac"),
+            ("02:00:00:00:00:B5", 0, "Test Workstation 005"), ("02:00:00:00:00:B6", 0, "Test Mac 02"),
+            ("02:00:00:00:00:B7", 0, "Test Pad2"), ("02:00:00:00:00:B8", 0, "Test TV1"),
+        ]
+        XCTAssertEqual(records.map { $0.2.utf8.count }, [0x0B, 0x08, 0x0F, 0x08, 0x14, 0x0B, 0x09, 0x08])
+        var multipoint = SonyMultipoint(legacySupportedFunctions: [0x38])
+        XCTAssertTrue(multipoint.update(legacyListPacket(records)))
+        XCTAssertEqual(multipoint.devices.count, 8)
+        XCTAssertEqual(multipoint.devices.map(\.isConnected), [true, true, false, false, false, false, false, false])
+        XCTAssertEqual(multipoint.devices.map(\.address), records.map { $0.0 })
+        XCTAssertEqual(multipoint.devices.map(\.name), records.map { $0.2 })
+        XCTAssertEqual(Set(multipoint.devices.map(\.id)).count, 8)
+        XCTAssertFalse(multipoint.inventoryIsStale)
+    }
+
     func testLegacyListRejectsMalformedPacketsAndMarksTheListStale() {
         var multipoint = SonyMultipoint(legacySupportedFunctions: [0x38])
         XCTAssertTrue(multipoint.update(legacyListPacket([(firstAddress, 1, "Test Laptop")])))
