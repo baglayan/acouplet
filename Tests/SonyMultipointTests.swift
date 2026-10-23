@@ -333,8 +333,6 @@ final class SonyMultipointTests: XCTestCase {
         }
     }
 
-    // MDR v1 `37 01` list: [address][state][name length][name] per entry plus a trailing 01, no class bytes.
-    // Addresses and names are invented; the byte layout follows a WH-1000XM4 capture (firmware 3.0.1).
     private func legacyListPacket(_ entries: [(String, UInt8, String)]) -> [UInt8] {
         var packet: [UInt8] = [0x37, 0x01, UInt8(entries.count)]
         for (address, state, name) in entries {
@@ -367,12 +365,11 @@ final class SonyMultipointTests: XCTestCase {
         ])))
         XCTAssertFalse(multipoint.inventoryIsStale)
         XCTAssertEqual(multipoint.devices.map(\.isConnected), [true, true, false])
-        XCTAssertEqual(Set(multipoint.devices.filter(\.isConnected).map(\.connectionID)).count, 2)
+        XCTAssertEqual(multipoint.devices.map(\.connectionID), [1, 1, 0])
+        XCTAssertEqual(Set(multipoint.devices.map(\.id)).count, 3)
         XCTAssertNil(multipoint.selectedSource)
     }
 
-    // Record layout captured from WH-1000XM4 on 12 Oct 2026 (reply to `0E 36 01`): 8 records, states 1, 2, then six 0,
-    // name lengths 0x0B 0x08 0x0F 0x08 0x14 0x0B 0x09 0x08. Addresses and names are invented.
     func testLegacyListParsesTheCapturedWH1000XM4EightRecordLayout() {
         let records: [(String, UInt8, String)] = [
             ("02:00:00:00:00:B1", 1, "Test Mac 01"), ("02:00:00:00:00:B2", 2, "Test Pad"),
@@ -393,6 +390,9 @@ final class SonyMultipointTests: XCTestCase {
 
     func testLegacyListRejectsMalformedPacketsAndMarksTheListStale() {
         var multipoint = SonyMultipoint(legacySupportedFunctions: [0x38])
+        XCTAssertTrue(multipoint.update(legacyListPacket([(firstAddress, 1, "Test Laptop")])))
+        XCTAssertFalse(multipoint.update([0x37, 0x01]))
+        XCTAssertTrue(multipoint.inventoryIsStale)
         XCTAssertTrue(multipoint.update(legacyListPacket([(firstAddress, 1, "Test Laptop")])))
         var truncated = legacyListPacket([(firstAddress, 1, "Test Laptop")])
         truncated.removeLast(3)

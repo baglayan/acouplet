@@ -510,7 +510,6 @@ final class SonyMultipointTransitionTests: XCTestCase {
         XCTAssertNil(newRequest.expectedPayload)
     }
 
-    // Replies captured from a WH-1000XM4 (MDR v1, firmware 3.0.1).
     private static let legacyTouchPanel: [UInt8] = [0xD1, 0xD1, 0x02, 0x13] + Array("TOUCH_PANEL_SETTING".utf8) + [0x00, 0x01, 0x00]
     private static let legacyMultipoint: [UInt8] = [0xD1, 0xD2, 0x02, 0x12] + Array("MULTIPOINT_SETTING".utf8)
         + [0x1A] + Array("MULTIPOINT_SETTING_SUMMARY".utf8) + [0x01, 0x00]

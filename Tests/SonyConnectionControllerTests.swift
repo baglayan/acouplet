@@ -674,18 +674,33 @@ final class SonyConnectionControllerTests: XCTestCase {
 
         let both = ServiceDiscoveryDevice()
         both.service = ServiceDiscoveryRecord()
-        XCTAssertEqual(try XCTUnwrap(SonyHeadphonesController.sonyServiceRecord(on: both)).uuid, Array(current))
+        XCTAssertEqual(try XCTUnwrap(SonyHeadphonesController.sonyServiceChannel(on: both)).uuid, Array(current))
         XCTAssertEqual(both.lookedUpUUIDs, [current])
 
         let legacyOnly = ServiceDiscoveryDevice()
         legacyOnly.service = ServiceDiscoveryRecord()
         legacyOnly.serviceUUID = legacy
-        XCTAssertEqual(try XCTUnwrap(SonyHeadphonesController.sonyServiceRecord(on: legacyOnly)).uuid, Array(legacy))
+        XCTAssertEqual(try XCTUnwrap(SonyHeadphonesController.sonyServiceChannel(on: legacyOnly)).uuid, Array(legacy))
         XCTAssertEqual(legacyOnly.lookedUpUUIDs, [current, legacy])
 
         let neither = ServiceDiscoveryDevice()
-        XCTAssertNil(SonyHeadphonesController.sonyServiceRecord(on: neither))
+        XCTAssertNil(SonyHeadphonesController.sonyServiceChannel(on: neither))
         XCTAssertEqual(neither.lookedUpUUIDs, [current, legacy])
+    }
+
+    @MainActor
+    func testSonyServiceLookupSkipsARecordWithoutAnRFCOMMChannel() throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        let device = ServiceDiscoveryDevice()
+        let invalid = ServiceDiscoveryRecord()
+        invalid.channelStatus = kIOReturnNotFound
+        device.servicesByUUID = [Data(SonyHeadphonesController.sonyServiceUUIDs[0]): invalid,
+                                 Data(SonyHeadphonesController.sonyServiceUUIDs[1]): ServiceDiscoveryRecord()]
+        controller.simulateSonyLink(to: device)
+        XCTAssertEqual(device.openedChannels, [7])
+        XCTAssertEqual(device.lookedUpUUIDs, SonyHeadphonesController.sonyServiceUUIDs.map { Data($0) })
+        XCTAssertTrue(device.discoveryCallbacks.isEmpty)
     }
 
     @MainActor
@@ -2478,9 +2493,11 @@ final class SonyConnectionControllerTests: XCTestCase {
 }
 
 private final class ServiceDiscoveryRecord: SonyServiceRecord {
+    var channelStatus = kIOReturnSuccess
+
     func getRFCOMMChannelID(_ channelID: UnsafeMutablePointer<BluetoothRFCOMMChannelID>!) -> IOReturn {
         channelID.pointee = 7
-        return kIOReturnSuccess
+        return channelStatus
     }
 }
 
@@ -2491,13 +2508,13 @@ private final class ServiceDiscoveryDevice: NSObject, SonyBluetoothDevice, @unch
     @objc var classicPeer: NSObject?
     var classicOpenCount = 0
     var service: (any SonyServiceRecord)?
+    var servicesByUUID: [Data: any SonyServiceRecord] = [:]
     var channel: (any RFCOMMChannel)?
     var discoveryStartStatus = kIOReturnSuccess
     var discoveryCallbacks: [any SonyServiceDiscoveryDelegate] = []
     var openedChannels: [BluetoothRFCOMMChannelID] = []
     var serviceLookups = 0
     var lookedUpUUIDs: [Data] = []
-    /// When set, only this service UUID resolves, to model devices that publish just one Sony service.
     var serviceUUID: Data?
     var onOpen: (() -> Void)?
 
@@ -2515,6 +2532,7 @@ private final class ServiceDiscoveryDevice: NSObject, SonyBluetoothDevice, @unch
         serviceLookups += 1
         let bytes = Data(bytes: uuid.bytes, count: Int(uuid.length))
         lookedUpUUIDs.append(bytes)
+        if !servicesByUUID.isEmpty { return servicesByUUID[bytes] }
         if let serviceUUID, serviceUUID != bytes { return nil }
         return service
     }

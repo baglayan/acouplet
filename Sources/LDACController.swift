@@ -15,9 +15,7 @@ final class LDACController: ObservableObject {
     @Published private(set) var driverState: LDACDriverInstaller.State
     @Published private(set) var driverInstallationError: String?
     @Published private(set) var isOpeningDriverInstaller = false
-    /// Headphones whose LDAC request waits for the user to choose between multipoint and LDAC.
     @Published private(set) var multipointConflictAddress: String?
-    /// Headphones that are turning multipoint off before LDAC starts.
     @Published private(set) var multipointShutdownAddress: String?
     private var multipointConflictConfiguration: LDACConfiguration?
     private var multipointShutdownTask: Task<Void, Never>?
@@ -100,7 +98,9 @@ final class LDACController: ObservableObject {
             }.store(in: &availabilityObservations)
     }
 
-    var needsStopBeforeTermination: Bool { isSessionRunning || !preferenceRestoreTasks.isEmpty }
+    var needsStopBeforeTermination: Bool {
+        isSessionRunning || !preferenceRestoreTasks.isEmpty || multipointConflictAddress != nil || multipointShutdownTask != nil
+    }
 
     #if DEBUG
     func simulateConnectionPreferenceRestoration(_ headphones: SonyHeadphonesController, request: UUID) async -> String? {
@@ -208,8 +208,10 @@ final class LDACController: ObservableObject {
         guard let address = SonyBLEIdentity.normalizedAddress(address) else { return }
         if enabled {
             guard requestedAddress != address || (recoveryPaused && !isSessionRunning) else { return }
+            guard multipointShutdownAddress != address else { return }
             guard preferenceRestoreTasks[address] == nil else { return }
             guard deviceUnavailableReason(forAddress: address) == nil else { return }
+            cancelMultipointRequest()
             if let configuration { requestedConfiguration = configuration }
             if !isSessionRunning {
                 refreshDriverState()
@@ -226,7 +228,6 @@ final class LDACController: ObservableObject {
                 return
             }
             if !isSessionRunning, devices?.controller(for: address)?.ldacRequiresMultipointOff == true {
-                guard multipointShutdownAddress == nil else { return }
                 multipointConflictConfiguration = configuration
                 multipointConflictAddress = address
                 return
@@ -234,16 +235,17 @@ final class LDACController: ObservableObject {
             requestedAddress = address
             if !isSessionRunning { start(address) }
             else { stopSession(reason: "target changed") }
-        } else if targetAddress == address || requestedAddress == address {
-            requestedAddress = nil
-            suspensionRequested = false
-            if isSessionRunning { stopSession(reason: "user disabled LDAC") }
-            else { state = .off; targetAddress = nil; resumeIfReady() }
+        } else {
+            if multipointConflictAddress == address || multipointShutdownAddress == address { cancelMultipointRequest() }
+            if targetAddress == address || requestedAddress == address {
+                requestedAddress = nil
+                suspensionRequested = false
+                if isSessionRunning { stopSession(reason: "user disabled LDAC") }
+                else { state = .off; targetAddress = nil; resumeIfReady() }
+            }
         }
     }
 
-    /// Answers the multipoint question for a waiting LDAC request. Keeping multipoint leaves LDAC off;
-    /// turning it off waits for the headphones to confirm the change, which restarts them, and then starts LDAC.
     func resolveMultipointConflict(turnOffMultipoint: Bool) {
         guard let address = multipointConflictAddress else { return }
         let configuration = multipointConflictConfiguration
@@ -267,8 +269,8 @@ final class LDACController: ObservableObject {
         multipointShutdownTask = Task { [weak self] in
             let deadline = Date().addingTimeInterval(90)
             while !Task.isCancelled, Date() < deadline {
-                guard let current = headphones.multipointTransition, current.requestID == requestID, !current.isFinished else { break }
-                // The user already chose to turn multipoint off, so confirm the headphones' own prompt for that change.
+                guard self?.devices?.controller(for: address) === headphones,
+                      let current = headphones.multipointTransition, current.requestID == requestID, !current.isFinished else { break }
                 if let alert = current.alert {
                     headphones.respondToMultipointAlert(alert, action: alert.availableActions.contains(.positive) ? .positive : nil)
                 }
@@ -277,7 +279,8 @@ final class LDACController: ObservableObject {
             guard let self, !Task.isCancelled else { return }
             self.multipointShutdownAddress = nil
             self.multipointShutdownTask = nil
-            if headphones.multipointTransition?.requestID == requestID, headphones.multipointTransition?.phase == .complete,
+            if self.devices?.controller(for: address) === headphones,
+               headphones.multipointTransition?.requestID == requestID, headphones.multipointTransition?.phase == .complete,
                headphones.systemFeatures.multipoint?.enabled == false {
                 self.record("multipoint-off-confirmed", reason: "starting LDAC")
                 self.setEnabled(true, forAddress: address, configuration: configuration)
@@ -288,7 +291,16 @@ final class LDACController: ObservableObject {
         }
     }
 
+    private func cancelMultipointRequest() {
+        multipointShutdownTask?.cancel()
+        multipointShutdownTask = nil
+        multipointShutdownAddress = nil
+        multipointConflictAddress = nil
+        multipointConflictConfiguration = nil
+    }
+
     func stop(restoreAudio: Bool = true, reason: String = "app requested stop", completion: (@MainActor () -> Void)? = nil) {
+        cancelMultipointRequest()
         requestedAddress = nil
         suspensionRequested = false
         if let completion {
@@ -300,6 +312,7 @@ final class LDACController: ObservableObject {
     }
 
     func suspend(restoreAudio: Bool = false, reason: String = "Mac is going to sleep") {
+        cancelMultipointRequest()
         guard requestedAddress != nil else { return }
         suspensionRequested = true
         if isSessionRunning { stopSession(restoreAudio: restoreAudio, reason: reason) }

@@ -538,7 +538,6 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         return nil
     }
 
-    /// Whether LDAC needs multipoint turned off first on these headphones.
     var ldacRequiresMultipointOff: Bool {
         deviceModel.offersLDACOnlyWithoutMultipoint && systemFeatures.multipoint?.enabled == true
     }
@@ -696,9 +695,6 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private enum Stage { case idle, protocolInfo, supportFunctions, bleIdentity, noiseControl, ready, unsupported }
-    /// RFCOMM services that carry Sony's control protocol, in lookup order. Current models
-    /// publish the first one; older MDR v1 headphones such as the WH-1000XM4 only publish
-    /// the second ("Serial HPC"), so it is tried only when the first is absent.
     static let sonyServiceUUIDs: [[UInt8]] = [
         [0x95, 0x6C, 0x7B, 0x26, 0xD4, 0x9A, 0x4B, 0xA8,
          0xB0, 0x3F, 0xB1, 0x7D, 0x39, 0x3C, 0xB6, 0xE2],
@@ -706,11 +702,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
          0xB3, 0x2D, 0xE3, 0x16, 0xF5, 0xE0, 0x69, 0xBA],
     ]
 
-    /// Returns the first Sony control service the device publishes, following `sonyServiceUUIDs`.
-    static func sonyServiceRecord(on device: any SonyBluetoothDevice) -> (record: any SonyServiceRecord, uuid: [UInt8])? {
+    static func sonyServiceChannel(on device: any SonyBluetoothDevice) -> (channelID: BluetoothRFCOMMChannelID, uuid: [UInt8])? {
         for bytes in sonyServiceUUIDs {
             let uuid = bytes.withUnsafeBytes { IOBluetoothSDPUUID(bytes: $0.baseAddress!, length: bytes.count) }
-            if let record = device.sonyServiceRecord(for: uuid) { return (record, bytes) }
+            if let record = device.sonyServiceRecord(for: uuid) {
+                var channelID: BluetoothRFCOMMChannelID = 0
+                if record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess { return (channelID, bytes) }
+            }
         }
         return nil
     }
@@ -4521,17 +4519,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             return
         }
         pendingClassicOpenID = nil
-        guard let (record, uuid) = Self.sonyServiceRecord(on: device) else {
+        guard let (channelID, uuid) = Self.sonyServiceChannel(on: device) else {
             if discoverServices {
                 discoverSonyService(on: device, automatically: automatically)
             } else {
                 sonyServiceUnavailable(on: device, automatically: automatically)
             }
-            return
-        }
-        var channelID: BluetoothRFCOMMChannelID = 0
-        guard record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess else {
-            fail(String(localized: "Could not open the headphones’ Bluetooth control connection."))
             return
         }
         let (result, openedChannel) = device.openSonyRFCOMMChannel(withChannelID: channelID, delegate: self)
@@ -5901,8 +5894,6 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         return payload[0] == 0x21 ? state.threshold != nil : state.enabled != nil && state.effectActive != nil
     }
 
-    /// Stores the read-only MDR v1 device list (`37 01`). Only the lists the headphones send after
-    /// announcing function 0x38 are accepted; nothing here writes to the headphones.
     private func receiveLegacyDeviceList(_ payload: [UInt8]) -> Bool {
         guard multipoint.supportsLegacyInventory, payload.prefix(2) == [0x37, 0x01] else { return false }
         var received = multipoint

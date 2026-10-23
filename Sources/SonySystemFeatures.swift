@@ -279,9 +279,6 @@ struct SonySystemFeatures: Equatable, Sendable {
     private var multipointStates: [UInt8: SonySystemFeatureState] = [:]
     private(set) var generation = SonyProtocolInfo.Generation.v2
 
-    /// MDR v1 exposes only the general settings (functions D1–D4), such as multipoint on the WH-1000XM4.
-    /// Their replies use a v1 layout: `D1 slot type titleLength title summaryLength summary xx xx`,
-    /// `D7 slot 01 value` and `D8 slot 01 value`, where value 1 means on.
     init(legacyGeneralSettings supportedFunctions: Set<UInt8>) {
         generation = .v1
         generalSlots = (0xD1...0xD4).filter { supportedFunctions.contains($0) }
