@@ -172,13 +172,10 @@ enum SonyPreferencePaneWire {
     static let maximumFrameSize = 65_536
     static let socketName = "sony-pane.sock"
     static let hostRequirement = "anchor apple and (identifier \"com.apple.systempreferences.legacyLoader.arm64\" or identifier \"com.apple.systempreferences.legacyLoader.x86_64\")"
-    static let defaultAppTeam = "5743Y47SC7"
-    /// Info.plist key where the pane builder records the team that signed the app and the pane.
-    static let appTeamInfoKey = "AcoupletAppTeam"
-
-    /// Requirement the app must meet before a pane talks to it. A missing or malformed team keeps the original team.
-    static func appRequirement(team: String?) -> String {
-        let team = team.flatMap { $0.range(of: "\\A[A-Z0-9]{10}\\z", options: .regularExpression) == nil ? nil : $0 } ?? defaultAppTeam
+    static func appRequirement(team: String?) throws -> String {
+        guard let team, team.range(of: "\\A[A-Z0-9]{10}\\z", options: .regularExpression) != nil else {
+            throw failure("The preference pane’s signing team is missing or invalid.")
+        }
         return "anchor apple generic and identifier \"dev.baglayan.Acouplet\" and certificate leaf[subject.OU] = \"\(team)\""
     }
 

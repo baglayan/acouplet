@@ -10,14 +10,12 @@
 #include <Security/Security.h>
 #include "NullAudio.c"
 
-// Team that must sign the Acouplet app before the driver accepts its commands. Packaging/build-ldac.sh
-// passes the build's DEVELOPMENT_TEAM; other builds keep the original team.
 #ifndef ACOUPLET_SIGNING_TEAM
 #define ACOUPLET_SIGNING_TEAM "5743Y47SC7"
 #endif
 
 enum { kAcoupletLease = 'xmls', kAcoupletModel = 'xmnm', kAcoupletPriority = 'xmpr', kAcoupletRevision = 'xmvr' };
-static const SInt32 kAcoupletDriverRevision = 5;
+static const SInt32 kAcoupletDriverRevision = 9;
 static UInt64 gLeaseDeadline;
 static pid_t gLeaseOwner;
 static atomic_bool gAvailable;

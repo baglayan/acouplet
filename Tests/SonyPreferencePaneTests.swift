@@ -4,14 +4,16 @@ import XCTest
 @MainActor
 @available(macOS 27.0, *)
 final class SonyPreferencePaneTests: XCTestCase {
-    func testAppRequirementUsesThePaneTeamAndKeepsTheOriginalTeamOtherwise() {
+    func testAppRequirementUsesThePaneSigningTeam() throws {
         let original = "anchor apple generic and identifier \"dev.baglayan.Acouplet\" and certificate leaf[subject.OU] = \"5743Y47SC7\""
-        XCTAssertEqual(SonyPreferencePaneWire.appRequirement(team: nil), original)
-        XCTAssertEqual(SonyPreferencePaneWire.appRequirement(team: "5743Y47SC7"), original)
-        XCTAssertEqual(SonyPreferencePaneWire.appRequirement(team: "5LHT3P9C4T"),
-                       "anchor apple generic and identifier \"dev.baglayan.Acouplet\" and certificate leaf[subject.OU] = \"5LHT3P9C4T\"")
-        for invalid in ["", "5lht3p9c4t", "5LHT3P9C4", "5LHT3P9C4T\" or anchor apple", "5LHT3P9C4T\n"] {
-            XCTAssertEqual(SonyPreferencePaneWire.appRequirement(team: invalid), original, invalid)
+        XCTAssertEqual(try SonyPreferencePaneWire.appRequirement(team: "5743Y47SC7"), original)
+        XCTAssertEqual(try SonyPreferencePaneWire.appRequirement(team: "ABCDE12345"),
+                       "anchor apple generic and identifier \"dev.baglayan.Acouplet\" and certificate leaf[subject.OU] = \"ABCDE12345\"")
+    }
+
+    func testAppRequirementRejectsMissingOrMalformedTeam() {
+        for invalid: String? in [nil, "", "abcde12345", "ABCDE1234", "ABCDE12345\" or anchor apple", "ABCDE12345\n"] {
+            XCTAssertThrowsError(try SonyPreferencePaneWire.appRequirement(team: invalid))
         }
     }
 

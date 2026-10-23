@@ -9,7 +9,7 @@ final class SonyPreferencePaneClient: ObservableObject {
     @Published private(set) var connectionError: String?
     @Published private(set) var isUpdating = false
     let pinnedAddress: String?
-    private let appRequirement: String
+    private let appTeam: String?
     private var observation: Task<Void, Never>?
     private var command: Task<Void, Never>?
     private var generation = UUID()
@@ -22,7 +22,7 @@ final class SonyPreferencePaneClient: ObservableObject {
 
     init(pinnedAddress: String? = nil, appTeam: String? = nil) {
         self.pinnedAddress = pinnedAddress
-        appRequirement = SonyPreferencePaneWire.appRequirement(team: appTeam)
+        self.appTeam = appTeam
         selectedAddress = pinnedAddress
     }
 
@@ -162,11 +162,12 @@ final class SonyPreferencePaneClient: ObservableObject {
 
     private func exchange(_ request: SonyPreferencePaneRequest, generation: UUID) async {
         let path = path
-        let appRequirement = appRequirement
+        let appTeam = appTeam
         requestSequence += 1
         let sequence = requestSequence
         do {
             let reply = try await Task.detached {
+                let appRequirement = try SonyPreferencePaneWire.appRequirement(team: appTeam)
                 let fd = try SonyPreferencePaneWire.connect(path: path)
                 defer { close(fd) }
                 try SonyPreferencePaneWire.authenticate(fd, requirement: appRequirement)
