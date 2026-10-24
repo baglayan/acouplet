@@ -478,6 +478,8 @@ enum SonyDeviceModel: String, CaseIterable, Sendable {
 
     var isEarbuds: Bool { formFactor == .earbuds }
 
+    var offersLDACOnlyWithoutMultipoint: Bool { self == .whXM4 }
+
     var isSpeaker: Bool {
         switch formFactor {
         case .neckbandSpeaker, .portableSpeaker, .towerSpeaker: true

@@ -296,10 +296,10 @@ struct SonyLegacyControls: Equatable, Sendable {
         automaticPowerOff?.invalidateRead(query)
     }
 
-    init?(supportPayload: [UInt8]) {
+    init?(supportPayload: [UInt8], model: SonyDeviceModel = .unknown) {
         guard supportPayload.count >= 3, supportPayload.prefix(2) == [0x07, 0x00],
               supportPayload.count == 3 + Int(supportPayload[2]) else { return nil }
-        supportedFunctions = Set(supportPayload.dropFirst(3))
+        supportedFunctions = Set(supportPayload.dropFirst(3)).subtracting(model == .whXM4 ? [0xF6] : [])
         dsee = SonyLegacyDSEE(isSupported: supportedFunctions.contains(0xE2))
         connectionQuality = SonyLegacyConnectionQuality(isSupported: supportedFunctions.contains(0xE1))
         wearingControl = SonyLegacyWearingControl(isSupported: supportedFunctions.contains(0xF3))

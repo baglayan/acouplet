@@ -92,6 +92,7 @@ final class SonyHeadphonesController: ObservableObject {
     var isReady = true
     var isDeviceConnected = true
     var supportsConnectionMode = true
+    var ldacRequiresMultipointOff = false
     @Published var connectionMode: SonyConnectionMode? = .soundQuality
     @Published var connectionTransition: ConnectionTransition?
     var lastConnectionModeChangeID: UUID?
@@ -279,6 +280,12 @@ final class Controller: ObservableObject {
     var audioRoute: MacAudioRouteObserver? = MacAudioRouteObserver()
     var resumeOutputUID: String?
     var suspensionRequested = false
+    var multipointConflictAddress: String?
+    var multipointConflictConfiguration: LDACConfiguration?
+    var multipointShutdownAddress: String?
+    var multipointShutdownTask: Task<Void, Never>?
+    var multipointShutdownRequestID: UUID?
+    func confirmPendingMultipointAlert() {}
     var pendingConnectionModes: [String: UUID] = [:]
     var deferredConnectionModes: [String: UUID] = [:]
     var preferenceRestoreTasks: [String: Task<Void, Never>] = [:]
@@ -691,7 +698,7 @@ enum Check {
 '''
 names = ["needsStopBeforeTermination", "nextRecoveryDelay", "canResumeRecovery", "deviceUnavailableReason", "refreshDriverState", "start", "launch", "hasMusicVolumeForHandoff", "hasOwnedMusicContext",
          "hasOtherMusicSource", "bindingIsCurrent", "musicControlStatus", "waitForControls", "controlsChanged",
-         "sendPendingVolume", "setOutputGain", "fail", "beginRecovery", "scheduleRecovery", "stop", "stopSession",
+         "sendPendingVolume", "setOutputGain", "fail", "beginRecovery", "scheduleRecovery", "cancelMultipointRequest", "stop", "stopSession",
          "suspend", "resumeIfReady", "reconcileConnectionPreferences", "forgetConnectionPreference", "scheduleConnectionPreferenceRestoration", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode",
          "restoreConnectionPreference", "finish", "completeStop"]
 fixture = fixture.replace("precondition(", "check(")
