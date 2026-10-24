@@ -4,6 +4,19 @@ import XCTest
 @MainActor
 @available(macOS 27.0, *)
 final class SonyPreferencePaneTests: XCTestCase {
+    func testAppRequirementUsesThePaneSigningTeam() throws {
+        let original = "anchor apple generic and identifier \"dev.baglayan.Acouplet\" and certificate leaf[subject.OU] = \"5743Y47SC7\""
+        XCTAssertEqual(try SonyPreferencePaneWire.appRequirement(team: "5743Y47SC7"), original)
+        XCTAssertEqual(try SonyPreferencePaneWire.appRequirement(team: "ABCDE12345"),
+                       "anchor apple generic and identifier \"dev.baglayan.Acouplet\" and certificate leaf[subject.OU] = \"ABCDE12345\"")
+    }
+
+    func testAppRequirementRejectsMissingOrMalformedTeam() {
+        for invalid: String? in [nil, "", "abcde12345", "ABCDE1234", "ABCDE12345\" or anchor apple", "ABCDE12345\n"] {
+            XCTAssertThrowsError(try SonyPreferencePaneWire.appRequirement(team: invalid))
+        }
+    }
+
     func testCommandsRejectStaleSessionServerAndDuplicateWithoutWriting() async throws {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5")

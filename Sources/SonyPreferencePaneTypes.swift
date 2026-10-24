@@ -172,7 +172,12 @@ enum SonyPreferencePaneWire {
     static let maximumFrameSize = 65_536
     static let socketName = "sony-pane.sock"
     static let hostRequirement = "anchor apple and (identifier \"com.apple.systempreferences.legacyLoader.arm64\" or identifier \"com.apple.systempreferences.legacyLoader.x86_64\")"
-    static let appRequirement = "anchor apple generic and identifier \"dev.baglayan.Acouplet\" and certificate leaf[subject.OU] = \"5743Y47SC7\""
+    static func appRequirement(team: String?) throws -> String {
+        guard let team, team.range(of: "\\A[A-Z0-9]{10}\\z", options: .regularExpression) != nil else {
+            throw failure("The preference pane’s signing team is missing or invalid.")
+        }
+        return "anchor apple generic and identifier \"dev.baglayan.Acouplet\" and certificate leaf[subject.OU] = \"\(team)\""
+    }
 
     static func failure(_ message: String) -> NSError {
         NSError(domain: "SonyPreferencePane", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
