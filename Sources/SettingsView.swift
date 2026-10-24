@@ -136,7 +136,7 @@ struct SettingsView: View {
                     }
                     Button("Login Items…") { SMAppService.openSystemSettingsLoginItems() }
                         .buttonStyle(.borderless)
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(.tint)
                 } else {
                     Toggle(
                         "Launch at login",
@@ -295,7 +295,7 @@ struct SettingsView: View {
                 LabeledContent("Mac audio output", value: audioOutputName)
                     .accessibilityIdentifier("audio.macOutput")
                 Link("Sound Settings…", destination: URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension")!)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(.tint)
                 if headphones.supportsConnectionMode || headphones.connectionTransition != nil {
                     ConnectionModeControl()
                         .disabled(headphones.isRunningHeadphoneTest || headphones.powerOffState != nil)
@@ -378,10 +378,12 @@ struct SettingsView: View {
                 }
                 .disabled(headphones.isRunningHeadphoneTest || headphones.powerOffState != nil || headphones.multipointTransition?.isFinished == false || headphones.deviceActionTransition?.isFinished == false)
             }
-            if headphones.powerFeatures.batteryCare != nil || headphones.powerFeatures.autoPowerSave != nil {
+            if headphones.powerFeatures.batteryCare != nil || headphones.powerFeatures.autoPowerSave != nil || headphones.powerFeatures.touchPanelBacklight != nil || headphones.powerFeatures.stamina != nil {
                 Section("Battery") {
                     BatteryCareControl()
                     AutoPowerSaveControl()
+                    StaminaControl()
+                    TouchPanelBacklightControl()
                 }
                 .disabled(!headphones.isReady || headphones.isRunningHeadphoneTest || headphones.powerOffState != nil
                           || headphones.connectionTransition?.isFinished == false || headphones.multipointTransition?.isFinished == false
@@ -477,12 +479,16 @@ struct SettingsView: View {
                     Spacer()
                     Button("Copy Diagnostics") { copyDiagnostics() }
                 }
+                #if DEBUG
                 if headphones.protocolInformation?.generation != .v1 {
                     HStack {
                         Button("Connect Controls with Bluetooth LE") { headphones.connectBluetoothLE() }
-                            .disabled(headphones.usesBluetoothLE || headphones.linkState == .opening || headphones.linkState == .handshaking
+                            .disabled(headphones.usesBluetoothLE || headphones.isPreparingBluetoothLE || headphones.linkState == .opening || headphones.linkState == .handshaking
                                       || headphones.isPoweringOff
                                       || headphones.connectionTransition?.isFinished == false || headphones.multipointTransition?.isFinished == false)
+                        if headphones.isPreparingBluetoothLE {
+                            Button("Cancel") { headphones.cancelBluetoothLEPreparation() }
+                        }
                         if headphones.usesBluetoothLE {
                             Button("Reconnect Controls") { headphones.connect() }
                                 .disabled(headphones.isPoweringOff || headphones.connectionTransition?.isFinished == false || headphones.multipointTransition?.isFinished == false)
@@ -492,6 +498,7 @@ struct SettingsView: View {
                 if let error = headphones.bluetoothLEError {
                     Text(error).font(.caption).foregroundStyle(.primary)
                 }
+                #endif
             }
         }
         .tint(.primary)
@@ -506,8 +513,17 @@ struct SettingsView: View {
     }
 
     private func copyDiagnostics() {
+        var reports = [DiagnosticHistory.environmentReport, headphones.diagnosticReport, audioRoute.diagnosticReport]
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        reports.append(ldac.diagnosticReport)
+        #else
+        reports.append("LDAC: unavailable in this build")
+        #endif
+        let report = reports.joined(separator: "\n\n").components(separatedBy: "\n")
+            .map { DiagnosticHistory.line($0, redacting: headphones.diagnosticPrivateNames + [audioRoute.route?.name ?? ""]) }
+            .joined(separator: "\n")
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(headphones.diagnosticReport + "\n" + audioRoute.diagnosticReport, forType: .string)
+        NSPasteboard.general.setString(report, forType: .string)
     }
 }
 
@@ -923,6 +939,7 @@ private struct EarTipFitControl: View {
 private struct EarTipFitSheet: View {
     let transitionID: UUID
     @EnvironmentObject private var headphones: SonyHeadphonesController
+    @EnvironmentObject private var settings: SettingsStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var resultHasFocus: Bool
@@ -959,7 +976,7 @@ private struct EarTipFitSheet: View {
                     if transition.phase == .result {
                         Button("Test Again") { headphones.prepareEarTipFitAgain(id: transitionID) }
                             .keyboardShortcut(passed ? nil : .defaultAction)
-                            .tint(passed ? .primary : .accentColor)
+                            .tint(passed ? .primary : settings.tintColor)
                             .accessibilityIdentifier("fit.again")
                     }
                     Spacer()
@@ -967,7 +984,7 @@ private struct EarTipFitSheet: View {
                         close(transition)
                     }
                     .keyboardShortcut(passed ? .defaultAction : .cancelAction)
-                    .tint(passed ? .accentColor : .primary)
+                    .tint(passed ? settings.tintColor : .primary)
                     .disabled(transition.phase == .cancelling || transition.phase == .leaving)
                     .accessibilityIdentifier("fit.cancel")
                     if transition.phase == .ready {
@@ -1400,7 +1417,7 @@ private struct ConnectionModeControl: View {
                     Button("Bluetooth Settings…") {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
                     }
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(.tint)
                     Button("Check Connection") { headphones.connect() }
                         .accessibilityIdentifier("audio.checkPairedConnection")
                 }
@@ -1836,6 +1853,86 @@ private struct BatteryCareControl: View {
     }
 }
 
+private struct StaminaControl: View {
+    @EnvironmentObject private var headphones: SonyHeadphonesController
+    @State private var requestedEnabled: Bool?
+    @State private var requestedSession: UInt64 = 0
+
+    var body: some View {
+        if let state = headphones.powerFeatures.stamina {
+            VStack(alignment: .leading, spacing: 6) {
+                if let enabled = state.enabled {
+                    Toggle(isOn: Binding(get: { enabled }, set: {
+                        requestedSession = headphones.preferencePaneSession
+                        requestedEnabled = $0
+                    })) {
+                        HStack {
+                            Text("STAMINA")
+                            if headphones.pendingChanges[.stamina] != nil {
+                                ProgressView().controlSize(.mini).accessibilityLabel("Updating STAMINA")
+                            }
+                        }
+                    }
+                    .disabled(!headphones.canSetStamina)
+                    .accessibilityIdentifier("power.stamina")
+                } else {
+                    LabeledContent("STAMINA", value: String(localized: "Unknown"))
+                }
+                Text("Reduces power use by changing sound effects and, on supported speakers, lighting.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let error = headphones.settingErrors[.stamina] {
+                    Text(error).font(.caption)
+                } else if state.available == false {
+                    Text("Currently unavailable.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .alert("Change STAMINA?", isPresented: Binding(
+                get: { requestedEnabled != nil }, set: { if !$0 { requestedEnabled = nil } }
+            ), presenting: requestedEnabled) { enabled in
+                Button("Cancel", role: .cancel) {}
+                Button("Continue") { headphones.setStamina(enabled, session: requestedSession) }
+            } message: { _ in
+                Text("Turning STAMINA on or off changes sound effects and may change lighting. Continue?")
+            }
+            .onChange(of: headphones.preferencePaneSession) { _, _ in requestedEnabled = nil }
+        }
+    }
+}
+
+private struct TouchPanelBacklightControl: View {
+    @EnvironmentObject private var headphones: SonyHeadphonesController
+
+    var body: some View {
+        if let state = headphones.powerFeatures.touchPanelBacklight {
+            VStack(alignment: .leading, spacing: 6) {
+                if let enabled = state.enabled {
+                    Toggle(isOn: Binding(
+                        get: { enabled }, set: { headphones.setTouchPanelBacklight($0) }
+                    )) {
+                        HStack {
+                            Text("Turn off touch-panel backlight when idle")
+                            if headphones.pendingChanges[.touchPanelBacklight] != nil {
+                                ProgressView().controlSize(.mini).accessibilityLabel("Updating touch-panel backlight")
+                            }
+                        }
+                    }
+                    .disabled(!headphones.canSetTouchPanelBacklight)
+                    .accessibilityIdentifier("power.touchPanelBacklight")
+                } else {
+                    LabeledContent("Turn off touch-panel backlight when idle", value: String(localized: "Unknown"))
+                }
+                Text("Reduces power use by turning off the top touch-panel backlight after inactivity.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let error = headphones.settingErrors[.touchPanelBacklight] {
+                    Text(error).font(.caption)
+                } else if state.available == false {
+                    Text("Currently unavailable.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
 private struct AutoPowerSaveControl: View {
     @EnvironmentObject private var headphones: SonyHeadphonesController
 
@@ -2176,6 +2273,9 @@ struct MultipointSourcePicker: View {
 struct MultipointSettingControl: View {
     var compact = false
     @EnvironmentObject private var headphones: SonyHeadphonesController
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    @EnvironmentObject private var ldac: LDACController
+    #endif
     @State private var presentedAlert: SonyConnectionAlert?
     @State private var showsAlert = false
     @State private var presentedSoundQualityWarning = false
@@ -2240,6 +2340,13 @@ struct MultipointSettingControl: View {
             }
             .onChange(of: headphones.multipointTransition?.alert, initial: true) { _, alert in
                 guard !compact else { return }
+                #if !ACOUPLET_PUBLIC_APIS_ONLY
+                if ldac.handlesMultipointConfirmation(headphones.multipointTransition) {
+                    presentedAlert = nil
+                    showsAlert = false
+                    return
+                }
+                #endif
                 presentedAlert = alert
                 presentedSoundQualityWarning = alert?.format == .fixed && alert?.messageID == 0x07
                     && alert?.actionType == .positiveNegative && headphones.multipointTransition?.targetEnabled == true
@@ -2263,6 +2370,13 @@ struct MultipointSettingControl: View {
         }
     }
 
+    static func showsMenuEntry(for headphones: SonyHeadphonesController) -> Bool {
+        if headphones.multipoint.supportsSourceControl {
+            return headphones.multipoint.devices.filter(\.isConnected).count > 1
+        }
+        return headphones.systemFeatures.generation == .v1 && enabled(for: headphones) != nil
+    }
+
     static func enabled(for headphones: SonyHeadphonesController) -> Bool? {
         headphones.systemFeatures.multipoint?.enabled
             ?? headphones.multipointTransition.flatMap { $0.isFinished ? nil : $0.originalEnabled }
@@ -2282,7 +2396,7 @@ struct MultipointSettingControl: View {
         if presentedSoundQualityWarning {
             message += "\n\n" + String(localized: "Audio may cut out when Sound Quality and multipoint are both enabled.")
         }
-        if alert.format == .fixed, alert.messageID == 0x06 {
+        if alert.format == .fixed || alert.format == .legacyFixed, alert.messageID == 0x06 {
             message += String(localized: "\n\nThe headphones report that LDAC will be unavailable with this change.")
         }
         if alert.format == .flexible {

@@ -175,8 +175,7 @@ struct MenuBarView: View {
                 }
             }
             .disabled(controlsDisabled)
-            if showsHeadphoneControls, headphones.multipoint.supportsSourceControl,
-               headphones.multipoint.devices.filter(\.isConnected).count > 1 {
+            if showsHeadphoneControls, MultipointSettingControl.showsMenuEntry(for: headphones) {
                 multipointControl
             }
             if showsHeadphoneControls {
@@ -231,6 +230,7 @@ struct MenuBarView: View {
 
     #if !ACOUPLET_PUBLIC_APIS_ONLY
     private var ldacState: LDACState { ldac.targetAddress == headphones.address ? ldac.state : .off }
+    private var isTurningOffMultipointForLDAC: Bool { ldac.multipointShutdownAddress == headphones.address }
 
     private var ldacIsEnabled: Bool {
         switch ldacState {
@@ -286,9 +286,10 @@ struct MenuBarView: View {
                 switch ldacState {
                 case .requested, .connecting, .stopping:
                     ProgressView().controlSize(.mini).accessibilityHidden(true)
-                default: EmptyView()
+                default:
+                    if isTurningOffMultipointForLDAC { ProgressView().controlSize(.mini).accessibilityHidden(true) }
                 }
-                Text(ldacStatusText)
+                Text(isTurningOffMultipointForLDAC ? String(localized: "Turning off multipoint…") : ldacStatusText)
                     .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -299,10 +300,21 @@ struct MenuBarView: View {
                 ))
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .tint(.accentColor)
-                .disabled(!ldacIsEnabled && (!ldac.canEnable(forAddress: headphones.address) || !ldac.canStartOrInstallDriver))
+                .tint(settings.tintColor)
+                .disabled(!ldacIsEnabled && (isTurningOffMultipointForLDAC || !ldac.canEnable(forAddress: headphones.address) || !ldac.canStartOrInstallDriver))
                 .accessibilityValue(ldacStatusText)
                 .accessibilityIdentifier("audio.ldac")
+                .alert("Turn off multipoint for LDAC?", isPresented: Binding(
+                    get: { ldac.multipointConflictAddress == headphones.address },
+                    set: { if !$0, ldac.multipointConflictAddress == headphones.address { ldac.resolveMultipointConflict(turnOffMultipoint: false) } }
+                )) {
+                    Button("Turn Off Multipoint") { ldac.resolveMultipointConflict(turnOffMultipoint: true) }
+                        .accessibilityIdentifier("audio.ldacTurnOffMultipoint")
+                    Button("Keep Multipoint", role: .cancel) { ldac.resolveMultipointConflict(turnOffMultipoint: false) }
+                        .accessibilityIdentifier("audio.ldacKeepMultipoint")
+                } message: {
+                    Text("These headphones offer LDAC only when multipoint is off. Turning it off restarts them and disconnects any other device.")
+                }
             }
             if !ldac.isSessionRunning, ldacState != .waitingForDevice { LDACDriverGuidance() }
             if case .failed(let error) = ldacState {
@@ -331,16 +343,10 @@ struct MenuBarView: View {
                         }
                     }
                 if showsHeadphoneControls {
-                    HStack(spacing: 6) {
-                        if headphones.isApplyingChange || headphones.isEqualizerUpdatePending {
-                            ProgressView().controlSize(.mini)
-                                .accessibilityLabel("Applying headphone changes")
-                        }
-                        Text(headphones.statusText)
-                            .multilineTextAlignment(.center)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Text(headphones.statusText)
+                        .multilineTextAlignment(.center)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             if headphones.isReady, headphones.isChargingInCase {
@@ -546,7 +552,7 @@ struct MenuBarView: View {
                         Toggle("Focus on Voice", isOn: Binding(get: { headphones.focusOnVoice }, set: headphones.setFocusOnVoice))
                             .labelsHidden()
                             .toggleStyle(.switch)
-                            .tint(.accentColor)
+                            .tint(settings.tintColor)
                     }
                 }
             }
@@ -715,9 +721,9 @@ struct LDACDriverGuidance: View {
                      ? String(localized: "LDAC needs an audio driver. Install it, then restart your Mac.")
                      : String(localized: "An LDAC audio driver update is required. Install it, then restart your Mac."))
                 Button(ldac.driverState == .missing ? String(localized: "Install Audio Driver…") : String(localized: "Update Audio Driver…")) {
-                    ldac.installDriver(forAddress: headphones.address)
+                    ldac.installDriver()
                 }
-                .disabled(ldac.isOpeningDriverInstaller || ldac.deviceUnavailableReason(forAddress: headphones.address) != nil)
+                .disabled(ldac.isOpeningDriverInstaller || ldac.isSessionRunning)
                 .buttonStyle(.bordered)
                 .tint(.primary)
                 .accessibilityIdentifier("audio.installDriver")
@@ -892,7 +898,6 @@ struct HeadphoneConnectionView: View {
                         } else if headphones.isBluetoothAccessDenied {
                             Text("Allow Acouplet to use Bluetooth in [System Settings](x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth).")
                                 .foregroundStyle(.secondary)
-                                .tint(.accentColor)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.leading, 26)
                         } else if !isLoading {
@@ -903,13 +908,12 @@ struct HeadphoneConnectionView: View {
                                     .padding(.leading, 26)
                                     .accessibilityIdentifier("headphones.connectionFailure")
                                 Link("Bluetooth Settings…", destination: URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
-                                    .foregroundStyle(Color.accentColor)
+                                    .foregroundStyle(.tint)
                                     .padding(.leading, 26)
                                     .accessibilityIdentifier("headphones.bluetoothSettings")
                             } else {
                                 Text("If this continues, disconnect and reconnect the headphones in [Bluetooth Settings](x-apple.systempreferences:com.apple.BluetoothSettings).")
                                     .foregroundStyle(.secondary)
-                                    .tint(.accentColor)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .padding(.leading, 26)
                                     .accessibilityIdentifier("headphones.bluetoothSettings")
@@ -1218,7 +1222,7 @@ private struct MultipointPopoverContent: View {
                 }
                 .buttonStyle(.borderless)
                 .tint(nil)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(settings.tintColor)
                 .accessibilityIdentifier("multipoint.bluetoothSettings")
             }
             .padding(14)

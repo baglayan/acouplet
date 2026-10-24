@@ -106,18 +106,19 @@ struct SonyMultipointInventory: Equatable, Sendable {
         return devices.first { $0.connectionID == playbackRightID }
     }
 
-    fileprivate init?(payload: [UInt8]) {
+    fileprivate init?(payload: [UInt8], legacy: Bool = false) {
         guard payload.count >= 4 else { return nil }
+        let classLength = legacy ? 0 : 3
         var offset = 3
         var receivedDevices: [SonyMultipointDevice] = []
         for _ in 0..<payload[2] {
-            guard offset + 22 < payload.count,
+            guard offset + 19 + classLength < payload.count,
                   let address = multipointAddress(payload[offset..<(offset + 17)]) else { return nil }
             let connectionID = payload[offset + 17]
-            let classOfDevice = UInt32(payload[offset + 18]) << 16
+            let classOfDevice = legacy ? 0 : UInt32(payload[offset + 18]) << 16
                 | UInt32(payload[offset + 19]) << 8 | UInt32(payload[offset + 20])
-            let nameLength = Int(payload[offset + 21])
-            offset += 22
+            let nameLength = Int(payload[offset + 18 + classLength])
+            offset += 19 + classLength
             guard (1...128).contains(nameLength), offset + nameLength < payload.count,
                   let name = String(bytes: payload[offset..<(offset + nameLength)], encoding: .utf8) else { return nil }
             receivedDevices.append(SonyMultipointDevice(address: address, connectionID: connectionID,
@@ -127,9 +128,9 @@ struct SonyMultipointInventory: Equatable, Sendable {
         let connectedIDs = receivedDevices.filter(\.isConnected).map(\.connectionID)
         guard offset + 1 == payload.count,
               Set(receivedDevices.map(\.address)).count == receivedDevices.count,
-              Set(connectedIDs).count == connectedIDs.count else { return nil }
+              legacy || Set(connectedIDs).count == connectedIDs.count else { return nil }
         devices = receivedDevices
-        playbackRightID = payload[offset]
+        playbackRightID = legacy ? 0 : payload[offset]
     }
 }
 
@@ -241,6 +242,7 @@ struct SonyPeripheralActionResult: Equatable, Sendable {
 struct SonyMultipoint: Equatable, Sendable {
     let supportsInventory: Bool
     let supportsSourceControl: Bool
+    let supportsLegacyInventory: Bool
     private(set) var maxPairedDevices: UInt8?
     private(set) var maxConnectedDevices: UInt8?
     private(set) var multipleConnectionFileTransfer: Bool?
@@ -256,10 +258,18 @@ struct SonyMultipoint: Equatable, Sendable {
     init(supportedFunctions: Set<UInt8> = []) {
         supportsInventory = !supportedFunctions.isDisjoint(with: [0x32, 0x33])
         supportsSourceControl = supportedFunctions.contains(0x31)
+        supportsLegacyInventory = false
+    }
+
+    init(legacySupportedFunctions supportedFunctions: Set<UInt8>) {
+        supportsInventory = false
+        supportsSourceControl = false
+        supportsLegacyInventory = supportedFunctions.contains(0x38)
     }
 
     var queryPayloads: [[UInt8]] {
-        (supportsInventory ? (maxPairedDevices == nil ? [[0x30, 0x02]] : []) + [[0x32, 0x02], [0x36, 0x02]] : [])
+        (supportsLegacyInventory ? [[0x36, 0x01]] : [])
+            + (supportsInventory ? (maxPairedDevices == nil ? [[0x30, 0x02]] : []) + [[0x32, 0x02], [0x36, 0x02]] : [])
             + (supportsSourceControl ? [[0x36, 0x01]] : [])
     }
 
@@ -320,6 +330,13 @@ struct SonyMultipoint: Equatable, Sendable {
         case (0x37, 0x02), (0x39, 0x02):
             guard supportsInventory else { return false }
             guard let receivedInventory = SonyMultipointInventory(payload: payload) else {
+                inventoryIsStale = true
+                return false
+            }
+            inventory = receivedInventory
+            inventoryIsStale = false
+        case (0x37, 0x01) where supportsLegacyInventory, (0x39, 0x01) where supportsLegacyInventory:
+            guard let receivedInventory = SonyMultipointInventory(payload: payload, legacy: true) else {
                 inventoryIsStale = true
                 return false
             }

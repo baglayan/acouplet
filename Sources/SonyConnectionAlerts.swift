@@ -96,7 +96,7 @@ struct SonyConnectionAlert: Equatable, Sendable {
 
     var isMultipointChange: Bool {
         switch (format, messageID) {
-        case (.fixed, 0x06), (.fixed, 0x07), (.fixed, 0x70), (.flexible, 0x01): true
+        case (.fixed, 0x06), (.fixed, 0x07), (.fixed, 0x70), (.flexible, 0x01), (.legacyFixed, 0x06), (.legacyFixed, 0x07): true
         default: false
         }
     }
