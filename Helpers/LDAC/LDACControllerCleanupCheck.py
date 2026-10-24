@@ -60,6 +60,7 @@ final class Device: ObservableObject {
     var playback: Playback
     var earbudFinder: EarbudFinder?
     var supportsConnectionMode = true
+    var ldacRequiresMultipointOff = false
     var supportedConnectionModes: [SonyConnectionMode]? = [.soundQuality, .stableConnection, .lowLatency]
     var connectionModeAvailable: Bool? = true
     var connectionModeChecks = 0
@@ -164,6 +165,12 @@ final class Controller: ObservableObject {
     var audioRoute: MacAudioRouteObserver? = MacAudioRouteObserver()
     var resumeOutputUID: String? = "fixture-headphones"
     var suspensionRequested = false
+    var multipointConflictAddress: String?
+    var multipointConflictConfiguration: LDACConfiguration?
+    var multipointShutdownAddress: String?
+    var multipointShutdownTask: Task<Void, Never>?
+    var multipointShutdownRequestID: UUID?
+    func confirmPendingMultipointAlert() {}
     var pendingConnectionModes: [String: UUID] = [:]
     var deferredConnectionModes: [String: UUID] = [:]
     var preferenceRestoreTasks: [String: Task<Void, Never>] = [:]
@@ -826,7 +833,7 @@ enum LDACControllerCleanupCheck {
         print("PASS actual finder admission: active finding and unconfirmed Stop block LDAC; manual driver installation is independent of headphones and preserves busy/driver-state checks")
     }
 }
-'''.replace("__METHODS__", "\n".join(method(name) for name in ["needsStopBeforeTermination", "canResumeRecovery", "deviceUnavailableReason", "canEnable", "refreshDriverState", "updateInstalledDriverIfNeeded", "installDriver", "openDriverInstaller", "setEnabled", "stop", "suspend", "resumeIfReady", "reconcileConnectionPreferences", "forgetConnectionPreference", "scheduleConnectionPreferenceRestoration", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))
+'''.replace("__METHODS__", "\n".join(method(name) for name in ["needsStopBeforeTermination", "canResumeRecovery", "deviceUnavailableReason", "canEnable", "refreshDriverState", "updateInstalledDriverIfNeeded", "installDriver", "openDriverInstaller", "setEnabled", "cancelMultipointRequest", "stop", "suspend", "resumeIfReady", "reconcileConnectionPreferences", "forgetConnectionPreference", "scheduleConnectionPreferenceRestoration", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))
 
 with tempfile.TemporaryDirectory(prefix="acouplet-ldac-controller-cleanup-") as directory:
     directory = pathlib.Path(directory)

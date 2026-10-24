@@ -2273,6 +2273,9 @@ struct MultipointSourcePicker: View {
 struct MultipointSettingControl: View {
     var compact = false
     @EnvironmentObject private var headphones: SonyHeadphonesController
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    @EnvironmentObject private var ldac: LDACController
+    #endif
     @State private var presentedAlert: SonyConnectionAlert?
     @State private var showsAlert = false
     @State private var presentedSoundQualityWarning = false
@@ -2337,6 +2340,13 @@ struct MultipointSettingControl: View {
             }
             .onChange(of: headphones.multipointTransition?.alert, initial: true) { _, alert in
                 guard !compact else { return }
+                #if !ACOUPLET_PUBLIC_APIS_ONLY
+                if ldac.handlesMultipointConfirmation(headphones.multipointTransition) {
+                    presentedAlert = nil
+                    showsAlert = false
+                    return
+                }
+                #endif
                 presentedAlert = alert
                 presentedSoundQualityWarning = alert?.format == .fixed && alert?.messageID == 0x07
                     && alert?.actionType == .positiveNegative && headphones.multipointTransition?.targetEnabled == true
@@ -2360,6 +2370,13 @@ struct MultipointSettingControl: View {
         }
     }
 
+    static func showsMenuEntry(for headphones: SonyHeadphonesController) -> Bool {
+        if headphones.multipoint.supportsSourceControl {
+            return headphones.multipoint.devices.filter(\.isConnected).count > 1
+        }
+        return headphones.systemFeatures.generation == .v1 && enabled(for: headphones) != nil
+    }
+
     static func enabled(for headphones: SonyHeadphonesController) -> Bool? {
         headphones.systemFeatures.multipoint?.enabled
             ?? headphones.multipointTransition.flatMap { $0.isFinished ? nil : $0.originalEnabled }
@@ -2379,7 +2396,7 @@ struct MultipointSettingControl: View {
         if presentedSoundQualityWarning {
             message += "\n\n" + String(localized: "Audio may cut out when Sound Quality and multipoint are both enabled.")
         }
-        if alert.format == .fixed, alert.messageID == 0x06 {
+        if alert.format == .fixed || alert.format == .legacyFixed, alert.messageID == 0x06 {
             message += String(localized: "\n\nThe headphones report that LDAC will be unavailable with this change.")
         }
         if alert.format == .flexible {

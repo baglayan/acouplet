@@ -277,6 +277,12 @@ struct SonySystemFeatures: Equatable, Sendable {
     private var identifiedGeneralSlots: Set<UInt8> = []
     private var sidetoneStates: [UInt8: SonySystemFeatureState] = [:]
     private var multipointStates: [UInt8: SonySystemFeatureState] = [:]
+    private(set) var generation = SonyProtocolInfo.Generation.v2
+
+    init(legacyGeneralSettings supportedFunctions: Set<UInt8>) {
+        generation = .v1
+        generalSlots = (0xD1...0xD4).filter { supportedFunctions.contains($0) }
+    }
 
     init(supportedFunctions: Set<UInt8> = []) {
         for feature in SonySystemFeature.allCases where supportedFunctions.contains(feature.function) {
@@ -342,13 +348,17 @@ struct SonySystemFeatures: Equatable, Sendable {
     func sidetoneSetPayload(enabled: Bool) -> [UInt8]? {
         guard let slot = sidetoneSlot, let state = sidetone,
               state.available == true, state.enabled != nil else { return nil }
-        return [0xD8, slot, 0x00, enabled ? 0x00 : 0x01]
+        return generalSetPayload(slot: slot, enabled: enabled)
     }
 
     func multipointSetPayload(enabled: Bool) -> [UInt8]? {
         guard let slot = multipointSlot, let state = multipoint,
               state.available == true, state.enabled != nil else { return nil }
-        return [0xD8, slot, 0x00, enabled ? 0x00 : 0x01]
+        return generalSetPayload(slot: slot, enabled: enabled)
+    }
+
+    private func generalSetPayload(slot: UInt8, enabled: Bool) -> [UInt8] {
+        generation == .v1 ? [0xD8, slot, 0x01, enabled ? 0x01 : 0x00] : [0xD8, slot, 0x00, enabled ? 0x00 : 0x01]
     }
 
     @discardableResult
@@ -381,18 +391,35 @@ struct SonySystemFeatures: Equatable, Sendable {
         guard payload.count >= 3, generalSlots.contains(payload[1]) else { return false }
         let slot = payload[1]
         if payload[0] == 0xD1 {
-            guard payload.count >= 6, payload[2] == 0x00, payload[3] <= 1 else { return false }
-            let titleEnd = 5 + Int(payload[4])
-            guard titleEnd < payload.count, payload.count == titleEnd + 1 + Int(payload[titleEnd]),
-                  let title = String(bytes: payload[5..<titleEnd], encoding: .utf8),
-                  String(bytes: payload[(titleEnd + 1)...], encoding: .utf8) != nil else { return false }
+            let isBoolean: Bool
+            let titleStart: Int
+            if generation == .v1 {
+                guard payload.count >= 5 else { return false }
+                titleStart = 4
+            } else {
+                guard payload.count >= 6, payload[2] == 0x00, payload[3] <= 1 else { return false }
+                titleStart = 5
+            }
+            let titleEnd = titleStart + Int(payload[titleStart - 1])
+            guard titleEnd < payload.count else { return false }
+            let summaryEnd = titleEnd + 1 + Int(payload[titleEnd])
+            if generation == .v1 {
+                guard payload.count == summaryEnd + 1 || (payload.count == summaryEnd + 2 && payload.last == 0),
+                      payload[summaryEnd] == 0x01 else { return false }
+                isBoolean = payload[2] == 0x02
+            } else {
+                guard payload.count == summaryEnd else { return false }
+                isBoolean = payload[3] == 1
+            }
+            guard let title = String(bytes: payload[titleStart..<titleEnd], encoding: .utf8),
+                  String(bytes: payload[(titleEnd + 1)..<summaryEnd], encoding: .utf8) != nil else { return false }
             identifiedGeneralSlots.insert(slot)
-            if payload[3] == 1, title == "SIDETONE_SETTING" {
+            if isBoolean, title == "SIDETONE_SETTING" {
                 if sidetoneStates[slot] == nil { sidetoneStates[slot] = SonySystemFeatureState() }
             } else {
                 sidetoneStates[slot] = nil
             }
-            if payload[3] == 1, title == "MULTIPOINT_SETTING" {
+            if isBoolean, title == "MULTIPOINT_SETTING" {
                 if multipointStates[slot] == nil { multipointStates[slot] = SonySystemFeatureState() }
             } else {
                 multipointStates[slot] = nil
@@ -405,8 +432,8 @@ struct SonySystemFeatures: Equatable, Sendable {
             guard payload.count == 3 else { return false }
             state.available = payload[2] <= 1 ? payload[2] == 0 : nil
         case 0xD7, 0xD9:
-            guard payload.count == 4, payload[2] == 0x00 else { return false }
-            state.enabled = payload[3] <= 1 ? payload[3] == 0 : nil
+            guard payload.count == 4, payload[2] == (generation == .v1 ? 0x01 : 0x00) else { return false }
+            state.enabled = payload[3] <= 1 ? payload[3] == (generation == .v1 ? 1 : 0) : nil
         default:
             return false
         }

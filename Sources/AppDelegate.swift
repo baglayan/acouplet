@@ -357,8 +357,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for controller in controllers where deviceAlertObservers[ObjectIdentifier(controller)] == nil {
             deviceAlertObservers[ObjectIdentifier(controller)] = controller.$connectionTransition
                 .map { $0?.alert != nil }
-                .combineLatest(controller.$multipointTransition.map { $0?.alert != nil })
-                .map { $0 || $1 }
+                .combineLatest(controller.$multipointTransition)
+                .map { [weak self] connectionAlert, multipoint in
+                    #if !ACOUPLET_PUBLIC_APIS_ONLY
+                    if self?.environment.ldac.handlesMultipointConfirmation(multipoint) == true { return connectionAlert }
+                    #endif
+                    return connectionAlert || multipoint?.alert != nil
+                }
                 .removeDuplicates()
                 .sink { [weak self, weak controller] needsConfirmation in
                     guard needsConfirmation, let self, let controller else { return }

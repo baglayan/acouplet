@@ -571,6 +571,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         return nil
     }
 
+    var ldacRequiresMultipointOff: Bool {
+        deviceModel.offersLDACOnlyWithoutMultipoint && systemFeatures.multipoint?.enabled == true
+    }
+
     var multipointUnavailableReason: String? {
         guard !isRunningHeadphoneTest else { return String(localized: "Finish the current headphone test first.") }
         guard powerOffState == nil else { return String(localized: "Connect the headphones to change settings.") }
@@ -751,6 +755,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         [0x96, 0xCC, 0x20, 0x3E, 0x50, 0x68, 0x46, 0xAD,
          0xB3, 0x2D, 0xE3, 0x16, 0xF5, 0xE0, 0x69, 0xBA],
     ]
+
     private static let asmByFunction: [(function: UInt8, type: UInt8)] = [
         (0x6D, 0x19), (0x6B, 0x17), (0x68, 0x15), (0x67, 0x22), (0x66, 0x21),
     ]
@@ -2249,13 +2254,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private func requestAudioFeatures() {
         if let legacyControls {
             for payload in legacyControls.dsee.queryPayloads + legacyControls.connectionQuality.queryPayloads + legacyControls.wearingControl.queryPayloads
-                + (legacyControls.automaticPowerOff?.queryPayloads ?? []) + touchAssignments.queryPayloads { send(payload) }
+                + (legacyControls.automaticPowerOff?.queryPayloads ?? []) + touchAssignments.queryPayloads + systemFeatures.queryPayloads { send(payload) }
             for payload in legacySurround.queryPayloads + legacySoundPosition.queryPayloads { send(payload) }
             for payload in playback.queryPayloads {
                 if payload == playback.capabilityQueryPayload, playback.hasReceivedCapabilities { continue }
                 send(payload)
             }
-            for payload in voiceGuidance.queryPayloads { send(payload, type: 0x0E) }
+            for payload in voiceGuidance.queryPayloads + multipoint.queryPayloads { send(payload, type: 0x0E) }
             return
         }
         guard protocolInformation?.generation != .v1 else { return }
@@ -3187,7 +3192,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if multipointTransition?.isFinished == false, frame.payload.count >= 2,
            [0xD8, 0xD6].contains(frame.payload[0]), frame.payload[1] == systemFeatures.multipointSlot {
             let setting = frame.payload[0] == 0xD8
-            let enabled = setting ? frame.payload.last == 0 : multipointTransition?.targetEnabled == true
+            let enabled = setting ? frame.payload.last == (systemFeatures.generation == .v1 ? 1 : 0) : multipointTransition?.targetEnabled == true
             Self.logger.notice("Multipoint TX; session=\(self.controlSession) setter=\(setting) slot=\(frame.payload[1]) target_enabled=\(enabled) phase=\(self.multipointTransition?.diagnosticPhase ?? "none", privacy: .public)")
         }
         if frame.payload.count == 2, frame.payload[0] == 0xD6,
@@ -5219,10 +5224,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 && (voiceGuidance.queryPayloads.contains(payload)
                     || (payload.count == 4 && payload.prefix(3) == [0x48, 1, 1]
                         && voiceGuidance.setEnabledPayload(payload[3] == 1) == payload))
-            guard isVoiceGuidance || (type == 0x0C && (
+            let isLegacyDeviceList = type == 0x0E && payload == [0x36, 0x01] && multipoint.queryPayloads.contains(payload)
+            guard isVoiceGuidance || isLegacyDeviceList || (type == 0x0C && (
                   (legacyControls?.allows(payload) ?? [[0x04, 0x01], [0x04, 0x03], [0x06, 0x00]].contains(payload))
                     || isEqualizerQuery || equalizer.acceptsSetPayload(payload) || isTouchAssignment || isConnectionAlert
                     || isSoundEffectQuery || legacySurround.acceptsSetPayload(payload) || legacySoundPosition.acceptsSetPayload(payload)
+                    || systemFeatures.queryPayloads.contains(payload) || payload == multipointTransition?.expectedPayload
                     || playback.queryPayloads.contains(payload)
                     || (payload.first == 0xA8 && payload.last.flatMap { playback.volumePayload(Int($0)) } == payload)
                     || firmwareUpdateQueries[payload] != nil
@@ -6206,7 +6213,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     let setter = sent.payload[0] == 0xD8
                     let owned = multipointTransition?.commandAcknowledged(sent.payload, session: session) == true
                     if owned, multipointTransition?.phase == .awaitingResponse { updateMultipointTimeout() }
-                    let enabled = setter ? sent.payload.last == 0 : multipointTransition?.targetEnabled == true
+                    let enabled = setter ? sent.payload.last == (systemFeatures.generation == .v1 ? 1 : 0) : multipointTransition?.targetEnabled == true
                     Self.logger.notice("Multipoint ACK; session=\(self.controlSession) setter=\(setter) slot=\(sent.payload[1]) target_enabled=\(enabled) setter_owned=\(owned) phase=\(self.multipointTransition?.diagnosticPhase ?? "none", privacy: .public)")
                 }
                 if sent.type == 0x0C, sent.payload.first == 0x98,
@@ -6304,6 +6311,16 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         guard let state = features.autoPowerSave, type == 0x0C, payload[1] == 0x0B else { return false }
         return payload[0] == 0x21 ? state.threshold != nil : state.enabled != nil && state.effectActive != nil
+    }
+
+    private func receiveLegacyDeviceList(_ payload: [UInt8]) -> Bool {
+        guard multipoint.supportsLegacyInventory, payload.count >= 2,
+              [0x37, 0x39].contains(payload[0]), payload[1] == 0x01 else { return false }
+        var received = multipoint
+        let updated = received.update(payload)
+        if multipoint != received { multipoint = received }
+        if updated { lastSyncDate = Date() }
+        return true
     }
 
     private func receiveVoiceGuidance(_ payload: [UInt8]) {
@@ -6488,7 +6505,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         if type == 0x0C, receivePlayback(payload) { return }
         if protocolInformation?.generation == .v1 {
-            if type == 0x0E { receiveVoiceGuidance(payload) }
+            if type == 0x0E {
+                if receiveLegacyDeviceList(payload) { return }
+                receiveVoiceGuidance(payload)
+            }
             else { receiveLegacyControls(payload, type: type) }
             return
         }
@@ -6709,7 +6729,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         switch (payload[0], stage) {
         case (0x01, .protocolInfo):
-            guard let info = SonyProtocolInfo(payload: payload) else { return }
+            let reply = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
+            guard let info = SonyProtocolInfo(payload: payload) else {
+                Self.logger.error("Unrecognized protocol info reply=\(reply, privacy: .public)")
+                return
+            }
+            Self.logger.info("Protocol info; generation=\(info.generation.rawValue, privacy: .public) version=\(String(format: "0x%X", info.version), privacy: .public) reply=\(reply, privacy: .public)")
             protocolInformation = info
             protocolVersion = info.version
             recordDiagnostic("protocol=\(controlProtocol); version=\(String(format: "%08X", info.version))")
@@ -7148,9 +7173,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         guard type == 0x0C, payload.count >= 2 else { return }
         if payload[0] == 0x07 {
             guard stage == .supportFunctions, receivedAfter(legacyReads[[0x06, 0]]),
-                  let controls = SonyLegacyControls(supportPayload: payload) else { return }
+                  let controls = SonyLegacyControls(supportPayload: payload, model: deviceModel) else { return }
             legacyReads.removeValue(forKey: [0x06, 0])
             legacyControls = controls
+            multipoint = SonyMultipoint(legacySupportedFunctions: controls.supportedFunctions)
+            systemFeatures = SonySystemFeatures(legacyGeneralSettings: controls.supportedFunctions)
             legacyOptimizer = SonyLegacyOptimizer(supportedFunctions: controls.supportedFunctions)
             legacySurround = SonyLegacySoundEffect(kind: .surround, supportedFunctions: controls.supportedFunctions)
             legacySoundPosition = SonyLegacySoundEffect(kind: .soundPosition, supportedFunctions: controls.supportedFunctions)
@@ -7182,6 +7209,14 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if let alert = SonyConnectionAlert(payload: payload, generation: .v1) {
             lastConnectionAlert = alert
             lastSyncDate = Date()
+            if alert.isMultipointChange || multipointTransition?.isFinished == false {
+                Self.logger.notice("Multipoint alert; session=\(self.controlSession) format=\(alert.format.rawValue) message=\(alert.messageID) action=\(String(describing: alert.actionType), privacy: .public) phase=\(self.multipointTransition?.diagnosticPhase ?? "none", privacy: .public)")
+            }
+            if multipointTransition?.receiveAlert(alert, session: controlSession) == true {
+                multipointReadbacks = multipointReadbacks.map { ($0.slot, nil, $0.transmissionOrdinal) }
+                advanceMultipointTransition()
+                return
+            }
             if connectionTransition?.receiveAlert(alert, session: controlSession) == true {
                 if systemReads[[0xE6, 1]]?.transmitted == true {
                     systemReads[[0xE6, 1]]?.isObsolete = true
@@ -7195,6 +7230,25 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if receiveLegacyConnectionQuality(payload) { return }
         if receiveTouchAssignments(payload) { return }
         if receiveSystemFeatures(payload) { return }
+        if [0xD1, 0xD3, 0xD5, 0xD7, 0xD9].contains(payload[0]) {
+            let previous = (systemFeatures.multipointSlot, systemFeatures.multipoint)
+            defer {
+                if previous.0 != systemFeatures.multipointSlot || previous.1 != systemFeatures.multipoint {
+                    let available = systemFeatures.multipoint?.available.map { $0 ? "yes" : "no" } ?? "unknown"
+                    let enabled = systemFeatures.multipoint?.enabled.map { $0 ? "on" : "off" } ?? "unknown"
+                    Self.logger.info("MDR v1 multipoint; slot=\(self.systemFeatures.multipointSlot.map { String(format: "%02X", $0) } ?? "none", privacy: .public) available=\(available, privacy: .public) enabled=\(enabled, privacy: .public)")
+                }
+            }
+            if receiveGeneralSetting(payload) { return }
+            var receivedSystemFeatures = systemFeatures
+            let updatedSystemFeatures = receivedSystemFeatures.update(payload)
+            if systemFeatures != receivedSystemFeatures { systemFeatures = receivedSystemFeatures }
+            if updatedSystemFeatures || (payload[0] == 0xD7 && payload[1] == multipointTransition?.slot) {
+                if updatedSystemFeatures { lastSyncDate = Date() }
+                receiveMultipointSetting(payload)
+            }
+            return
+        }
         if receiveLegacyOptimizer(payload) { return }
         if receiveLegacySoundEffect(payload) { return }
         if [0x51, 0x53, 0x55, 0x5B, 0x57, 0x59].contains(payload[0]), payload[1] == equalizer.inquiryType {
