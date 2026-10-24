@@ -838,6 +838,221 @@ final class SonyConnectionControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testTerminationBlocksEveryNewClassicOpen() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateBluetoothInitialization()
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        controller.simulateSonyLink(to: device)
+        XCTAssertEqual(device.openedChannels, [7])
+        controller.simulateControlLoss()
+
+        controller.beginTermination()
+        XCTAssertFalse(controller.retryControlsIfNeeded())
+        controller.refresh()
+        controller.simulateSonyLink(to: device)
+        XCTAssertEqual(device.openedChannels, [7], "No RFCOMM channel may open once the app is terminating")
+
+        controller.cancelTermination()
+        controller.simulateSonyLink(to: device)
+        XCTAssertEqual(device.openedChannels, [7, 7], "A cancelled quit must restore normal reconnection")
+    }
+
+    @MainActor
+    func testTerminationWaitsForPendingOpenAndItsCloseNotification() async {
+        let channel = DeferredRFCOMMChannel()
+        channel.deliversCloseNotification = false
+        channel.closeFinished.expectedFulfillmentCount = 2
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        device.channel = channel
+        controller.simulateSonyLink(to: device)
+        XCTAssertEqual(device.openedChannels, [7])
+
+        controller.simulateHandshakeTimeout()
+        controller.beginTermination()
+        var finished = false
+        let drained = expectation(description: "Drain finished")
+        XCTAssertTrue(controller.drainRFCOMMForTermination {
+            finished = true
+            drained.fulfill()
+        })
+        XCTAssertTrue(controller.drainRFCOMMForTermination { XCTFail("An existing drain owns the completion") })
+        XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
+        await fulfillment(of: [channel.closeStarted], timeout: 2)
+        XCTAssertFalse(finished)
+
+        controller.classicChannelOpenComplete(channel, status: kIOReturnSuccess)
+        await fulfillment(of: [channel.closeFinished], timeout: 2)
+        XCTAssertEqual(channel.closeCount, 2)
+        XCTAssertFalse(finished)
+        XCTAssertEqual(controller.rfcommCloseCompletion.wait(timeout: .now()), .timedOut)
+        XCTAssertTrue(channel.writes.isEmpty, "A terminating app must not start the handshake")
+        channel.deliverCloseNotification()
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertEqual(controller.rfcommCloseCompletion.wait(timeout: .now()), .success)
+        XCTAssertFalse(controller.drainRFCOMMForTermination { XCTFail("Nothing left to drain") })
+    }
+
+    @MainActor
+    func testTerminationDrainGivesUpWhenTheOpenNeverCompletes() async {
+        let channel = DeferredRFCOMMChannel()
+        channel.deliversCloseNotification = false
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer {
+            controller.classicChannelOpenComplete(channel, status: kIOReturnNotOpen)
+            controller.simulateControlLoss()
+        }
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        device.channel = channel
+        controller.simulateSonyLink(to: device)
+        controller.terminationDrainTimeout = 0.1
+        controller.beginTermination()
+        let drained = expectation(description: "Drain gave up")
+        XCTAssertTrue(controller.drainRFCOMMForTermination { drained.fulfill() })
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertEqual(controller.rfcommCloseCompletion.wait(timeout: .now()), .timedOut)
+        XCTAssertFalse(controller.drainRFCOMMForTermination { XCTFail("An expired drain must not restart") })
+    }
+
+    @MainActor
+    func testTerminationDrainFinishesWhenPendingChannelClosesWithoutOpening() async {
+        let channel = DeferredRFCOMMChannel()
+        channel.deliversCloseNotification = false
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        device.channel = channel
+        controller.simulateSonyLink(to: device)
+        controller.terminationDrainTimeout = 5
+        let drained = expectation(description: "Closed pending channel drained")
+        XCTAssertTrue(controller.drainRFCOMMForTermination { drained.fulfill() })
+        controller.classicChannelClosed(channel)
+        await fulfillment(of: [channel.closeFinished, drained], timeout: 2, enforceOrder: true)
+        XCTAssertEqual(channel.closeCount, 1)
+        XCTAssertTrue(channel.writes.isEmpty)
+    }
+
+    @MainActor
+    func testCompletedTerminationDrainTimeoutCannotExpireAnotherQuit() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.terminationDrainTimeout = 0.2
+        controller.rfcommCloseCompletion.enter()
+        let firstDrain = expectation(description: "First drain finished")
+        XCTAssertTrue(controller.drainRFCOMMForTermination { firstDrain.fulfill() })
+        controller.rfcommCloseCompletion.leave()
+        await fulfillment(of: [firstDrain], timeout: 2)
+        controller.cancelTermination()
+
+        controller.terminationDrainTimeout = 2
+        controller.rfcommCloseCompletion.enter()
+        var secondFinished = false
+        let secondDrain = expectation(description: "Second drain finished")
+        XCTAssertTrue(controller.drainRFCOMMForTermination {
+            secondFinished = true
+            secondDrain.fulfill()
+        })
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(secondFinished)
+        controller.rfcommCloseCompletion.leave()
+        await fulfillment(of: [secondDrain], timeout: 2)
+    }
+
+    @MainActor
+    func testCancelledTerminationDrainTimeoutCannotExpireAnotherQuit() async throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.terminationDrainTimeout = 0.2
+        controller.rfcommCloseCompletion.enter()
+        XCTAssertTrue(controller.drainRFCOMMForTermination { XCTFail("The quit was cancelled") })
+        controller.cancelTermination()
+
+        controller.terminationDrainTimeout = 2
+        var finished = false
+        let drained = expectation(description: "Second drain finished")
+        XCTAssertTrue(controller.drainRFCOMMForTermination {
+            finished = true
+            drained.fulfill()
+        })
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(finished)
+        controller.rfcommCloseCompletion.leave()
+        await fulfillment(of: [drained], timeout: 2)
+    }
+
+    @MainActor
+    func testExpiredTerminationDrainCloseCannotFinishAnotherPendingOpen() async {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.terminationDrainTimeout = 0.01
+        controller.rfcommCloseCompletion.enter()
+        let firstDrain = expectation(description: "First drain expired")
+        XCTAssertTrue(controller.drainRFCOMMForTermination { firstDrain.fulfill() })
+        await fulfillment(of: [firstDrain], timeout: 2)
+        controller.cancelTermination()
+
+        let channel = DeferredRFCOMMChannel()
+        channel.deliversCloseNotification = false
+        channel.closeFinished.expectedFulfillmentCount = 2
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        device.channel = channel
+        let oldCloseDrained = expectation(description: "Old close notification drained")
+        controller.rfcommCloseCompletion.notify(queue: .main) { oldCloseDrained.fulfill() }
+        controller.rfcommCloseCompletion.leave()
+        controller.simulateSonyLink(to: device)
+        controller.terminationDrainTimeout = 2
+        var secondFinished = false
+        let secondDrain = expectation(description: "Second drain finished")
+        XCTAssertTrue(controller.drainRFCOMMForTermination {
+            secondFinished = true
+            secondDrain.fulfill()
+        })
+        await fulfillment(of: [oldCloseDrained], timeout: 2)
+        XCTAssertFalse(secondFinished)
+        controller.classicChannelOpenComplete(channel, status: kIOReturnSuccess)
+        await fulfillment(of: [channel.closeFinished], timeout: 2)
+        XCTAssertFalse(secondFinished)
+        channel.deliverCloseNotification()
+        await fulfillment(of: [secondDrain], timeout: 2)
+    }
+
+    @MainActor
+    func testCancellingTerminationAllowsNewOpenAfterRetirement() async {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        let channel = DeferredRFCOMMChannel()
+        channel.deliversCloseNotification = false
+        channel.closeFinished.expectedFulfillmentCount = 2
+        let device = ServiceDiscoveryDevice()
+        device.service = ServiceDiscoveryRecord()
+        device.channel = channel
+        controller.simulateSonyLink(to: device)
+        XCTAssertTrue(controller.drainRFCOMMForTermination { XCTFail("The quit was cancelled") })
+        controller.cancelTermination()
+        XCTAssertFalse(controller.isTerminating)
+        XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
+        device.channel = DeferredRFCOMMChannel()
+        let opened = expectation(description: "Replacement opened after cancelled quit")
+        device.onOpen = { opened.fulfill() }
+        controller.simulateSonyLink(to: device)
+        XCTAssertEqual(device.openedChannels, [7])
+        controller.classicChannelOpenComplete(channel, status: kIOReturnSuccess)
+        await fulfillment(of: [channel.closeFinished], timeout: 2)
+        XCTAssertEqual(device.openedChannels, [7])
+        channel.deliverCloseNotification()
+        await fulfillment(of: [opened], timeout: 2)
+        XCTAssertEqual(device.openedChannels, [7, 7])
+        XCTAssertTrue(controller.simulatedHandshakeTimeoutPending)
+    }
+
+    @MainActor
     func testVisibleControlsRetryReopensOnlyAnIdleConnectedControlLink() {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         defer { controller.simulateControlLoss() }

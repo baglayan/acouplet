@@ -73,6 +73,7 @@ final class SonyDeviceCoordinator: NSObject, ObservableObject {
     private var updateScheduled = false
     private var earbudFindingTerminationObserver: AnyCancellable?
     private var earbudFindingTerminationSessions = Set<UUID>()
+    private var terminationDrainID: UUID?
 
     var discoveryTimer: Timer?
     var bluetoothAuthorizationManager: CBCentralManager?
@@ -80,6 +81,7 @@ final class SonyDeviceCoordinator: NSObject, ObservableObject {
     @Published var isDiscovering = false
     @Published var isSystemSleeping = false
     @Published var isRunning = false
+    private(set) var isTerminating = false
     var reconnectAutomatically = true
     var reconnectSuppressedAddress: String?
     var retiredControllerAddresses: Set<String> = []
@@ -187,6 +189,45 @@ final class SonyDeviceCoordinator: NSObject, ObservableObject {
             else { finder.dismiss() }
         }
         return true
+    }
+
+    func beginTermination() {
+        isTerminating = true
+        for controller in terminationControllers { controller.beginTermination() }
+    }
+
+    func cancelTermination() {
+        isTerminating = false
+        terminationDrainID = nil
+        for controller in terminationControllers { controller.cancelTermination() }
+    }
+
+    func drainRFCOMMForTermination(completion: @escaping @MainActor () -> Void) -> Bool {
+        beginTermination()
+        guard terminationDrainID == nil else { return true }
+        let identifier = UUID()
+        terminationDrainID = identifier
+        var remaining = 0
+        let leave: @MainActor () -> Void = { [weak self] in
+            guard let self, self.terminationDrainID == identifier else { return }
+            remaining -= 1
+            if remaining == 0 {
+                self.terminationDrainID = nil
+                completion()
+            }
+        }
+        for controller in terminationControllers {
+            remaining += 1
+            if !controller.drainRFCOMMForTermination(completion: leave) { remaining -= 1 }
+        }
+        if remaining == 0 { terminationDrainID = nil }
+        return remaining > 0
+    }
+
+    private var terminationControllers: [SonyHeadphonesController] {
+        var all = controllers
+        if !all.contains(where: { $0 === fallbackController }) { all.append(fallbackController) }
+        return all
     }
 
     func resetEarbudFindingTermination() {
@@ -337,6 +378,7 @@ final class SonyDeviceCoordinator: NSObject, ObservableObject {
     }
 
     private func retain(_ controller: SonyHeadphonesController, for device: SonyConnectedDevice) {
+        if isTerminating { controller.beginTermination() }
         controllersByAddress[device.address] = controller
         devicesByAddress[device.address] = device
         observations[device.address] = controller.objectWillChange.sink { [weak self] _ in

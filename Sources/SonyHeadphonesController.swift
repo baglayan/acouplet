@@ -812,6 +812,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var bluetoothInitializationID: UUID?
     private var isBluetoothInitialized = false
     private var isSystemSleeping = false
+    private(set) var isTerminating = false
+    var terminationDrainTimeout: TimeInterval = 1.5
+    private var terminationDrain: (id: UUID, completion: @MainActor () -> Void)?
+    private var terminationDrainExpired = false
     private var retryWorkItem: DispatchWorkItem?
     private var ambientWorkItem: DispatchWorkItem?
     private var commandTimeoutWorkItem: DispatchWorkItem?
@@ -1739,7 +1743,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     func refresh() {
-        guard !isSystemSleeping, connectionTransition?.isFinished != false, multipointTransition?.isFinished != false,
+        guard !isSystemSleeping, !isTerminating, connectionTransition?.isFinished != false, multipointTransition?.isFinished != false,
               recoveryUsesBLE == nil else { return }
         cancelScheduledRetry(resetAttempts: true)
         if isReady, hasExpiredControlRead, powerOffState == nil, !isRunningHeadphoneTest,
@@ -1765,7 +1769,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     func retryControlsIfNeeded() -> Bool {
-        guard !displayOnly, !isSystemSleeping, isBluetoothInitialized, reconnectAutomatically,
+        guard !displayOnly, !isSystemSleeping, !isTerminating, isBluetoothInitialized, reconnectAutomatically,
               isDeviceConnected, powerOffState == nil, !isRunningHeadphoneTest,
               stage == .idle, channel == nil, classicConnectionID == nil,
               serviceDiscoveries.isEmpty, recoveryUsesBLE == nil,
@@ -1782,6 +1786,45 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         cancelScheduledRetry(resetAttempts: false)
         openSonyLink(automatically: true)
         return true
+    }
+
+    func beginTermination() { isTerminating = true }
+
+    func cancelTermination() {
+        isTerminating = false
+        terminationDrain = nil
+        terminationDrainExpired = false
+    }
+
+    func drainRFCOMMForTermination(completion: @escaping @MainActor () -> Void) -> Bool {
+        beginTermination()
+        guard terminationDrain == nil else { return true }
+        guard !terminationDrainExpired else { return false }
+        guard channel != nil || rfcommCloseCompletion.wait(timeout: .now()) != .success
+        else { return false }
+        let identifier = UUID()
+        terminationDrain = (identifier, completion)
+        handshakeTimeoutWorkItem?.cancel()
+        handshakeTimeoutWorkItem = nil
+        handshakeID = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + terminationDrainTimeout) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.terminationDrain?.id == identifier else { return }
+                self.terminationDrainExpired = true
+                self.finishTerminationDrain(id: identifier)
+            }
+        }
+        if channel != nil { closeSonyLink() }
+        rfcommCloseCompletion.notify(queue: .main) { [weak self] in
+            MainActor.assumeIsolated { self?.finishTerminationDrain(id: identifier) }
+        }
+        return true
+    }
+
+    private func finishTerminationDrain(id: UUID) {
+        guard let drain = terminationDrain, drain.id == id else { return }
+        terminationDrain = nil
+        drain.completion()
     }
 
     func systemWillSleep() {
@@ -2310,7 +2353,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func refresh(shouldOpenLink: Bool, automatically: Bool = true) {
-        guard !displayOnly, !isSystemSleeping, powerOffState == nil, !isRunningHeadphoneTest else { return }
+        guard !displayOnly, !isSystemSleeping, !isTerminating, powerOffState == nil, !isRunningHeadphoneTest else { return }
         guard classicConnectionID == nil else { return }
         guard canRecoverDeviceAction else { return }
         if let transition = multipointTransition, !transition.isFinished || (transition.phase == .failed && multipointConnection != nil && !isReady) {
@@ -4718,7 +4761,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func openSonyLink(automatically: Bool = false, discoverServices: Bool = true) {
-        guard !isSystemSleeping, serviceDiscoveryID == nil else { return }
+        guard !isSystemSleeping, !isTerminating, serviceDiscoveryID == nil else { return }
         guard powerOffState == nil, !isRunningHeadphoneTest else { return }
         guard let device else { return }
         if automatically, stage == .idle, deviceActionTransition?.phase == .failed {

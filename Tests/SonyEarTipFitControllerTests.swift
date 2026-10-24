@@ -1,7 +1,36 @@
+import AppKit
 import XCTest
 @testable import Acouplet
 
 final class SonyEarTipFitControllerTests: XCTestCase {
+    @MainActor
+    func testApplicationQuitCancelsTheFitTestBeforeDrainingControls() async throws {
+        let suite = "dev.baglayan.Acouplet.fit-termination-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let controller = readyController()
+        let id = try measure(controller)
+        let delegate = AppDelegate()
+        delegate.environment = AppEnvironment(settings: SettingsStore(defaults: defaults), headphones: controller,
+            audioRoute: MacAudioRouteObserver(startAutomatically: false))
+        let interrupted = expectation(description: "Interrupted test keeps the app open")
+        delegate.openSettings = { interrupted.fulfill() }
+        controller.rfcommCloseCompletion.enter()
+
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        XCTAssertEqual(controller.earTipFitTransition?.id, id)
+        XCTAssertEqual(controller.earTipFitTransition?.phase, .cancelling)
+        XCTAssertFalse(delegate.environment.devices.isTerminating)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, cancel)
+
+        delegate.environment.devices.cancelTermination()
+        controller.rfcommCloseCompletion.leave()
+        controller.simulateControlLoss()
+        await fulfillment(of: [interrupted], timeout: 2)
+        XCTAssertEqual(controller.earTipFitTransition?.phase, .interrupted)
+        XCTAssertFalse(delegate.environment.devices.isTerminating)
+    }
+
     @MainActor
     func testEntryRejectsFrameStartedBeforeEnterTransmission() throws {
         for deferred in [false, true] {

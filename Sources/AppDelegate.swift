@@ -279,7 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             $0.earTipFitTransition?.canDismiss == false || $0.headGesturePracticeTransition?.canDismiss == false
                 || $0.legacyOptimizerTransition?.canDismiss == false
         }
-        guard !controllers.isEmpty else { return finishTermination() }
+        guard !controllers.isEmpty else { return finishTermination(sender) }
         testTerminationObserver = Publishers.MergeMany(controllers.map { $0.objectWillChange.eraseToAnyPublisher() })
             .receive(on: DispatchQueue.main)
             .first { _ in controllers.allSatisfy {
@@ -299,10 +299,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self?.testTerminationObserver = nil
                 if interrupted != nil {
+                    self?.environment.devices.cancelTermination()
                     self?.retriesBackgroundServiceMigration = false
                     self?.isSystemTerminating = false
+                    sender.reply(toApplicationShouldTerminate: false)
+                } else {
+                    let reply = self?.finishTermination(sender) ?? .terminateNow
+                    if reply != .terminateLater { sender.reply(toApplicationShouldTerminate: reply == .terminateNow) }
                 }
-                sender.reply(toApplicationShouldTerminate: interrupted == nil && (self?.finishTermination() ?? .terminateNow) == .terminateNow)
             }
         for headphones in controllers {
             if let transition = headphones.earTipFitTransition { headphones.cancelEarTipFit(id: transition.id) }
@@ -312,7 +316,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    private func finishTermination() -> NSApplication.TerminateReply {
+    private func finishTermination(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if environment.devices.drainRFCOMMForTermination(completion: { [weak self] in
+            guard let self else { sender.reply(toApplicationShouldTerminate: true); return }
+            let reply = self.applicationShouldTerminate(sender)
+            if reply != .terminateLater { sender.reply(toApplicationShouldTerminate: reply == .terminateNow) }
+        }) {
+            return .terminateLater
+        }
         #if !DEBUG && !ACOUPLET_PUBLIC_APIS_ONLY
         if retriesBackgroundServiceMigration {
             retriesBackgroundServiceMigration = false
@@ -325,6 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("Background service migration failed: %@", error.localizedDescription)
                 environment.settings.backgroundServiceMigrationError = Self.backgroundServiceMigrationMessage
                 environment.devices.resetEarbudFindingTermination()
+                environment.devices.cancelTermination()
                 environment.devices.systemDidWake()
                 environment.settings.selectedSettingsPane = "general"
                 showSettings()
