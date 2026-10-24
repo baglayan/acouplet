@@ -335,7 +335,7 @@ struct SonyMultipoint: Equatable, Sendable {
             }
             inventory = receivedInventory
             inventoryIsStale = false
-        case (0x37, 0x01) where supportsLegacyInventory:
+        case (0x37, 0x01) where supportsLegacyInventory, (0x39, 0x01) where supportsLegacyInventory:
             guard let receivedInventory = SonyMultipointInventory(payload: payload, legacy: true) else {
                 inventoryIsStale = true
                 return false

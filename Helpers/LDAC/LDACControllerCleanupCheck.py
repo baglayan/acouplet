@@ -169,6 +169,8 @@ final class Controller: ObservableObject {
     var multipointConflictConfiguration: LDACConfiguration?
     var multipointShutdownAddress: String?
     var multipointShutdownTask: Task<Void, Never>?
+    var multipointShutdownRequestID: UUID?
+    func confirmPendingMultipointAlert() {}
     var pendingConnectionModes: [String: UUID] = [:]
     var deferredConnectionModes: [String: UUID] = [:]
     var preferenceRestoreTasks: [String: Task<Void, Never>] = [:]

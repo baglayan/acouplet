@@ -36,6 +36,7 @@ final class LDACController: ObservableObject {
     @Published private(set) var multipointShutdownAddress: String?
     private var multipointConflictConfiguration: LDACConfiguration?
     private var multipointShutdownTask: Task<Void, Never>?
+    private var multipointShutdownRequestID: UUID?
     private var didAttemptAutomaticDriverUpdate = false
     private let bundle: Bundle
     private let defaults: UserDefaults?
@@ -109,6 +110,12 @@ final class LDACController: ObservableObject {
                 Task { @MainActor [weak self] in self?.resumeIfReady() }
             }.store(in: &availabilityObservations)
         }
+        devices?.$selectedAddress.removeDuplicates()
+            .sink { [weak self] address in
+                guard let self, let pending = self.multipointConflictAddress ?? self.multipointShutdownAddress,
+                      address != pending else { return }
+                self.cancelMultipointRequest()
+            }.store(in: &availabilityObservations)
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
@@ -284,6 +291,7 @@ final class LDACController: ObservableObject {
             return
         }
         let requestID = transition.requestID
+        multipointShutdownRequestID = requestID
         multipointShutdownAddress = address
         record("multipoint-off-requested", reason: "model=\(headphones.deviceModel.rawValue)")
         multipointShutdownTask = Task { [weak self] in
@@ -291,12 +299,11 @@ final class LDACController: ObservableObject {
             while !Task.isCancelled, Date() < deadline {
                 guard self?.devices?.controller(for: address) === headphones,
                       let current = headphones.multipointTransition, current.requestID == requestID, !current.isFinished else { break }
-                if let alert = current.alert {
-                    headphones.respondToMultipointAlert(alert, action: alert.availableActions.contains(.positive) ? .positive : nil)
-                }
+                self?.confirmPendingMultipointAlert()
                 try? await Task.sleep(for: .milliseconds(200))
             }
             guard let self, !Task.isCancelled else { return }
+            self.multipointShutdownRequestID = nil
             self.multipointShutdownAddress = nil
             self.multipointShutdownTask = nil
             if self.devices?.controller(for: address) === headphones,
@@ -311,9 +318,23 @@ final class LDACController: ObservableObject {
         }
     }
 
+    func handlesMultipointConfirmation(_ transition: SonyMultipointTransition?) -> Bool {
+        guard let transition else { return false }
+        return transition.requestID == multipointShutdownRequestID
+    }
+
+    private func confirmPendingMultipointAlert() {
+        guard let address = multipointShutdownAddress, let headphones = devices?.controller(for: address),
+              handlesMultipointConfirmation(headphones.multipointTransition),
+              let alert = headphones.multipointTransition?.alert else { return }
+        headphones.respondToMultipointAlert(alert, action: alert.availableActions.contains(.positive) ? .positive : nil)
+    }
+
     private func cancelMultipointRequest() {
         multipointShutdownTask?.cancel()
         multipointShutdownTask = nil
+        confirmPendingMultipointAlert()
+        multipointShutdownRequestID = nil
         multipointShutdownAddress = nil
         multipointConflictAddress = nil
         multipointConflictConfiguration = nil

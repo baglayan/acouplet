@@ -370,6 +370,26 @@ final class SonyMultipointTests: XCTestCase {
         XCTAssertNil(multipoint.selectedSource)
     }
 
+    func testLegacyListNotificationsRefreshConnectionsAndMalformedNotificationsMarkTheListStale() {
+        var multipoint = SonyMultipoint(legacySupportedFunctions: [0x38])
+        XCTAssertTrue(multipoint.update(legacyListPacket([(firstAddress, 1, "Test Laptop"), (secondAddress, 0, "Test Phone")])))
+        var notification = legacyListPacket([(firstAddress, 0, "Test Laptop"), (secondAddress, 1, "Test Phone")])
+        notification[0] = 0x39
+        XCTAssertTrue(multipoint.update(notification))
+        XCTAssertEqual(multipoint.devices.map(\.isConnected), [false, true])
+        XCTAssertNil(multipoint.selectedSource)
+        XCTAssertNil(multipoint.keeping)
+        XCTAssertNil(multipoint.lastKeepingResult)
+        XCTAssertFalse(multipoint.canManageDevices)
+        XCTAssertFalse(multipoint.canControlSources)
+        let inventory = multipoint.inventory
+        XCTAssertFalse(multipoint.update(Array(notification.dropLast(2))))
+        XCTAssertTrue(multipoint.inventoryIsStale)
+        XCTAssertEqual(multipoint.inventory, inventory)
+        XCTAssertTrue(multipoint.update(notification))
+        XCTAssertFalse(multipoint.inventoryIsStale)
+    }
+
     func testLegacyListParsesTheCapturedWH1000XM4EightRecordLayout() {
         let records: [(String, UInt8, String)] = [
             ("02:00:00:00:00:B1", 1, "Test Mac 01"), ("02:00:00:00:00:B2", 2, "Test Pad"),
@@ -408,6 +428,9 @@ final class SonyMultipointTests: XCTestCase {
         var without = SonyMultipoint(legacySupportedFunctions: [0x30])
         XCTAssertTrue(without.queryPayloads.isEmpty)
         XCTAssertFalse(without.update(legacyListPacket([(firstAddress, 1, "Test Laptop")])))
+        var notification = legacyListPacket([(firstAddress, 1, "Test Laptop")])
+        notification[0] = 0x39
+        XCTAssertFalse(without.update(notification))
         XCTAssertTrue(without.devices.isEmpty)
 
         var v2 = SonyMultipoint(supportedFunctions: [0x31, 0x32])
@@ -415,7 +438,11 @@ final class SonyMultipointTests: XCTestCase {
         XCTAssertEqual(v2.queryPayloads, [[0x30, 0x02], [0x32, 0x02], [0x36, 0x02], [0x36, 0x01]])
         XCTAssertTrue(v2.update([0x37, 0x01, 0]))
         XCTAssertEqual(v2.keeping, true)
+        XCTAssertTrue(v2.update([0x39, 0x01, 1, 2]))
+        XCTAssertEqual(v2.keeping, false)
+        XCTAssertEqual(v2.lastKeepingResult, .callInProgress)
         XCTAssertFalse(v2.update(legacyListPacket([(firstAddress, 1, "Test Laptop")])))
+        XCTAssertFalse(v2.update(notification))
         XCTAssertTrue(v2.devices.isEmpty)
     }
 

@@ -6314,7 +6314,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func receiveLegacyDeviceList(_ payload: [UInt8]) -> Bool {
-        guard multipoint.supportsLegacyInventory, payload.prefix(2) == [0x37, 0x01] else { return false }
+        guard multipoint.supportsLegacyInventory, payload.count >= 2,
+              [0x37, 0x39].contains(payload[0]), payload[1] == 0x01 else { return false }
         var received = multipoint
         let updated = received.update(payload)
         if multipoint != received { multipoint = received }
