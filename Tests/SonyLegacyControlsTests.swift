@@ -479,6 +479,96 @@ final class SonyLegacyControllerTests: XCTestCase {
         XCTAssertTrue(controller.simulatedTransmittedFrames.filter { $0.type == 0x01 }.allSatisfy { $0.payload.isEmpty })
     }
 
+    private let whXM4Functions: [UInt8] = [0x07, 0, 0x17, 0x11, 0x12, 0x13, 0x14, 0x21, 0x22, 0x30, 0x38, 0x39, 0x51, 0x62,
+                                           0x71, 0x81, 0xA1, 0xC1, 0xD1, 0xD2, 0xE1, 0xE2, 0xF3, 0xF4, 0xF5, 0xF6]
+
+    func testWHXM4CapturedRepliesDecodeWithCustomButtonUnavailable() throws {
+        XCTAssertEqual(SonyProtocolInfo(payload: [0x01, 0, 0x70, 0])?.generation, .v1)
+        XCTAssertEqual(SonyProtocolInfo(payload: [0x01, 0, 0x70, 0])?.version, 0x7000)
+        XCTAssertEqual(try XCTUnwrap(SonyLegacyControls(supportPayload: whXM4Functions)).supportedFunctions.count, 23)
+
+        var controls = try XCTUnwrap(SonyLegacyControls(supportPayload: whXM4Functions, model: .whXM4))
+        XCTAssertEqual(controls.supportedFunctions.count, 22)
+        XCTAssertFalse(controls.supportedFunctions.contains(0xF6))
+        XCTAssertTrue(controls.connectionQuality.isSupported)
+        XCTAssertTrue(SonyLegacyOptimizer(supportedFunctions: controls.supportedFunctions).isSupported)
+        XCTAssertNil(SonyTouchAssignments(supportedFunctions: controls.supportedFunctions, generation: .v1).inquiryType)
+        XCTAssertTrue(controls.dsee.isSupported)
+        XCTAssertTrue(controls.wearingControl.isSupported)
+        XCTAssertNotNil(controls.automaticPowerOff)
+        XCTAssertEqual(controls.batteryQueries, [[0x10, 0]])
+
+        XCTAssertTrue(controls.update([0x61, 2, 2, 0, 1, 2, 0, 0x14, 1, 0x14]))
+        XCTAssertEqual(controls.noiseCapability?.modes, [.off, .anc, .ambient, .wind])
+        XCTAssertEqual(controls.noiseCapability?.ambientRange(focusOnVoice: false), 1...20)
+        XCTAssertEqual(controls.noiseCapability?.ambientRange(focusOnVoice: true), 1...20)
+        XCTAssertTrue(controls.update([0x63, 2, 0]))
+        XCTAssertTrue(controls.update([0x11, 0, 0x50, 0]))
+        XCTAssertEqual(controls.batteries.single?.level, 80)
+        XCTAssertEqual(controls.batteries.single?.chargingState, .notCharging)
+        XCTAssertTrue(controls.update([0x67, 2, 1, 2, 2, 1, 0, 0]))
+        XCTAssertEqual(controls.noiseState?.mode, .anc)
+        XCTAssertTrue(controls.canSetNoiseControl)
+        XCTAssertEqual(controls.noiseControlPayload(mode: .ambient, ambientLevel: 15, focusOnVoice: true), [0x68, 2, 1, 2, 0, 1, 1, 0x0F])
+        XCTAssertEqual(controls.noiseControlPayload(mode: .wind, ambientLevel: 10, focusOnVoice: false), [0x68, 2, 1, 2, 1, 1, 0, 0])
+        XCTAssertEqual(controls.noiseControlPayload(mode: .anc, ambientLevel: 10, focusOnVoice: false), [0x68, 2, 1, 2, 2, 1, 0, 0])
+        for (reply, mode, focus) in [([UInt8]([0x69, 2, 1, 2, 0, 1, 1, 0x0F]), NoiseControlMode.ambient, true),
+                                     ([0x69, 2, 1, 2, 1, 1, 0, 0], .wind, false),
+                                     ([0x69, 2, 0, 2, 1, 1, 0, 0], .off, false)] {
+            XCTAssertTrue(controls.update(reply))
+            XCTAssertEqual(controls.noiseState?.mode, mode)
+            XCTAssertEqual(controls.noiseState?.focusOnVoice, focus)
+        }
+        XCTAssertEqual(controls.noiseControlPayload(mode: .off, ambientLevel: 10, focusOnVoice: false), [0x68, 2, 0, 2, 1, 1, 0, 0])
+
+        XCTAssertTrue(controls.update([0xE1, 2, 2, 0]))
+        XCTAssertTrue(controls.update([0xE3, 2, 0]))
+        XCTAssertTrue(controls.update([0xE7, 2, 0, 1]))
+        XCTAssertEqual(controls.dsee.mode, .automatic)
+        XCTAssertEqual(controls.dsee.setPayload(.off), [0xE8, 2, 0, 0])
+    }
+
+    func testWHXM4HandshakeReadsBatteryAndNoiseAndKeepsAdvertisedControls() throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WH-1000XM4", controlBusy: true)
+        controller.simulateProtocolMessage([0x01, 0, 0x70, 0], beginConnection: true)
+        acknowledgeAll(controller)
+        let name = Array("WH-1000XM4".utf8)
+        deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
+        deliver([0x05, 3, 0x30, 0x01], to: controller)
+        deliver(whXM4Functions, to: controller)
+        acknowledgeAll(controller)
+        deliver([0x61, 2, 2, 0, 1, 2, 0, 0x14, 1, 0x14], to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        deliver([0x11, 0, 0x50, 0], to: controller)
+        acknowledgeAll(controller)
+        deliver([0x67, 2, 1, 2, 2, 1, 0, 0], to: controller)
+        acknowledgeAll(controller)
+
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.deviceModel, .whXM4)
+        XCTAssertEqual(controller.controlProtocol, "MDR v1")
+        XCTAssertEqual(controller.batteries.single?.level, 80)
+        XCTAssertEqual(controller.noiseControlMode, .anc)
+        XCTAssertEqual(controller.availableNoiseModes, [.off, .anc, .ambient, .wind])
+        XCTAssertTrue(controller.supportsVoiceFocus)
+        XCTAssertTrue(controller.supportsConnectionMode)
+        XCTAssertTrue(controller.legacyOptimizer.isSupported)
+        XCTAssertTrue(controller.touchAssignments.queryPayloads.isEmpty)
+
+        let sentBefore = controller.simulatedTransmittedFrames.count
+        controller.setNoiseControl(.ambient)
+        acknowledgeAll(controller)
+        XCTAssertTrue(controller.simulatedTransmittedFrames.dropFirst(sentBefore).contains {
+            $0.type == 0x0C && $0.payload == [0x68, 2, 1, 2, 0, 1, 0, 0x0A]
+        })
+        deliver([0x69, 2, 1, 2, 0, 1, 0, 0x0A], to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.noiseControlMode, .ambient)
+        XCTAssertEqual(controller.ambientLevel, 10)
+    }
+
     func testCapabilityAndAvailabilityMustPrecedeOwnedCurrentStateInEitherOrder() {
         for statusFirst in [false, true] {
             let controller = beginController()
@@ -1750,6 +1840,72 @@ final class SonyLegacyControllerTests: XCTestCase {
         }
     }
 
+    func testBackgroundQualityTimeoutPreservesMainControls() async {
+        let controller = makeController(supportsConnectionQuality: true)
+        defer { controller.simulateControlLoss() }
+        for reply: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] { deliver(reply, to: controller) }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertTrue(controller.canChangeConnectionMode)
+        let session = controller.simulatedControlSession
+        for _ in 0..<5 { controller.simulateAutomaticRefresh() }
+        acknowledgeAll(controller)
+        XCTAssertTrue(controller.isReady)
+        controller.simulateSystemReadTimeout([0xE6, 1])
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertNotNil(controller.noiseControlMode)
+        XCTAssertFalse(controller.canChangeConnectionMode)
+        XCTAssertNil(controller.connectionMode)
+        let reads = controller.simulatedTransmittedFrames.filter { $0.payload == [0xE6, 1] }.count
+        for _ in 0..<10 { controller.simulateAutomaticRefresh() }
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xE6, 1] }.count, reads)
+        deliver([0xE7, 1, 0], to: controller)
+        XCTAssertNil(controller.connectionMode)
+        deliver([0xE7, 1, 0, 0], to: controller)
+        XCTAssertNil(controller.connectionMode)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xE6, 1] }.count, reads + 1)
+        deliver([0xE7, 1, 0, 1], to: controller)
+        XCTAssertEqual(controller.connectionMode, .stableConnection)
+        XCTAssertTrue(controller.canChangeConnectionMode)
+    }
+
+    func testNoiseNotificationSupersedesLateBackgroundRead() async {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        let session = controller.simulatedControlSession
+        for _ in 0..<5 { controller.simulateAutomaticRefresh() }
+        acknowledgeAll(controller)
+        var notification = ambient
+        notification[0] = 0x69
+        deliver(notification, to: controller)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.noiseControlMode, .ambient)
+        controller.simulateNoiseReadTimeout([0x66, 2])
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertNotNil(controller.noiseControlMode)
+        let reads = controller.simulatedTransmittedFrames.filter { $0.payload == [0x66, 2] }.count
+        for _ in 0..<10 { controller.simulateAutomaticRefresh() }
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x66, 2] }.count, reads)
+        controller.setNoiseControl(.anc)
+        acknowledgeAll(controller)
+        let requested = controller.pendingChanges[.noiseControl]
+        XCTAssertNotNil(requested)
+        let late: [UInt8] = [0x67, 2, 1, 2, 2, 1, 0, 12]
+        deliver(late, to: controller)
+        XCTAssertEqual(controller.noiseControlMode, .ambient)
+        XCTAssertEqual(controller.pendingChanges[.noiseControl], requested)
+        if let requested { deliver([0x69] + requested, to: controller) }
+        XCTAssertNil(controller.pendingChanges[.noiseControl])
+        XCTAssertEqual(controller.noiseControlMode, .anc)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+    }
+
     private func beginController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
@@ -1825,6 +1981,320 @@ final class SonyLegacyControllerTests: XCTestCase {
 
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, to controller: SonyHeadphonesController) {
         controller.simulateProtocolMessage(payload, type: type)
+    }
+
+    private func acknowledgeAll(_ controller: SonyHeadphonesController) {
+        for _ in 0..<100 {
+            guard let frame = controller.simulatedPendingFrame else { return }
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        }
+        XCTFail("The simulated command queue did not drain.")
+    }
+}
+
+@MainActor
+final class SonyLegacyMultipointTests: XCTestCase {
+    private let address = "02:53:4F:4E:59:01"
+    private let multipointIdentity: [UInt8] = [0xD1, 0xD2, 0x02, 0x12] + Array("MULTIPOINT_SETTING".utf8)
+        + [0x1A] + Array("MULTIPOINT_SETTING_SUMMARY".utf8) + [0x01, 0x00]
+
+    func testWHXM4ReadsAndChangesMultipointOverMDRV1() throws {
+        let (_, headphones) = try preparedXM4(multipointEnabled: false)
+        defer { headphones.simulateControlLoss() }
+        XCTAssertEqual(headphones.systemFeatures.multipointSlot, 0xD2)
+        XCTAssertEqual(headphones.systemFeatures.multipoint?.enabled, false)
+        XCTAssertNotNil(MultipointSettingControl.enabled(for: headphones))
+        XCTAssertTrue(MultipointSettingControl.showsMenuEntry(for: headphones))
+        XCTAssertFalse(MultipointSettingControl.showsMenuEntry(for: SonyHeadphonesController(startAutomatically: false, simulated: true)))
+        XCTAssertNil(headphones.multipointUnavailableReason)
+        XCTAssertFalse(headphones.ldacRequiresMultipointOff)
+        let sent = headphones.simulatedTransmittedFrames.map(\.payload)
+        XCTAssertTrue(sent.contains([0xD0, 0xD2, 0x01]))
+        XCTAssertTrue(sent.contains([0xD6, 0xD2]))
+
+        headphones.setMultipointEnabled(true)
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0xD8, 0xD2, 0x01, 0x01])
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0x99, 0x01, 0x06, 0x01])
+        let alert = try XCTUnwrap(headphones.multipointTransition?.alert)
+        XCTAssertEqual(alert.format, .legacyFixed)
+        XCTAssertEqual(alert.messageID, 0x06)
+        headphones.respondToMultipointAlert(alert, action: .positive)
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x98, 0x01, 0x06, 0x01])
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0xD9, 0xD2, 0x01, 0x01])
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0xD6, 0xD2])
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0xD7, 0xD2, 0x01, 0x01])
+        XCTAssertEqual(headphones.multipointTransition?.phase, .complete)
+        XCTAssertEqual(headphones.systemFeatures.multipoint?.enabled, true)
+        XCTAssertTrue(headphones.ldacRequiresMultipointOff)
+    }
+
+    func testOnlyTheWHXM4NeedsMultipointOffForLDAC() {
+        XCTAssertEqual(SonyDeviceModel.allCases.filter(\.offersLDACOnlyWithoutMultipoint), [.whXM4])
+    }
+
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    func testLDACAsksBeforeTurningMultipointOffAndKeepingItChangesNothing() async throws {
+        let (coordinator, headphones) = try preparedXM4(multipointEnabled: true)
+        defer { headphones.simulateControlLoss() }
+        let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+        XCTAssertTrue(headphones.ldacRequiresMultipointOff)
+        let frames = headphones.simulatedTransmittedFrames.count
+
+        ldac.setEnabled(true, forAddress: address)
+        XCTAssertEqual(ldac.multipointConflictAddress, address)
+        XCTAssertFalse(ldac.isSessionRunning)
+        XCTAssertEqual(ldac.state, .off)
+        ldac.resolveMultipointConflict(turnOffMultipoint: false)
+        XCTAssertNil(ldac.multipointConflictAddress)
+        XCTAssertNil(ldac.multipointShutdownAddress)
+        XCTAssertFalse(ldac.isSessionRunning)
+        XCTAssertNil(headphones.multipointTransition)
+        XCTAssertEqual(headphones.simulatedTransmittedFrames.count, frames)
+        XCTAssertEqual(headphones.systemFeatures.multipoint?.enabled, true)
+
+        ldac.setEnabled(true, forAddress: address)
+        ldac.resolveMultipointConflict(turnOffMultipoint: true)
+        XCTAssertNil(ldac.multipointConflictAddress)
+        XCTAssertEqual(ldac.multipointShutdownAddress, address)
+        XCTAssertFalse(ldac.isSessionRunning)
+        XCTAssertEqual(headphones.multipointTransition?.targetEnabled, false)
+        XCTAssertTrue(ldac.handlesMultipointConfirmation(headphones.multipointTransition))
+        XCTAssertFalse(ldac.handlesMultipointConfirmation(nil))
+        let otherRequest = try XCTUnwrap(SonyMultipointTransition(enabled: false, model: headphones.systemFeatures, session: 1))
+        XCTAssertFalse(ldac.handlesMultipointConfirmation(otherRequest))
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0xD8, 0xD2, 0x01, 0x00])
+        ldac.setEnabled(true, forAddress: address)
+        XCTAssertNil(ldac.multipointConflictAddress)
+
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0x99, 0x01, 0x07, 0x01])
+        for _ in 0..<40 where headphones.simulatedPendingFrame?.payload != [0x98, 0x01, 0x07, 0x01] {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x98, 0x01, 0x07, 0x01])
+        XCTAssertNil(headphones.multipointTransition?.alert)
+
+        headphones.simulateMultipointTimeout()
+        XCTAssertEqual(headphones.multipointTransition?.phase, .failed)
+        for _ in 0..<40 where ldac.multipointShutdownAddress != nil { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertNil(ldac.multipointShutdownAddress)
+        XCTAssertFalse(ldac.isSessionRunning)
+        guard case .failed = ldac.state else { return XCTFail("A failed multipoint change must not start LDAC") }
+        XCTAssertEqual(ldac.targetAddress, address)
+        XCTAssertFalse(ldac.handlesMultipointConfirmation(headphones.multipointTransition))
+    }
+
+    func testStoppingLDACCancelsPendingMultipointConfirmation() throws {
+        let (coordinator, headphones) = try preparedXM4(multipointEnabled: true)
+        defer { headphones.simulateControlLoss() }
+        let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+        ldac.setEnabled(true, forAddress: address)
+        XCTAssertEqual(ldac.multipointConflictAddress, address)
+        XCTAssertTrue(ldac.needsStopBeforeTermination)
+        ldac.stop()
+        ldac.resolveMultipointConflict(turnOffMultipoint: true)
+        XCTAssertNil(ldac.multipointConflictAddress)
+        XCTAssertNil(headphones.multipointTransition)
+        XCTAssertFalse(ldac.needsStopBeforeTermination)
+    }
+
+    func testStoppingDisablingOrSleepingDuringMultipointChangeDoesNotRestartLDAC() async throws {
+        for action in ["stop", "disable", "sleep"] {
+            let (coordinator, headphones) = try preparedXM4(multipointEnabled: true)
+            defer { headphones.simulateControlLoss() }
+            let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+            ldac.setEnabled(true, forAddress: address)
+            ldac.resolveMultipointConflict(turnOffMultipoint: true)
+            XCTAssertEqual(ldac.multipointShutdownAddress, address)
+            XCTAssertTrue(ldac.needsStopBeforeTermination)
+            await Task.yield()
+            if action == "stop" { ldac.stop() }
+            else if action == "disable" { ldac.setEnabled(false, forAddress: address) }
+            else { ldac.suspend() }
+            acknowledgeAll(headphones)
+            headphones.simulateProtocolMessage([0xD9, 0xD2, 0x01, 0x00])
+            acknowledgeAll(headphones)
+            headphones.simulateProtocolMessage([0xD7, 0xD2, 0x01, 0x00])
+            XCTAssertEqual(headphones.multipointTransition?.phase, .complete)
+            try await Task.sleep(for: .milliseconds(250))
+            XCTAssertNil(ldac.multipointShutdownAddress, action)
+            XCTAssertNil(ldac.targetAddress, action)
+            XCTAssertEqual(ldac.state, .off, action)
+            XCTAssertFalse(ldac.isSessionRunning, action)
+            XCTAssertFalse(ldac.needsStopBeforeTermination, action)
+        }
+    }
+
+    func testNewLDACRequestSupersedesAnEarlierMultipointChange() async throws {
+        let otherAddress = "02:53:4F:4E:59:02"
+        let (coordinator, headphones) = try preparedXM4(multipointEnabled: true, additionalAddress: otherAddress)
+        defer {
+            headphones.simulateControlLoss()
+            coordinator.controller(for: otherAddress)?.simulateControlLoss()
+        }
+        let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+        ldac.setEnabled(true, forAddress: address)
+        ldac.resolveMultipointConflict(turnOffMultipoint: true)
+        await Task.yield()
+        ldac.setEnabled(true, forAddress: otherAddress)
+        XCTAssertNil(ldac.multipointShutdownAddress)
+        XCTAssertEqual(ldac.multipointConflictAddress, otherAddress)
+        headphones.simulateMultipointTimeout()
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(ldac.multipointConflictAddress, otherAddress)
+        XCTAssertNil(ldac.targetAddress)
+        XCTAssertEqual(ldac.state, .off)
+        ldac.resolveMultipointConflict(turnOffMultipoint: false)
+    }
+
+    func testSelectingAnotherHeadphoneCancelsPendingLDACConfirmationAndStart() async throws {
+        let otherAddress = "02:53:4F:4E:59:02"
+        let (coordinator, headphones) = try preparedXM4(multipointEnabled: true, additionalAddress: otherAddress)
+        defer {
+            headphones.simulateControlLoss()
+            coordinator.controller(for: otherAddress)?.simulateControlLoss()
+        }
+        coordinator.select(address: address)
+        let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+        ldac.setEnabled(true, forAddress: address)
+        XCTAssertEqual(ldac.multipointConflictAddress, address)
+        coordinator.select(address: otherAddress)
+        XCTAssertNil(ldac.multipointConflictAddress)
+        ldac.resolveMultipointConflict(turnOffMultipoint: true)
+        XCTAssertNil(headphones.multipointTransition)
+
+        coordinator.select(address: address)
+        ldac.setEnabled(true, forAddress: address)
+        ldac.resolveMultipointConflict(turnOffMultipoint: true)
+        XCTAssertEqual(ldac.multipointShutdownAddress, address)
+        await Task.yield()
+        coordinator.select(address: otherAddress)
+        XCTAssertNil(ldac.multipointShutdownAddress)
+        XCTAssertFalse(ldac.handlesMultipointConfirmation(headphones.multipointTransition))
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0xD9, 0xD2, 0x01, 0x00])
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0xD7, 0xD2, 0x01, 0x00])
+        XCTAssertEqual(headphones.multipointTransition?.phase, .complete)
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(coordinator.selectedAddress, otherAddress)
+        XCTAssertNil(ldac.targetAddress)
+        XCTAssertEqual(ldac.state, .off)
+        XCTAssertFalse(ldac.isSessionRunning)
+        XCTAssertFalse(ldac.needsStopBeforeTermination)
+    }
+
+    func testCancellingLDACSettlesItsAlreadyAuthorizedMultipointAlert() throws {
+        for action in ["stop", "disable", "sleep", "selection"] {
+            let otherAddress = "02:53:4F:4E:59:02"
+            let (coordinator, headphones) = try preparedXM4(multipointEnabled: true, additionalAddress: otherAddress)
+            defer {
+                headphones.simulateControlLoss()
+                coordinator.controller(for: otherAddress)?.simulateControlLoss()
+            }
+            coordinator.select(address: address)
+            let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+            ldac.setEnabled(true, forAddress: address)
+            ldac.resolveMultipointConflict(turnOffMultipoint: true)
+            acknowledgeAll(headphones)
+            headphones.simulateProtocolMessage([0x99, 0x01, 0x07, 0x01])
+            XCTAssertNotNil(headphones.multipointTransition?.alert)
+            XCTAssertTrue(ldac.handlesMultipointConfirmation(headphones.multipointTransition))
+            if action == "stop" { ldac.stop() }
+            else if action == "disable" { ldac.setEnabled(false, forAddress: address) }
+            else if action == "sleep" { ldac.suspend() }
+            else { coordinator.select(address: otherAddress) }
+            XCTAssertNil(headphones.multipointTransition?.alert, action)
+            XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x98, 0x01, 0x07, 0x01], action)
+            XCTAssertNil(ldac.multipointShutdownAddress, action)
+            XCTAssertFalse(ldac.handlesMultipointConfirmation(headphones.multipointTransition), action)
+            XCTAssertFalse(ldac.isSessionRunning, action)
+        }
+    }
+    #endif
+
+    func testWHXM4ListsDevicesReadOnlyWhenMultipointAnnouncesFunction38() throws {
+        let (_, headphones) = try preparedXM4(multipointEnabled: true, extraFunctions: [0x38])
+        defer { headphones.simulateControlLoss() }
+        XCTAssertTrue(headphones.multipoint.supportsLegacyInventory)
+        XCTAssertFalse(headphones.multipoint.supportsInventory)
+        XCTAssertEqual(headphones.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x36, 0x01] }.count, 1)
+        XCTAssertFalse(MultipointControls.isVisible(for: headphones.multipoint))
+
+        headphones.simulateProtocolMessage(legacyList, type: 0x0E)
+        acknowledgeAll(headphones)
+        XCTAssertEqual(headphones.multipoint.devices.map(\.name), ["Test Laptop", "Test Phone"])
+        XCTAssertEqual(headphones.multipoint.devices.map(\.isConnected), [true, false])
+        XCTAssertTrue(MultipointControls.isVisible(for: headphones.multipoint))
+        XCTAssertNil(headphones.multipoint.selectedSource)
+
+        var notification = legacyList
+        notification[0] = 0x39
+        notification[20] = 0
+        headphones.simulateProtocolMessage(notification, type: 0x0E)
+        XCTAssertEqual(headphones.multipoint.devices.map(\.isConnected), [false, false])
+        XCTAssertFalse(headphones.multipoint.inventoryIsStale)
+
+        let before = headphones.simulatedTransmittedFrames.count
+        XCTAssertTrue(headphones.canRefreshDevices)
+        headphones.refreshDevices()
+        acknowledgeAll(headphones)
+        XCTAssertEqual(headphones.simulatedTransmittedFrames.dropFirst(before).map { [$0.type] + $0.payload }, [[0x0E, 0x36, 0x01]])
+        XCTAssertNil(headphones.multipoint.peripheralActionPayload(.disconnect, address: "02:00:00:00:00:A1"))
+        XCTAssertNil(headphones.multipoint.sourceSwitchPayload(address: "02:00:00:00:00:A1"))
+    }
+
+    func testWHXM4WithoutFunction38NeverAsksForOrShowsADeviceList() throws {
+        let (_, headphones) = try preparedXM4(multipointEnabled: false)
+        defer { headphones.simulateControlLoss() }
+        XCTAssertFalse(headphones.multipoint.supportsLegacyInventory)
+        XCTAssertFalse(headphones.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x36 })
+        headphones.simulateProtocolMessage(legacyList, type: 0x0E)
+        XCTAssertTrue(headphones.multipoint.devices.isEmpty)
+        let before = headphones.simulatedTransmittedFrames.count
+        headphones.refreshDevices()
+        XCTAssertEqual(headphones.simulatedTransmittedFrames.count, before)
+        XCTAssertFalse(MultipointControls.isVisible(for: headphones.multipoint))
+    }
+
+    private var legacyList: [UInt8] {
+        let laptop = Array("Test Laptop".utf8), phone = Array("Test Phone".utf8)
+        return [0x37, 0x01, 0x02] + Array("02:00:00:00:00:A1".utf8) + [1, UInt8(laptop.count)] + laptop
+            + Array("02:00:00:00:00:A2".utf8) + [0, UInt8(phone.count)] + phone + [1]
+    }
+
+    private func preparedXM4(multipointEnabled: Bool, extraFunctions: [UInt8] = [], additionalAddress: String? = nil) throws -> (SonyDeviceCoordinator, SonyHeadphonesController) {
+        let coordinator = SonyDeviceCoordinator(fallbackController: SonyHeadphonesController(startAutomatically: false, simulated: true)) { device in
+            SonyHeadphonesController(startAutomatically: false, simulated: true, pinnedAddress: device.address, advertisedName: device.name)
+        }
+        let addresses = [address] + [additionalAddress].compactMap { $0 }
+        coordinator.reconcileConnectedDevices(try addresses.map {
+            try XCTUnwrap(SonyConnectedDevice(address: $0, name: "WH-1000XM4", model: .whXM4))
+        })
+        for address in addresses {
+            let headphones = try XCTUnwrap(coordinator.controller(for: address))
+            headphones.simulateDeviceConnection(named: "WH-1000XM4", controlBusy: true, simulatedAddress: address)
+            headphones.simulateProtocolMessage([0x01, 0, 0x70, 0], beginConnection: true)
+            acknowledgeAll(headphones)
+            let name = Array("WH-1000XM4".utf8)
+            headphones.simulateProtocolMessage([0x05, 1, UInt8(name.count)] + name)
+            headphones.simulateProtocolMessage([0x05, 3, 0x30, 0x01])
+            headphones.simulateProtocolMessage([0x07, 0, UInt8(3 + extraFunctions.count), 0x11, 0xA1, 0xD2] + extraFunctions)
+            acknowledgeAll(headphones)
+            headphones.simulateProtocolMessage([0x05, 2, 5] + Array("3.0.1".utf8))
+            XCTAssertTrue(headphones.isReady)
+            XCTAssertEqual(headphones.deviceModel, .whXM4)
+            acknowledgeAll(headphones)
+            headphones.simulateProtocolMessage(multipointIdentity)
+            acknowledgeAll(headphones)
+            headphones.simulateProtocolMessage([0xD3, 0xD2, 0x00])
+            headphones.simulateProtocolMessage([0xD7, 0xD2, 0x01, multipointEnabled ? 0x01 : 0x00])
+            acknowledgeAll(headphones)
+        }
+        return (coordinator, try XCTUnwrap(coordinator.controller(for: address)))
     }
 
     private func acknowledgeAll(_ controller: SonyHeadphonesController) {
