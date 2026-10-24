@@ -60,6 +60,10 @@ final class Device: ObservableObject {
     var playback: Playback
     var earbudFinder: EarbudFinder?
     var supportsConnectionMode = true
+    var ldacRequiresMultipointOff = false
+    var supportedConnectionModes: [SonyConnectionMode]? = [.soundQuality, .stableConnection, .lowLatency]
+    var connectionModeAvailable: Bool? = true
+    var connectionModeChecks = 0
     let address = "02:00:00:00:00:01"
     @Published var connectionMode: SonyConnectionMode? = .stableConnection
     @Published var connectionTransition: ConnectionTransition?
@@ -75,9 +79,19 @@ final class Device: ObservableObject {
     }
     func setConnectionMode(_ mode: SonyConnectionMode) {
         guard mode != connectionMode, connectionTransition?.isFinished != false else { return }
+        if let reason = connectionModeUnavailableReason(mode) {
+            connectionModeError = reason
+            return
+        }
         requests.append(mode)
         lastConnectionModeChangeID = UUID()
         connectionTransition = ConnectionTransition(phase: .awaitingResponse)
+    }
+    func connectionModeUnavailableReason(_ mode: SonyConnectionMode) -> String? {
+        connectionModeChecks += 1
+        guard supportedConnectionModes?.contains(mode) == true else { return "This mode is unavailable." }
+        guard connectionMode != nil, connectionModeAvailable == true else { return "Connection mode is unavailable." }
+        return nil
     }
     func confirm(_ mode: SonyConnectionMode) {
         connectionMode = mode
@@ -151,6 +165,10 @@ final class Controller: ObservableObject {
     var audioRoute: MacAudioRouteObserver? = MacAudioRouteObserver()
     var resumeOutputUID: String? = "fixture-headphones"
     var suspensionRequested = false
+    var multipointConflictAddress: String?
+    var multipointConflictConfiguration: LDACConfiguration?
+    var multipointShutdownAddress: String?
+    var multipointShutdownTask: Task<Void, Never>?
     var pendingConnectionModes: [String: UUID] = [:]
     var deferredConnectionModes: [String: UUID] = [:]
     var preferenceRestoreTasks: [String: Task<Void, Never>] = [:]
@@ -215,9 +233,9 @@ final class Controller: ObservableObject {
         state = .requested
         isSessionRunning = true
     }
-    func prepareQuality(_ address: String) async throws {
+    func prepareQuality(_ address: String, timeout: TimeInterval = 15) async throws {
         headphones = devices!.controller(for: address)!
-        try await prepareConnectionMode(headphones!, address: address, identifier: sessionID)
+        try await prepareConnectionMode(headphones!, address: address, identifier: sessionID, timeout: timeout)
     }
     func restoreQuality() async -> String? { await restoreConnectionMode() }
     func awaitChange(_ address: String, timeout: Duration) async throws -> Bool {
@@ -303,7 +321,7 @@ enum LDACControllerCleanupCheck {
 
         let manual = Controller()
         LDACDriverInstaller.installations = 0
-        manual.installDriver(forAddress: address)
+        manual.installDriver()
         manual.updateInstalledDriverIfNeeded()
         await waitUntil { !manual.isOpeningDriverInstaller }
         manual.updateInstalledDriverIfNeeded()
@@ -320,7 +338,7 @@ enum LDACControllerCleanupCheck {
         failedUpdate.updateInstalledDriverIfNeeded()
         precondition(LDACDriverInstaller.installations == 1, "Failed automatic update retried itself")
         LDACDriverInstaller.error = nil
-        failedUpdate.installDriver(forAddress: address)
+        failedUpdate.installDriver()
         precondition(failedUpdate.isOpeningDriverInstaller && failedUpdate.driverInstallationError == nil)
         await waitUntil { !failedUpdate.isOpeningDriverInstaller }
         precondition(LDACDriverInstaller.installations == 2, "Automatic failure prevented a manual retry")
@@ -350,13 +368,33 @@ enum LDACControllerCleanupCheck {
             precondition(LDACDriverInstaller.inspections == 0, "Enable inspected driver for \(name)")
             precondition(admission.starts.isEmpty && admission.requestedAddress == nil && admission.targetAddress == nil)
             precondition(admission.requestedConfiguration == LDACConfiguration() && admission.state == .off)
-            admission.installDriver(forAddress: address)
-            precondition(LDACDriverInstaller.inspections == 0, "Installer inspected driver for \(name)")
-            precondition(!admission.isOpeningDriverInstaller && LDACDriverInstaller.installations == 0)
+            admission.installDriver()
+            precondition(LDACDriverInstaller.inspections == 1 && admission.isOpeningDriverInstaller,
+                         "Manual installation required ready controls for \(name)")
+            await waitUntil { !admission.isOpeningDriverInstaller }
+            precondition(LDACDriverInstaller.installations == 1 && admission.starts.isEmpty)
         }
         let missingCoordinator = Controller()
         missingCoordinator.devices = nil
         precondition(missingCoordinator.deviceUnavailableReason(forAddress: address) != nil)
+        for state in [LDACDriverInstaller.State.missing, .outdated, .current, .restartRequired, .unavailable("Untrusted driver")] {
+            LDACDriverInstaller.state = state
+            LDACDriverInstaller.installations = 0
+            missingCoordinator.installDriver()
+            await waitUntil { !missingCoordinator.isOpeningDriverInstaller }
+            precondition(LDACDriverInstaller.installations == (state == .missing || state == .outdated ? 1 : 0),
+                         "Manual installation ignored driver state \(state)")
+        }
+        for running in [false, true] {
+            let busy = Controller()
+            busy.isSessionRunning = running
+            busy.isOpeningDriverInstaller = !running
+            LDACDriverInstaller.inspections = 0
+            LDACDriverInstaller.installations = 0
+            busy.installDriver()
+            precondition(LDACDriverInstaller.inspections == 0 && LDACDriverInstaller.installations == 0,
+                         "Manual installation admitted a busy controller")
+        }
         let idleFinder = Controller()
         idleFinder.devices?.controllers[address]?.earbudFinder = EarbudFinder(isBusy: false, mayBeRinging: false)
         precondition(idleFinder.deviceUnavailableReason(forAddress: address) == nil && idleFinder.canEnable(forAddress: address),
@@ -457,6 +495,86 @@ enum LDACControllerCleanupCheck {
             try! await unchanged.prepareQuality(address)
             precondition(unchangedHeadphones.requests.isEmpty && unchanged.connectionModeRestoreID == nil)
         }
+
+        for missing in ["mode", "capability", "availability"] {
+            let discovering = Controller(output: Output())
+            let device = discovering.devices!.controller(for: address)!
+            if missing == "mode" { device.connectionMode = nil }
+            if missing == "capability" { device.supportedConnectionModes = nil }
+            if missing == "availability" { device.connectionModeAvailable = nil }
+            precondition(discovering.deviceUnavailableReason(forAddress: address) == nil)
+            let preparation = Task { try await discovering.prepareQuality(address) }
+            await waitUntil { device.connectionModeChecks > 0 }
+            precondition(device.requests.isEmpty && discovering.connectionModeRestoreID == nil)
+            device.connectionMode = .stableConnection
+            device.supportedConnectionModes = [.soundQuality, .stableConnection]
+            device.connectionModeAvailable = true
+            let confirmation = Task {
+                for _ in 0..<200 where device.requests.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+                precondition(device.requests == [.soundQuality])
+                device.confirm(.soundQuality)
+            }
+            try! await preparation.value
+            try! await confirmation.value
+            precondition(discovering.connectionModeConfirmed)
+            precondition(discovering.connectionModeRestoreID == device.lastConnectionModeChangeID)
+        }
+
+        let discoveredQuality = Controller(output: Output())
+        let qualityDevice = discoveredQuality.devices!.controller(for: address)!
+        qualityDevice.connectionMode = nil
+        let qualityDiscovery = Task { try await discoveredQuality.prepareQuality(address) }
+        await waitUntil { qualityDevice.connectionModeChecks > 0 }
+        qualityDevice.connectionMode = .soundQuality
+        try! await qualityDiscovery.value
+        precondition(qualityDevice.requests.isEmpty && discoveredQuality.connectionModeRestoreID == nil)
+
+        let unavailable = Controller(output: Output())
+        let unavailableDevice = unavailable.devices!.controller(for: address)!
+        unavailableDevice.connectionModeAvailable = false
+        do {
+            try await unavailable.prepareQuality(address, timeout: 0.01)
+            preconditionFailure("Unavailable connection controls admitted LDAC")
+        } catch {
+            precondition(error.localizedDescription == "Connection mode is unavailable.")
+        }
+        precondition(unavailableDevice.requests.isEmpty && unavailable.connectionModeRestoreID == nil)
+
+        let discoveringOutput = Output()
+        let cancelledDiscovery = Controller(output: discoveringOutput)
+        let discoveringDevice = cancelledDiscovery.devices!.controller(for: address)!
+        discoveringDevice.connectionMode = nil
+        cancelledDiscovery.startTask = Task {
+            do { try await cancelledDiscovery.prepareQuality(address) }
+            catch {
+                precondition(error is CancellationError)
+                cancelledDiscovery.startTask = nil
+                cancelledDiscovery.sessionFinished()
+            }
+        }
+        await waitUntil { discoveringDevice.connectionModeChecks > 0 }
+        cancelledDiscovery.stop()
+        await waitUntil { discoveringOutput.continuation != nil }
+        discoveringOutput.continuation?.resume(returning: nil)
+        await waitUntil { !cancelledDiscovery.isSessionRunning }
+        precondition(discoveringDevice.requests.isEmpty && cancelledDiscovery.state == .off)
+        precondition(cancelledDiscovery.pendingConnectionModes.isEmpty && cancelledDiscovery.starts.isEmpty)
+
+        let replacedDiscovery = Controller(output: Output())
+        let replacedDevice = replacedDiscovery.devices!.controller(for: address)!
+        replacedDevice.connectionMode = nil
+        let replacedPreparation = Task { try await replacedDiscovery.prepareQuality(address) }
+        await waitUntil { replacedDevice.connectionModeChecks > 0 }
+        replacedDiscovery.devices!.controllers[address] = Device()
+        replacedDevice.connectionMode = .stableConnection
+        do {
+            try await replacedPreparation.value
+            preconditionFailure("Replaced headphone controller changed connection mode")
+        } catch {
+            precondition(error.localizedDescription == "The headphone connection changed. Try LDAC again.")
+        }
+        precondition(replacedDevice.requests.isEmpty && replacedDiscovery.connectionModeRestoreID == nil)
+        print("PASS connection discovery: delayed mode/capability/availability wait before setting; unavailable controls time out; cancellation cleans up; replacement never writes")
 
         let qualityOutput = Output()
         let quality = Controller(output: qualityOutput)
@@ -710,10 +828,10 @@ enum LDACControllerCleanupCheck {
         print("PASS actual LDAC admission, connection preference and cleanup methods: confirmations, readiness, output-before-preference restoration, cancelled startup, user supersession, bounded retry without setter replay, sleep/wake, quit deadline and existing lifecycle checks; fake peers only")
         print("PASS actual disconnect policy: idle waiting, one resume, source/output/selection/driver gates, deferred Stable Connection, manual Off, sleep/wake, cleanup failure and nested-error deduplication")
         print("PASS actual driver update policy: existing outdated driver only, independent of headphones, once per launch, busy/manual deduplication, surfaced errors and manual retry")
-        print("PASS actual finder admission: active finding and unconfirmed Stop block LDAC and manual installation; absent or idle finder allows admission")
+        print("PASS actual finder admission: active finding and unconfirmed Stop block LDAC; manual driver installation is independent of headphones and preserves busy/driver-state checks")
     }
 }
-'''.replace("__METHODS__", "\n".join(method(name) for name in ["needsStopBeforeTermination", "canResumeRecovery", "deviceUnavailableReason", "canEnable", "refreshDriverState", "updateInstalledDriverIfNeeded", "installDriver", "openDriverInstaller", "setEnabled", "stop", "suspend", "resumeIfReady", "reconcileConnectionPreferences", "forgetConnectionPreference", "scheduleConnectionPreferenceRestoration", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))
+'''.replace("__METHODS__", "\n".join(method(name) for name in ["needsStopBeforeTermination", "canResumeRecovery", "deviceUnavailableReason", "canEnable", "refreshDriverState", "updateInstalledDriverIfNeeded", "installDriver", "openDriverInstaller", "setEnabled", "cancelMultipointRequest", "stop", "suspend", "resumeIfReady", "reconcileConnectionPreferences", "forgetConnectionPreference", "scheduleConnectionPreferenceRestoration", "stopSession", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode", "restoreConnectionPreference", "finish", "completeStop"]))
 
 with tempfile.TemporaryDirectory(prefix="acouplet-ldac-controller-cleanup-") as directory:
     directory = pathlib.Path(directory)
