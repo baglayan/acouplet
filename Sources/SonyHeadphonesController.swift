@@ -416,7 +416,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     #if !ACOUPLET_PUBLIC_APIS_ONLY
     var hasCurrentMusicVolumeControl: Bool {
         playbackControlContextIsAvailable && playback.canControlMusicVolume
-            && [playback.capabilityQueryPayload, playback.statusQueryPayload, playback.musicVolumeQueryPayload]
+            && (playbackFreshQueries.contains(playback.capabilityQueryPayload) || playback.usesWHXM3VolumeRangeFallback)
+            && [playback.statusQueryPayload, playback.musicVolumeQueryPayload]
                 .allSatisfy { playbackFreshQueries.contains($0) }
     }
     var hasFreshMusicVolumeReadback: Bool {
@@ -451,8 +452,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
     private var playbackControlContextIsAvailable: Bool {
         powerOffState == nil && isReady
-            && [playback.capabilityQueryPayload, playback.statusQueryPayload]
-                .allSatisfy { playbackReads[$0]?.timedOut != true }
+            && (playbackReads[playback.capabilityQueryPayload]?.timedOut != true || playback.usesWHXM3VolumeRangeFallback)
+            && playbackReads[playback.statusQueryPayload]?.timedOut != true
             && connectionTransition?.isFinished != false && multipointTransition?.isFinished != false
             && sourceTransition?.isFinished != false && deviceActionTransition?.isFinished != false && !multipoint.inventoryIsStale
     }
@@ -711,6 +712,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             "Voice guidance: \(voiceGuidance.enabled.map { $0 ? "On" : "Off" } ?? "Unknown")",
             "Voice guidance volume: \(voiceGuidance.volume.map(String.init) ?? "Unknown")",
             "Playback state: \(playback.state.map { String(describing: $0) } ?? "Unknown")",
+            "XM3 capability profile: \(whXM3CapabilityFallbacks.isEmpty ? "Not used" : whXM3CapabilityFallbacks.map { $0.map { String(format: "%02X", $0) }.joined(separator: " ") }.sorted().joined(separator: "; "))",
             "Headphone music volume: \(playback.volume.map(String.init) ?? "Unknown")",
             "Headphone music volume range: \(playback.musicVolumeRange.map { "\($0.lowerBound)...\($0.upperBound)" } ?? "Unknown")",
             "Headphone music volume controllable: \(canControlMusicVolume ? "Yes" : "No")",
@@ -842,6 +844,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var transmissionOrdinal: UInt64 = 0
     private var completedTransmissionOrdinal: UInt64 = 0
     private var receivedTransmissionOrdinal: UInt64?
+    private var whXM3CapabilityResponses: Set<[UInt8]> = []
+    private var whXM3CapabilityFallbacks: Set<[UInt8]> = []
     private var commandQueue = SonyCommandQueue() {
         willSet {
             if (commandQueue.pending == nil) != (newValue.pending == nil) {
@@ -2035,6 +2039,50 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         return true
     }
 
+    // Some XM3 sessions ACK capability queries without delivering their replies,
+    // while current status and parameter reads succeed. Use captured static
+    // capabilities only after an unanswered read, never after a malformed or
+    // explicitly unknown response. Source: SonyHeadphonesClient's
+    // tests/WH-1000XM3-4.5.2 (MDR 00004010).
+    @discardableResult
+    private func applyWHXM3CapabilityFallback(_ query: [UInt8]) -> Bool {
+        guard deviceModel == .whXM3, protocolInformation?.generation == .v1,
+              protocolVersion == 0x4010, !whXM3CapabilityResponses.contains(query),
+              !whXM3CapabilityFallbacks.contains(query) else { return false }
+        let applied: Bool
+        if query == playback.capabilityQueryPayload {
+            applied = playback.applyWHXM3VolumeRangeFallback()
+        } else {
+            applied = legacyControls?.applyWHXM3CapabilityFallback(query) == true
+        }
+        guard applied else { return false }
+        whXM3CapabilityFallbacks.insert(query)
+        recordDiagnostic("XM3 captured capability fallback; query=\(query.map { String(format: "%02X", $0) }.joined(separator: " "))")
+        return true
+    }
+
+    private func observeWHXM3CapabilityResponse(_ payload: [UInt8], type: UInt8) {
+        guard type == 0x0C, protocolInformation?.generation == .v1, payload.count >= 2 else { return }
+        let query: [UInt8]
+        switch Array(payload.prefix(2)) {
+        case [0xA1, 1]: query = [0xA0, 1]
+        case [0xE1, 1]: query = [0xE0, 1]
+        case [0xE1, 2]: query = [0xE0, 2]
+        case [0xF1, 4]: query = [0xF0, 4]
+        default: return
+        }
+        whXM3CapabilityResponses.insert(query)
+        guard whXM3CapabilityFallbacks.remove(query) != nil else { return }
+        if query == playback.capabilityQueryPayload {
+            playback.invalidateWHXM3VolumeRangeFallback()
+        } else if query == [0xE0, 2] {
+            legacyControls?.invalidateDSEERead(query)
+        } else {
+            legacyControls?.invalidateSystemRead(query)
+        }
+        recordDiagnostic("XM3 capability profile withdrawn for headphone reply; query=\(query.map { String(format: "%02X", $0) }.joined(separator: " "))")
+    }
+
     private func beginLegacyDSEEReadTimeout(_ query: [UInt8]) {
         let id = UUID()
         let session = controlSession
@@ -2043,6 +2091,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 guard let self, self.controlSession == session, self.legacyDSEEReadTimeouts[query]?.id == id,
                       self.legacyDSEEReadTimeouts[query]?.work != nil else { return }
                 self.legacyDSEEReadTimeouts[query]?.work = nil
+                if self.applyWHXM3CapabilityFallback(query) { return }
                 let obsolete = query[0] == 0xE2 ? self.legacyDSEEAvailabilityReadObsolete
                     : query[0] == 0xE6 && self.legacyDSEERead?.isObsolete == true
                 if !obsolete {
@@ -2173,6 +2222,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
                 self.systemReads[query]?.timeout = nil
                 self.systemReads[query]?.timedOut = true
+                if self.applyWHXM3CapabilityFallback(query) { return }
                 if self.systemReads[query]?.isObsolete == false, self.systemReads[query]?.isRetiredSidetoneRead == false {
                     self.systemFeatures.invalidateRead(query)
                     self.legacyControls?.invalidateSystemRead(query)
@@ -5155,6 +5205,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func resetPlaybackReads() {
+        whXM3CapabilityResponses = []
+        whXM3CapabilityFallbacks = []
         for timeout in playbackReadTimeouts.values { timeout.cancel() }
         playbackReadTimeouts = [:]
         playbackReads = [:]
@@ -5759,6 +5811,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                         self.playbackReads[query]?.timedOut = true
                         self.playbackFreshQueries.remove(query)
                         self.playbackReadTimeouts[query] = nil
+                        if self.applyWHXM3CapabilityFallback(query) { return }
                         self.playbackReadError = String(localized: "Playback information was not received. Reconnect the headphones to try again.")
                         self.verifyConnectionPreferenceIfNeeded()
                     }
@@ -6491,6 +6544,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 playbackReadTimeouts.removeValue(forKey: query)?.cancel()
                 if !playbackReads.values.contains(where: { $0.timedOut }) { playbackReadError = nil }
                 needsReplacement = read.refreshRequested || read.isObsolete || read.sourceGeneration != playbackSourceGeneration
+                    || (query == playback.capabilityQueryPayload && read.timedOut)
                 guard read.sourceGeneration == playbackSourceGeneration, !read.isObsolete else { return true }
                 isFreshResponse = !read.timedOut && !read.refreshRequested
                 if isFreshResponse { playbackFreshQueries.insert(query) }
@@ -6531,6 +6585,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         receivedTransmissionOrdinal = transmissionOrdinal
         defer { receivedTransmissionOrdinal = previousOrdinal }
         if stage == .unsupported { return }
+        observeWHXM3CapabilityResponse(payload, type: type)
         if type == 0x0E, payload.prefix(2) == [0x37, 0x02], let read = inventoryRead,
            read.transmitted, !receivedAfter(read.transmissionOrdinal) { return }
         if type == 0x0C, payload.prefix(2) == [0xE7, 0x05], let read = modeReadbacks.first,

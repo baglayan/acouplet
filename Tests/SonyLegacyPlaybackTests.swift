@@ -160,3 +160,119 @@ final class SonyLegacyPlaybackTests: XCTestCase {
         XCTAssertNil(playback.volumePayload(0))
     }
 }
+
+@MainActor
+final class SonyWHXM3CapabilityFallbackTests: XCTestCase {
+    private func makeController(model: String = "WH-1000XM3", version: UInt8 = 0x40,
+                                volume: UInt8? = 16) -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: model)
+        controller.simulateProtocolMessage([0x01, 0, version, 0x10], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        controller.simulateProtocolMessage([0x07, 0, 4, 0xA1, 0xE1, 0xE2, 0xF4])
+        acknowledgeSimulatedCommands(controller)
+        for payload: [UInt8] in [[0xE3, 2, 0], [0xE7, 2, 0, 1], [0xE3, 1, 0],
+                                [0xE7, 1, 0, 0], [0xF3, 4, 0], [0xF7, 4, 1, 0, 0], [0xA3, 1, 0, 0]] {
+            controller.simulateProtocolMessage(payload)
+        }
+        if let volume { controller.simulateProtocolMessage([0xA7, 1, 0x20, volume]) }
+        return controller
+    }
+
+    private func expireCapabilities(_ controller: SonyHeadphonesController) async {
+        controller.simulateLegacyDSEEReadTimeout([0xE0, 2])
+        controller.simulateSystemReadTimeout([0xE0, 1])
+        controller.simulateSystemReadTimeout([0xF0, 4])
+        controller.simulatePlaybackReadTimeout([0xA0, 1])
+        // The simulated expiry callbacks use MainActor tasks, just like real timers.
+        for _ in 0..<100 { await Task.yield() }
+    }
+
+    func testXM3ProfileRestoresMissingCapabilitiesWithoutInventingLiveReads() async {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        XCTAssertFalse(controller.canSetDSEE)
+        XCTAssertFalse(controller.canSetAutomaticPowerOff)
+        XCTAssertNil(controller.playback.volume)
+        XCTAssertFalse(controller.hasCurrentMusicVolumeControl)
+        await expireCapabilities(controller)
+        XCTAssertTrue(controller.canSetDSEE)
+        XCTAssertEqual(controller.dseeType, .hx)
+        XCTAssertEqual(controller.supportedConnectionModes, [.soundQuality, .stableConnection])
+        XCTAssertTrue(controller.canSetAutomaticPowerOff)
+        XCTAssertEqual(controller.automaticPowerOff?.knownOptions.map(\.rawValue), [0, 1, 2, 3, 0x11])
+        XCTAssertEqual(controller.playback.volume, 16)
+        XCTAssertEqual(controller.playback.musicVolumeRange, 0...30)
+        XCTAssertFalse(controller.playback.hasReceivedCapabilities)
+        XCTAssertTrue(controller.playback.usesWHXM3VolumeRangeFallback)
+        XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
+        XCTAssertNil(controller.playbackReadError)
+        XCTAssertTrue(controller.diagnosticReport.contains("XM3 captured capability fallback; query=A0 01"))
+    }
+
+    func testXM3ProfileDoesNotApplyToOtherModelsOrProtocolVersions() async {
+        for (model, version) in [("WH-1000XM4", UInt8(0x40)), ("WH-1000XM3", UInt8(0x41))] {
+            let controller = makeController(model: model, version: version)
+            defer { controller.simulateControlLoss() }
+            await expireCapabilities(controller)
+            XCTAssertFalse(controller.playback.usesWHXM3VolumeRangeFallback)
+            XCTAssertFalse(controller.canSetDSEE)
+            XCTAssertFalse(controller.hasCurrentMusicVolumeControl)
+        }
+    }
+
+    func testXM3ProfileStillRequiresFreshLiveVolumeStatusAndValidRange() async {
+        for volume: UInt8? in [nil, 31] {
+            let controller = makeController(volume: volume)
+            defer { controller.simulateControlLoss() }
+            await expireCapabilities(controller)
+            XCTAssertTrue(controller.playback.usesWHXM3VolumeRangeFallback)
+            XCTAssertNil(controller.playback.volume)
+            XCTAssertFalse(controller.hasFreshMusicVolumeReadback)
+        }
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        await expireCapabilities(controller)
+        XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
+        controller.refreshMusicVolume()
+        acknowledgeSimulatedCommands(controller)
+        controller.simulatePlaybackReadTimeout([0xA2, 1])
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertFalse(controller.hasCurrentMusicVolumeControl)
+        XCTAssertFalse(controller.hasFreshMusicVolumeReadback)
+    }
+
+    func testXM3ProfileNeverOverridesMalformedOrExplicitlyUnknownCapabilities() async {
+        for reply: [UInt8] in [[0xA1, 1], [0xA1, 1, 0, 1, 1]] {
+            let controller = makeController()
+            defer { controller.simulateControlLoss() }
+            controller.simulateProtocolMessage(reply)
+            await expireCapabilities(controller)
+            XCTAssertFalse(controller.playback.usesWHXM3VolumeRangeFallback)
+            XCTAssertNil(controller.playback.volume)
+            XCTAssertFalse(controller.hasFreshMusicVolumeReadback)
+        }
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        controller.simulateProtocolMessage([0xE1, 2, 0xFF, 0])
+        controller.simulateProtocolMessage([0xE1, 1, 0xFF])
+        controller.simulateProtocolMessage([0xF1, 4, 0])
+        await expireCapabilities(controller)
+        XCTAssertFalse(controller.canSetDSEE)
+        XCTAssertNil(controller.supportedConnectionModes)
+        XCTAssertFalse(controller.canSetAutomaticPowerOff)
+    }
+
+    func testXM3LateCapabilityWithdrawsProfileAndDisconnectClearsIt() async {
+        let controller = makeController()
+        await expireCapabilities(controller)
+        XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
+        controller.simulateProtocolMessage([0xA1, 1, 0, 1, 1])
+        XCTAssertFalse(controller.playback.usesWHXM3VolumeRangeFallback)
+        XCTAssertTrue(controller.playback.hasReceivedCapabilities)
+        XCTAssertNil(controller.playback.musicVolumeRange)
+        XCTAssertFalse(controller.hasFreshMusicVolumeReadback)
+        controller.simulateControlLoss()
+        XCTAssertTrue(controller.diagnosticReport.contains("XM3 capability profile: Not used"))
+    }
+}
