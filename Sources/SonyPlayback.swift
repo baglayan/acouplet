@@ -37,6 +37,7 @@ struct SonyPlayback: Equatable, Sendable {
     let generation: SonyProtocolInfo.Generation
     let isSupported: Bool
     private(set) var hasReceivedCapabilities = false
+    private(set) var usesWHXM3VolumeRangeFallback = false
     private(set) var available: Bool?
     private(set) var state: SonyPlaybackState?
     private(set) var musicCallStatus: UInt8?
@@ -52,6 +53,23 @@ struct SonyPlayback: Equatable, Sendable {
     }
 
     var capabilityQueryPayload: [UInt8] { [0xA0, 0x01] }
+
+    // Captured WH-1000XM3 / MDR 0x4010 capability: A1 01 1F 01 01.
+    // The controller gates this fallback by exact model, protocol and read timeout.
+    // Current availability and volume still have to come from the headphones.
+    mutating func applyWHXM3VolumeRangeFallback() -> Bool {
+        guard generation == .v1, isSupported, !hasReceivedCapabilities,
+              !usesWHXM3VolumeRangeFallback else { return false }
+        musicVolumeRange = 0...30
+        usesWHXM3VolumeRangeFallback = true
+        return true
+    }
+
+    mutating func invalidateWHXM3VolumeRangeFallback() {
+        guard usesWHXM3VolumeRangeFallback else { return }
+        usesWHXM3VolumeRangeFallback = false
+        musicVolumeRange = nil
+    }
     var statusQueryPayload: [UInt8] { [0xA2, 0x01] }
     var musicVolumeQueryPayload: [UInt8] { generation == .v1 ? [0xA6, 0x01, 0x20] : [0xA6, 0x20] }
 
@@ -120,6 +138,7 @@ struct SonyPlayback: Equatable, Sendable {
             case (0xA1, 0x01):
                 guard payload.count == 5 else { return false }
                 hasReceivedCapabilities = true
+                usesWHXM3VolumeRangeFallback = false
                 musicVolumeRange = payload[2] > 0 ? 0...(Int(payload[2]) - 1) : nil
             case (0xA3, 0x01), (0xA5, 0x01):
                 guard payload.count == 4 else { return false }

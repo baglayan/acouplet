@@ -290,6 +290,23 @@ struct SonyLegacyControls: Equatable, Sendable {
     private(set) var wearingControl: SonyLegacyWearingControl
     private(set) var automaticPowerOff: SonyAutomaticPowerOffState?
 
+    // Numeric capabilities captured from WH-1000XM3 firmware 4.5.2, protocol 0x4010.
+    // Only fills a missing capability; no status or parameter is synthesized.
+    mutating func applyWHXM3CapabilityFallback(_ query: [UInt8]) -> Bool {
+        switch query {
+        case [0xE0, 0x02]:
+            guard dsee.isSupported, dsee.rawType == nil else { return false }
+            return dsee.update([0xE1, 0x02, 0x00, 0x00])
+        case [0xE0, 0x01]:
+            guard connectionQuality.isSupported, connectionQuality.settingType == nil else { return false }
+            return connectionQuality.update([0xE1, 0x01, 0x00])
+        case [0xF0, 0x04]:
+            guard automaticPowerOff?.options == nil else { return false }
+            return automaticPowerOff?.update([0xF1, 0x04, 0x05, 0, 1, 2, 3, 0x11]) == true
+        default: return false
+        }
+    }
+
     mutating func invalidateSystemRead(_ query: [UInt8]) {
         connectionQuality.invalidateRead(query)
         wearingControl.invalidateRead(query)
