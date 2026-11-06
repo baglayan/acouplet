@@ -1172,9 +1172,16 @@ struct DeviceIcon: View {
     }
 
     static func fallbackEarbudImage(side: EarbudSide) -> NSImage {
-        let side = side == .left ? "left" : "right"
-        return NSImage(systemSymbolName: "earbuds.stemless." + side, accessibilityDescription: nil)
-            ?? NSImage(systemSymbolName: "earbud." + side, accessibilityDescription: nil)!
+        if let image = NSImage(systemSymbolName: "earbuds.stemless." + (side == .left ? "left" : "right"), accessibilityDescription: nil) {
+            return image
+        }
+        let image = NSImage(systemSymbolName: "earbuds", accessibilityDescription: nil)!
+        let size = NSSize(width: image.size.width / 2, height: image.size.height)
+        return NSImage(size: size, flipped: false) { rect in
+            image.draw(in: rect, from: NSRect(origin: NSPoint(x: side == .left ? 0 : size.width, y: 0), size: size),
+                       operation: .sourceOver, fraction: 1)
+            return true
+        }
     }
 
     static func caseImage(model: SonyDeviceModel) -> NSImage {
