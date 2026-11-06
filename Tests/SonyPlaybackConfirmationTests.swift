@@ -8,6 +8,11 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
             let controller = makeController()
             if isCall { receive([0xA5, 1, 0, 2, 1], on: controller) }
             refreshPlayback(on: controller)
+            completePlaybackReads(on: controller, includeVolume: false, musicCallStatus: isCall ? 1 : 0)
+            if isCall {
+                receive([0xA7, 0x20, 12], on: controller)
+                acknowledgeSimulatedCommands(controller)
+            }
             let type: UInt8 = isCall ? 0x21 : 0x20
             let setting: SonyHeadphonesController.Setting = isCall ? .callVolume : .playbackVolume
             let query: [UInt8] = [0xA6, type]
@@ -87,6 +92,7 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
         for isVolume in [false, true] {
             let controller = makeController()
             refreshPlayback(on: controller)
+            if isVolume { completePlaybackReads(on: controller, includeVolume: false) }
             let query: [UInt8] = isVolume ? [0xA6, 0x20] : [0xA2, 1]
             let previousReads = controller.simulatedTransmittedFrames.filter { $0.payload == query }.count
             receive(isVolume ? [0xA9, 0x20, 20] : [0xA5, 1, 0, 2, 1], on: controller)
@@ -105,6 +111,7 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
     func testReplacementAfterWriteTimeoutResolvesOnlyTransmittedUnconfirmedWrite() async throws {
         let controller = makeController()
         refreshPlayback(on: controller)
+        completePlaybackReads(on: controller, includeVolume: false)
         controller.setPlaybackVolume(10)
         acknowledgeSimulatedCommands(controller)
         try await Task.sleep(for: .milliseconds(3_100))
@@ -120,20 +127,18 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
     }
 
     #if !ACOUPLET_PUBLIC_APIS_ONLY
-    func testReplyStartingBeforeQueryTransmissionCannotBorrowItsRead() {
+    func testReplyStartingBeforeQueryTransmissionCannotBorrowItsRead() throws {
         let encoded = SonyFrameCodec.encode(type: 0x0C, sequence: 1, payload: [0xA7, 0x20, 9])
         for split in 1..<encoded.count {
             let controller = makeController()
             defer { controller.simulateControlLoss() }
             let readback = controller.musicVolumeReadbackID
+            XCTAssertTrue(controller.refreshMusicVolume())
+            receive([0xA3, 1, 0, 2, 0], on: controller)
+            let status = try XCTUnwrap(controller.simulatedPendingFrame)
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xA9, 0x20, 12]))
             controller.defersSimulatedWrites = true
-            controller.refresh()
-            for _ in 0..<30 {
-                guard let frame = controller.simulatedPendingFrame, frame.payload != [0xA6, 0x20] else { break }
-                controller.completeSimulatedWrite()
-                controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
-            }
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - status.sequence, payload: []))
             XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xA6, 0x20])
             controller.simulateProtocolData(encoded.prefix(split))
             controller.completeSimulatedWrite()
@@ -144,22 +149,19 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
             controller.defersSimulatedWrites = false
             acknowledgeSimulatedCommands(controller)
             receive([0xA7, 0x20, 10], on: controller)
-            receive([0xA3, 1, 0, 2, 0], on: controller)
             XCTAssertNotEqual(controller.musicVolumeReadbackID, readback)
             XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
         }
     }
 
-    func testReplyReceivedBeforeQueryTransmissionCannotBorrowItsRead() {
+    func testReplyReceivedBeforeQueryTransmissionCannotBorrowItsRead() throws {
         let controller = makeController()
         let readback = controller.musicVolumeReadbackID
+        XCTAssertTrue(controller.refreshMusicVolume())
+        receive([0xA3, 1, 0, 2, 0], on: controller)
+        let status = try XCTUnwrap(controller.simulatedPendingFrame)
         controller.defersSimulatedWrites = true
-        controller.refresh()
-        for _ in 0..<30 {
-            guard let frame = controller.simulatedPendingFrame, frame.payload != [0xA6, 0x20] else { break }
-            controller.completeSimulatedWrite()
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
-        }
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - status.sequence, payload: []))
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xA6, 0x20])
         receive([0xA7, 0x20, 9], on: controller)
         controller.completeSimulatedWrite()
@@ -167,8 +169,8 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
         XCTAssertEqual(controller.musicVolumeReadbackID, readback)
         XCTAssertFalse(controller.hasFreshMusicVolumeReadback)
         controller.defersSimulatedWrites = false
+        acknowledgeSimulatedCommands(controller)
         receive([0xA7, 0x20, 10], on: controller)
-        receive([0xA3, 1, 0, 2, 0], on: controller)
         XCTAssertNotEqual(controller.musicVolumeReadbackID, readback)
         XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
         controller.simulateControlLoss()
@@ -178,16 +180,17 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
         let controller = makeController()
         let readback = controller.musicVolumeReadbackID
         refreshPlayback(on: controller)
-        let previousReads = controller.simulatedTransmittedFrames.filter { $0.payload == [0xA6, 0x20] }.count
+        let previousReads = controller.simulatedTransmittedFrames.filter { $0.payload == [0xA2, 1] }.count
         for _ in 0..<3 { refreshPlayback(on: controller) }
-        completePlaybackReads(on: controller)
+        receive([0xA3, 1, 0, 2, 0], on: controller)
         XCTAssertEqual(controller.musicVolumeReadbackID, readback)
         XCTAssertFalse(controller.hasFreshMusicVolumeReadback)
         acknowledgeSimulatedCommands(controller)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xA6, 0x20] }.count, previousReads + 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xA2, 1] }.count, previousReads + 1)
         completePlaybackReads(on: controller)
         XCTAssertNotEqual(controller.musicVolumeReadbackID, readback)
         XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xA2, 1] }.count, previousReads + 1)
         controller.simulateControlLoss()
     }
 
@@ -221,12 +224,16 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
         acknowledgeSimulatedCommands(controller)
         receive([0x67, 0x17, 1, 1, 0, 0, 10], on: controller)
         acknowledgeSimulatedCommands(controller)
-        completePlaybackReads(on: controller, includeVolume: false)
+        XCTAssertFalse(controller.refreshMusicVolume())
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xA6, 0x20] }.count, previousReads)
         receive([0xA7, 0x20, 9], on: controller)
         XCTAssertEqual(controller.playback.volume, 9)
         XCTAssertNil(controller.playbackReadError)
         XCTAssertEqual(controller.musicVolumeReadbackID, readback)
         XCTAssertFalse(controller.hasFreshMusicVolumeReadback)
+        XCTAssertTrue(controller.refreshMusicVolume())
+        acknowledgeSimulatedCommands(controller)
+        receive([0xA3, 1, 0, 2, 0], on: controller)
         acknowledgeSimulatedCommands(controller)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0xA6, 0x20] }.count, previousReads + 1)
         receive([0xA7, 0x20, 10], on: controller)
@@ -250,6 +257,7 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
         receive([0x05, 2, 5] + Array("1.0.0".utf8), on: controller)
         completePlaybackReads(on: controller, includeCapabilities: true)
         XCTAssertTrue(controller.isReady)
+        XCTAssertNil(controller.simulatedPendingFrame)
         return controller
     }
 
@@ -265,12 +273,20 @@ final class SonyPlaybackConfirmationTests: XCTestCase {
     }
 
     private func completePlaybackReads(on controller: SonyHeadphonesController, includeVolume: Bool = true,
-                                       includeCapabilities: Bool = false) {
-        if includeCapabilities { receive([0xA1, 1, 31, 16], on: controller) }
-        for payload: [UInt8] in [[0xA3, 1, 0, 2, 0],
-                                [0xA7, 1, 1, 0, 1, 0, 1, 0, 1, 0], [0xA7, 0x21, 7]] {
-            receive(payload, on: controller)
+                                       includeCapabilities: Bool = false, musicCallStatus: UInt8 = 0) {
+        if includeCapabilities {
+            receive([0xA1, 1, 31, 16], on: controller)
+            acknowledgeSimulatedCommands(controller)
         }
-        if includeVolume { receive([0xA7, 0x20, 12], on: controller) }
+        for payload: [UInt8] in [[0xA3, 1, 0, 2, musicCallStatus], [0xA7, 1, 1, 0, 1, 0, 1, 0, 1, 0]] {
+            receive(payload, on: controller)
+            acknowledgeSimulatedCommands(controller)
+        }
+        if includeVolume {
+            for payload: [UInt8] in [[0xA7, 0x20, 12], [0xA7, 0x21, 7]] {
+                receive(payload, on: controller)
+                acknowledgeSimulatedCommands(controller)
+            }
+        }
     }
 }

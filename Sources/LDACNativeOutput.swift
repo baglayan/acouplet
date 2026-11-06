@@ -33,6 +33,10 @@ struct LDACNativeVolume: Equatable, Codable, Sendable {
     }
 }
 
+struct LDACOutputDeselectedError: LocalizedError {
+    var errorDescription: String? { String(localized: "The Mac audio output changed. LDAC stopped.") }
+}
+
 struct LDACRouteRecovery: Codable, Sendable {
     let address: String
     let model: String
@@ -275,6 +279,7 @@ final class LDACNativeOutput {
         try Self.validatePriority(Self.priorityState(device, address: address))
         return LDACPriorityControl(request: { enabled, disconnected in
             var value: [String: Any] = ["address": address as CFString, "enabled": enabled ? kCFBooleanTrue! : kCFBooleanFalse!]
+            if enabled { value["ifAvailable"] = kCFBooleanTrue! }
             if disconnected { value["disconnected"] = kCFBooleanTrue! }
             try Self.write(device, selector: Self.prioritySelector, value: value as CFDictionary)
         }, state: {
@@ -456,7 +461,7 @@ final class LDACNativeOutput {
         if isSelected {
             for selector in handoffSelectors {
                 let current: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
-                guard current == device else { throw OutputError(String(localized: "The Mac audio output changed. LDAC stopped.")) }
+                guard current == device else { throw LDACOutputDeselectedError() }
             }
         }
     }
@@ -656,14 +661,26 @@ final class LDACNativeOutput {
             }
             error = reportedError
         }
-        var prioritySent: Bool?
-        if let reportedSent = state["prioritySent"] {
-            guard CFGetTypeID(reportedSent as CFTypeRef) == CFBooleanGetTypeID(), let reportedSent = reportedSent as? Bool else {
-                throw OutputError("The Acouplet LDAC Output driver returned an invalid Bluetooth priority mutation state.", userFacing: String(localized: "The LDAC driver returned an unexpected response. Try again."))
+        var flags: [String: Bool] = [:]
+        for key in ["prioritySent", "targetPublicationSeen", "targetPublicationWithdrawn"] {
+            if let reported = state[key] {
+                guard CFGetTypeID(reported as CFTypeRef) == CFBooleanGetTypeID(), let reported = reported as? Bool else {
+                    throw OutputError("The Acouplet LDAC Output driver returned an invalid Bluetooth priority flag.", userFacing: String(localized: "The LDAC driver returned an unexpected response. Try again."))
+                }
+                flags[key] = reported
             }
-            prioritySent = reportedSent
         }
-        return (LDACPriorityControl.State(phase: phase, error: error, prioritySent: prioritySent), address)
+        var lastTargetDeviceType: Int64?
+        if let reported = state["lastTargetDeviceType"] {
+            guard CFGetTypeID(reported as CFTypeRef) == CFNumberGetTypeID(),
+                  let reported = reported as? NSNumber, let value = Int64(reported.stringValue) else {
+                throw OutputError("The Acouplet LDAC Output driver returned an invalid Bluetooth priority device type.", userFacing: String(localized: "The LDAC driver returned an unexpected response. Try again."))
+            }
+            lastTargetDeviceType = value
+        }
+        return (LDACPriorityControl.State(phase: phase, error: error, prioritySent: flags["prioritySent"],
+            targetPublicationSeen: flags["targetPublicationSeen"], targetPublicationWithdrawn: flags["targetPublicationWithdrawn"],
+            lastTargetDeviceType: lastTargetDeviceType), address)
     }
 
     private nonisolated static func read<T>(_ object: AudioObjectID, selector: AudioObjectPropertySelector,

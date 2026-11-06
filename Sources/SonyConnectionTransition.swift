@@ -14,6 +14,7 @@ struct SonyConnectionTransition: Equatable, Sendable {
     }
 
     let generation: SonyProtocolInfo.Generation
+    let connectionModeInquiryType: UInt8
     let originalMode: SonyConnectionMode
     private(set) var targetMode: SonyConnectionMode
     private(set) var phase = Phase.queued
@@ -25,26 +26,31 @@ struct SonyConnectionTransition: Equatable, Sendable {
     private var acceptedPairingRequest = false
 
     init?(original: SonyConnectionMode, target: SonyConnectionMode, supportedModes: [SonyConnectionMode], session: UInt64,
-          generation: SonyProtocolInfo.Generation = .v2) {
+          generation: SonyProtocolInfo.Generation = .v2, connectionModeInquiryType: UInt8 = 0x05) {
         guard original.sonyValue != nil, target.sonyValue != nil,
               original != target, supportedModes.contains(target),
-              generation != .v1 || (original != .lowLatency && target != .lowLatency) else { return nil }
+              generation != .v1 || (original != .lowLatency && target != .lowLatency),
+              generation == .v1 || connectionModeInquiryType == 0x05 || target != .lowLatency else { return nil }
         self.generation = generation
+        self.connectionModeInquiryType = connectionModeInquiryType
         originalMode = original
         targetMode = target
         self.session = session
     }
 
     var requestPayload: [UInt8] {
-        generation == .v1 ? [0xE8, 0x01, 0, targetMode.sonyValue!] : [0xE8, 0x05, targetMode.sonyValue!, 0x00]
+        if generation == .v1 { return [0xE8, 0x01, 0, targetMode.sonyValue!] }
+        let payload: [UInt8] = [0xE8, connectionModeInquiryType, targetMode.sonyValue!]
+        return connectionModeInquiryType == 0x05 ? payload + [0x00] : payload
     }
 
     var readbackPayload: [UInt8] {
-        [0xE6, generation == .v1 ? 0x01 : 0x05]
+        [0xE6, generation == .v1 ? 0x01 : connectionModeInquiryType]
     }
 
     var crossesTransport: Bool {
-        (originalMode == .lowLatency) != (targetMode == .lowLatency)
+        generation == .v2 && connectionModeInquiryType == 0x05
+            && (originalMode == .lowLatency) != (targetMode == .lowLatency)
     }
 
     var alert: SonyConnectionAlert? {
@@ -112,7 +118,8 @@ struct SonyConnectionTransition: Equatable, Sendable {
 
     @discardableResult
     mutating func receiveLEStandby(_ enabled: Bool, session: UInt64) -> Bool {
-        guard generation == .v2, session == self.session, phase == .awaitingResponse, acceptedPairingRequest, enabled else { return false }
+        guard generation == .v2, connectionModeInquiryType == 0x05, session == self.session,
+              phase == .awaitingResponse, acceptedPairingRequest, enabled else { return false }
         phase = .pairingRequired
         awaitingReadback = false
         return true
@@ -154,7 +161,8 @@ struct SonyConnectionTransition: Equatable, Sendable {
 
     @discardableResult
     mutating func receiveNotification(_ mode: SonyConnectionMode, stream: SonyConnectionStream, session: UInt64) -> Bool {
-        guard session == self.session, mode == targetMode, generation != .v1 || stream == .none else { return false }
+        guard session == self.session, mode == targetMode,
+              (generation == .v2 && connectionModeInquiryType == 0x05) || stream == .none else { return false }
         switch phase {
         case .awaitingResponse, .reconnecting, .verifying, .confirmed: break
         default: return false

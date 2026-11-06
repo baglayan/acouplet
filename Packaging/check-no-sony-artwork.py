@@ -60,12 +60,14 @@ with tempfile.TemporaryDirectory(prefix='acouplet-artwork-check-') as directory:
     contents.write_text(original)
     rejects(source, source)
     photographs = temporary / 'Private Photos.xcassets'
-    photo = photographs / 'XM5Hero.imageset'
-    photo.mkdir(parents=True)
-    (photo / 'photo.png').write_bytes(b'product photograph')
-    (photo / 'private.txt').write_text('not an asset')
     metadata = {'images': [{'filename': 'photo.png', 'idiom': 'universal'}], 'info': {'version': 1, 'author': 'xcode'}}
-    (photo / 'Contents.json').write_text(json.dumps(metadata))
+    for name in artwork.required_photographs(source):
+        folder = photographs / (name + '.imageset')
+        folder.mkdir(parents=True)
+        (folder / 'Contents.json').write_text(json.dumps(metadata))
+        (folder / 'photo.png').write_bytes(b'product photograph')
+    photo = photographs / 'XM5Hero.imageset'
+    (photo / 'private.txt').write_text('not an asset')
     override = photographs / 'EarbudLeft.imageset'
     override.mkdir()
     (override / 'EarbudLeft.svg').write_text('stale external miniature')
@@ -76,6 +78,19 @@ with tempfile.TemporaryDirectory(prefix='acouplet-artwork-check-') as directory:
     assert (destination / 'EarbudLeft.imageset/EarbudLeft.svg').read_bytes() == vector.read_bytes()
     assert hashes(photographs) == photo_before
     prepared = hashes(destination)
+    missing = sorted(artwork.required_photographs(source))[:2]
+    for name in missing:
+        shutil.rmtree(photographs / (name + '.imageset'))
+    try:
+        artwork.prepare(source, destination, photographs)
+    except ValueError as error:
+        assert all(name + '.imageset' in str(error) for name in missing), error
+        assert 'import-sony-artwork.py' in str(error), error
+    else:
+        raise AssertionError('Incomplete external photograph catalog must fail preparation')
+    assert hashes(destination) == prepared
+    for name in missing:
+        shutil.copytree(destination / (name + '.imageset'), photographs / (name + '.imageset'))
     for filename in ['../private.txt', '/tmp/photo.png', 'photo.svg', 'missing.png']:
         metadata['images'][0]['filename'] = filename
         (photo / 'Contents.json').write_text(json.dumps(metadata))
@@ -114,26 +129,5 @@ with tempfile.TemporaryDirectory(prefix='acouplet-artwork-check-') as directory:
     assert {p.stem for p in staged.glob('*.imageset')} == set(artwork.mini_icons)
     environment.update(ACOUPLET_NO_SONY_ARTWORK='NO', ACOUPLET_SONY_ARTWORK_DIR='')
     assert subprocess.run(['/bin/sh', '-c', phase['shellScript']], env=environment, capture_output=True).returncode != 0
-    protocol = (root / 'Sources/SonyProtocol.swift').read_text()
-    model = protocol.split('enum SonyDeviceModel:', 1)[1].split('\nstruct SonyProtocolInfo:', 1)[0]
-    color = protocol.split('struct SonyDeviceColor:', 1)[1].split('\nstruct SonyDeviceInformation:', 1)[0]
-    check = temporary / 'main.swift'
-    check.write_text('import Foundation\nenum SonyDeviceModel:' + model + '\nstruct SonyDeviceColor:' + color + '''
-    #if !ACOUPLET_NO_SONY_ARTWORK
-    assert(SonyDeviceModel.whXM5.artwork == "XM5Hero" && SonyDeviceModel.wfXM5.artwork == "WFXM5Hero")
-    #endif
-for model in SonyDeviceModel.allCases {
-    #if ACOUPLET_NO_SONY_ARTWORK
-    assert(model.artwork == nil)
-    #endif
-    for name in [model.symbol, model.leftSymbol, model.rightSymbol, model.caseSymbol, model.filledCaseSymbol].compactMap({ $0 }) {
-        assert(FileManager.default.fileExists(atPath: CommandLine.arguments[1] + "/" + name + ".imageset/" + name + ".svg"))
-    }
-}
-''')
-    for flags in ([], ['-D', 'ACOUPLET_NO_SONY_ARTWORK']):
-        binary = temporary / 'check-model'
-        subprocess.run(['/usr/bin/xcrun', 'swiftc', *flags, str(check), '-o', str(binary)], check=True)
-        subprocess.run([str(binary), str(destination)], check=True)
 assert hashes(resources) == before
-print('Artwork filtering, external photographs, build-mode isolation, both model compile modes and source preservation passed')
+print('Artwork filtering, complete external catalog validation, build-mode isolation and source preservation passed')

@@ -3,14 +3,24 @@ struct SonyCommandQueue: Equatable, Sendable {
     private var queued: [SonyFrame] = []
     private var nextSequence: UInt8 = 0
 
-    mutating func enqueue(payload: [UInt8], type: UInt8 = 0x0C) -> SonyFrame? {
+    mutating func enqueue(payload: [UInt8], type: UInt8 = 0x0C, prioritizing: Bool = false) -> SonyFrame? {
         let frame = SonyFrame(type: type, sequence: nextSequence, payload: payload)
         nextSequence = 1 - nextSequence
         if pending == nil {
             pending = frame
             return frame
         }
-        queued.append(frame)
+        if prioritizing {
+            var sequence = 1 - pending!.sequence
+            queued = ([frame] + queued).map {
+                let reordered = SonyFrame(type: $0.type, sequence: sequence, payload: $0.payload)
+                sequence = 1 - sequence
+                return reordered
+            }
+            nextSequence = sequence
+        } else {
+            queued.append(frame)
+        }
         return nil
     }
 

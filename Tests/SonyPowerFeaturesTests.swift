@@ -2,6 +2,119 @@ import XCTest
 @testable import Acouplet
 
 final class SonyPowerFeaturesTests: XCTestCase {
+    func testSpeakerPowerFunctionsUseTheirAdvertisedTablesAndPreserveReadState() {
+        var features = SonyPowerFeatures(supportedFunctions: [0x26, 0x2D], supportedFunctions2: [0x20, 0x21])
+        XCTAssertEqual(features.queryPayloads(frameType: 0x0C), [[0x22, 6], [0x26, 6], [0x22, 13], [0x26, 13]])
+        XCTAssertEqual(features.queryPayloads(frameType: 0x0E), [[0x20, 0], [0x22, 0], [0x26, 0]])
+        XCTAssertTrue(features.supportsChargeInUse)
+        for inquiry: UInt8 in [6, 13] {
+            XCTAssertTrue(features.update([0x23, inquiry, 0], frameType: 0x0C))
+            XCTAssertTrue(features.update([0x27, inquiry, 1], frameType: 0x0C))
+        }
+        for payload: [UInt8] in [[0x21, 0, 0], [0x23, 0, 0], [0x27, 0, 1]] {
+            XCTAssertTrue(features.update(payload, frameType: 0x0E))
+        }
+        let previous = features
+        features.updateSupportedFunctions([0x26, 0x2D], supportedFunctions2: [0x20, 0x21])
+        XCTAssertEqual(features, previous)
+        XCTAssertEqual(features.powerSavingMode?.setPayload(enabled: true), [0x28, 6, 0])
+        XCTAssertEqual(features.bluetoothStandby?.setPayload(enabled: true), [0x28, 13, 0])
+        XCTAssertEqual(features.autoStandby?.setPayload(enabled: true), [0x28, 0, 0])
+        features.updateSupportedFunctions([0x20, 0x21], supportedFunctions2: [0x26, 0x2D])
+        XCTAssertEqual(features, SonyPowerFeatures())
+        XCTAssertEqual(SonyPowerFeatures(supportedFunctions2: [0x21]).queryPayloads(frameType: 0x0E), [])
+    }
+
+    func testSpeakerPowerSwitchesRequireKnownAvailabilityAndParameter() {
+        for inquiry: UInt8 in [6, 13] {
+            var state = SonyPowerSwitch(inquiryType: inquiry)
+            XCTAssertNil(state.setPayload(enabled: true))
+            XCTAssertTrue(state.update([0x23, inquiry, 0], frameType: 0x0C))
+            XCTAssertNil(state.setPayload(enabled: true))
+            XCTAssertTrue(state.update([0x27, inquiry, 1], frameType: 0x0C))
+            XCTAssertEqual(state.setPayload(enabled: true), [0x28, inquiry, 0])
+            XCTAssertEqual(state.setPayload(enabled: false), [0x28, inquiry, 1])
+            let previous = state
+            for payload: [UInt8] in [[], [0x27, inquiry], [0x29, inquiry, 0, 0], [0x28, inquiry, 0], [0x27, 0xFF, 0]] {
+                XCTAssertFalse(state.update(payload, frameType: 0x0C))
+                XCTAssertEqual(state, previous)
+            }
+            XCTAssertFalse(state.update([0x29, inquiry, 0], frameType: 0x0E))
+            XCTAssertEqual(state, previous)
+            XCTAssertTrue(state.update([0x25, inquiry, 1], frameType: 0x0C))
+            XCTAssertNil(state.setPayload(enabled: true))
+            XCTAssertEqual(state.enabled, false)
+            XCTAssertTrue(state.update([0x25, inquiry, 0xFF], frameType: 0x0C))
+            XCTAssertNil(state.available)
+            XCTAssertTrue(state.update([0x29, inquiry, 0xFF], frameType: 0x0C))
+            XCTAssertNil(state.enabled)
+            XCTAssertNil(state.setPayload(enabled: false))
+        }
+    }
+
+    func testAutoStandbyRequiresCapabilityAndKeepsAvailabilitySeparate() {
+        var state = SonyAutoStandby()
+        XCTAssertNil(state.setPayload(enabled: true))
+        XCTAssertTrue(state.update([0x27, 0, 1], frameType: 0x0E))
+        XCTAssertTrue(state.update([0x23, 0, 0], frameType: 0x0E))
+        XCTAssertNil(state.setPayload(enabled: true))
+        XCTAssertTrue(state.update([0x21, 0, 0, 0xFE], frameType: 0x0E))
+        XCTAssertEqual(state.candidate, 0)
+        XCTAssertEqual(state.queryPayloads, [[0x22, 0], [0x26, 0]])
+        XCTAssertEqual(state.setPayload(enabled: true), [0x28, 0, 0])
+        XCTAssertEqual(state.setPayload(enabled: false), [0x28, 0, 1])
+        let previous = state
+        for payload: [UInt8] in [[], [0x21, 0], [0x21, 0, 1], [0x21, 0, 0xFF], [0x23, 0],
+                                 [0x25, 0, 0, 0], [0x29, 0, 0, 0], [0x28, 0, 0], [0x27, 1, 0]] {
+            XCTAssertFalse(state.update(payload, frameType: 0x0E))
+            XCTAssertEqual(state, previous)
+        }
+        XCTAssertFalse(state.update([0x29, 0, 0], frameType: 0x0C))
+        XCTAssertEqual(state, previous)
+        XCTAssertTrue(state.update([0x25, 0, 1], frameType: 0x0E))
+        XCTAssertNil(state.setPayload(enabled: true))
+        XCTAssertEqual(state.enabled, false)
+        XCTAssertTrue(state.update([0x25, 0, 0xFF], frameType: 0x0E))
+        XCTAssertNil(state.available)
+        XCTAssertTrue(state.update([0x29, 0, 0xFF], frameType: 0x0E))
+        XCTAssertNil(state.enabled)
+        XCTAssertNil(state.setPayload(enabled: false))
+    }
+
+    func testSpeakerPowerReadExpiryOnlyClearsTheQueriedField() {
+        var initial = SonyPowerFeatures(supportedFunctions: [0x26, 0x2D], supportedFunctions2: [0x20, 0x21])
+        for inquiry: UInt8 in [6, 13] {
+            XCTAssertTrue(initial.update([0x23, inquiry, 0], frameType: 0x0C))
+            XCTAssertTrue(initial.update([0x27, inquiry, 1], frameType: 0x0C))
+        }
+        for payload: [UInt8] in [[0x21, 0, 0], [0x23, 0, 0], [0x27, 0, 1]] {
+            XCTAssertTrue(initial.update(payload, frameType: 0x0E))
+        }
+        for inquiry: UInt8 in [6, 13] {
+            for command: UInt8 in [0x22, 0x26] {
+                var features = initial
+                features.invalidateRead([command, inquiry], frameType: 0x0C)
+                let state = inquiry == 6 ? features.powerSavingMode : features.bluetoothStandby
+                XCTAssertNil(state?.setPayload(enabled: true))
+                XCTAssertEqual(state?.available, command == 0x22 ? nil : true)
+                XCTAssertEqual(state?.enabled, command == 0x26 ? nil : false)
+                XCTAssertEqual(features.autoStandby, initial.autoStandby)
+                XCTAssertTrue(features.supportsChargeInUse)
+            }
+        }
+        for command: UInt8 in [0x20, 0x22, 0x26] {
+            var features = initial
+            features.invalidateRead([command, 0], frameType: 0x0E)
+            XCTAssertNil(features.autoStandby?.setPayload(enabled: true))
+            XCTAssertEqual(features.autoStandby?.candidate, command == 0x20 ? nil : 0)
+            XCTAssertEqual(features.autoStandby?.available, command == 0x22 ? nil : true)
+            XCTAssertEqual(features.autoStandby?.enabled, command == 0x26 ? nil : false)
+            XCTAssertEqual(features.powerSavingMode, initial.powerSavingMode)
+            XCTAssertEqual(features.bluetoothStandby, initial.bluetoothStandby)
+            XCTAssertTrue(features.supportsChargeInUse)
+        }
+    }
+
     func testStaminaUsesAdvertisedTableAndExactKnownReplies() {
         var features = SonyPowerFeatures(supportedFunctions2: [0x2E])
         XCTAssertNil(features.stamina)

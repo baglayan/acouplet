@@ -10,7 +10,9 @@ static uint64_t TestClock(clockid_t clock);
 
 static NSUInteger clockCallsUntilAdvance;
 static uint64_t clockOffset;
+static uint64_t parserClock;
 static uint64_t TestClock(clockid_t clock) {
+    if (parserClock) return parserClock += 100 * NSEC_PER_USEC;
     if (clockCallsUntilAdvance && --clockCallsUntilAdvance == 0) clockOffset = 100ULL * NSEC_PER_SEC;
     return clock_gettime_nsec_np(clock) + clockOffset;
 }
@@ -188,6 +190,55 @@ static void UnmatchedResponseCase(NSData *foreign, NSUInteger boundary, NSUInteg
     output.onWrite = nil;
 }
 
+static void ConfigurationCase(NSData *incoming, NSUInteger split, BOOL bytewise, BOOL accepted,
+                              NSArray<NSData *> *peerReplies) {
+    ResetParent();
+    DirectPlaybackProbe *probe = Probe();
+    probe.configured = YES;
+    probe.sampleRate = 44100;
+    probe.hardDeadline = MonotonicTime() + 0.05;
+    TestInput *input = (id)probe.input;
+    TestOutput *output = (id)probe.output;
+    NSUInteger initial = MIN(incoming.length, MIN(MAX(split, 2), 16));
+    __block NSUInteger markers = 0, peers = 0;
+    output.onWrite = ^(NSData *packet) {
+        if ([packet isEqualToData:Hex(@"60 04 0c")]) {
+            Chunks(input, [incoming subdataWithRange:NSMakeRange(0, initial)], split, bytewise);
+        } else if ([packet isEqualToData:Hex(@"f0 3f")]) {
+            markers++;
+            Chunks(input, [incoming subdataWithRange:NSMakeRange(initial, incoming.length - initial)],
+                   split > initial ? split - initial : 0, bytewise);
+        } else {
+            Check(peers < peerReplies.count && [packet isEqualToData:peerReplies[peers]],
+                  "interleaved peer command receives its own response");
+            peers++;
+        }
+    };
+    uint8_t transaction = 6;
+    NSData *reply = Query(probe, &transaction, 4, Hex(@"0c"));
+    NSMutableData *expected = [Hex(@"62 04") mutableCopy];
+    [expected appendData:ServiceBytes(44100, NO)];
+    Check(accepted ? [reply isEqualToData:expected] : reply == nil, "captured configuration query result");
+    Check(transaction == 7 && !probe.lastRejected && !probe.streamOpened,
+          "foreign response never owns the configuration transaction");
+    Check(markers == 1 && peers == peerReplies.count && output.writes.count == 2 + peers,
+          "only marker and peer commands receive writes");
+    Check(probe.framingUncertain == !accepted && !probe.failed, "configuration framing result");
+    if (accepted) Check(!probe.pending.length && [probe.raw isEqualToData:incoming], "captured bytes fully accounted");
+    output.onWrite = nil;
+}
+
+static void FramingPrefixes(NSData *incoming, NSUInteger responseLength, NSUInteger consumed) {
+    const uint8_t *bytes = incoming.bytes;
+    for (NSUInteger length = 0; length <= incoming.length; length++) {
+        Parsed parsed;
+        int result = Parse(bytes, length, bytes[0] >> 4, bytes[1], &parsed);
+        Check(responseLength && length >= consumed ?
+              result == 1 && parsed.responseLength == responseLength && parsed.consumed == consumed : result != 1,
+              "every stream prefix preserves the confirmed response boundary");
+    }
+}
+
 struct ProtocolThread { int readFD; int writeFD; BOOL stop; };
 static void *ParentProtocol(void *opaque) {
     struct ProtocolThread *state = opaque;
@@ -295,6 +346,7 @@ int main(void) {
         [boundedInput.chunks addObject:chunk];
         [bounded pollInput];
         Check(bounded.failed, "unprocessed signaling input remains bounded");
+        parserClock = 1;
         NSData *marker = Hex(@"f1 3f");
         NSArray *cases = @[
             @[Hex(@"12 01 04 08 08 08 0c 08"), @1, @YES, @NO],
@@ -346,6 +398,77 @@ int main(void) {
         QueryCase(Hex(@"12 0c 01 00 07 0a 00 ff 2d 01 00 00 aa 00 10 01 04 03 f3 01 31"),
                   12, marker, 0, YES, YES, NO);
         QueryCase(discover, 1, Hex(@"f1 3f f3 01 31"), 0, NO, YES, NO);
+        NSData *captured = Hex(@"62 04 01 00 07 0a 00 ff 2d 01 00 00 aa 00 20 01 63 01 31 f1 3f");
+        for (NSUInteger split = 0; split <= captured.length; split++)
+            ConfigurationCase(captured, split, NO, YES, @[]);
+        ConfigurationCase(captured, 0, YES, YES, @[]);
+        Parsed parsed;
+        for (NSUInteger length = 0; length < captured.length; length++)
+            Check(Parse(captured.bytes, length, 6, 4, &parsed) != 1, "every truncated capture lacks a confirmed boundary");
+        Check(Parse(captured.bytes, captured.length, 6, 4, &parsed) == 1 && parsed.responseLength == 16 &&
+              parsed.consumed == captured.length && !parsed.commands && !parsed.rejected,
+              "exact captured configuration excludes the foreign Discover rejection");
+        NSData *configuration = [captured subdataWithRange:NSMakeRange(0, 16)];
+        FramingPrefixes(captured, 16, captured.length);
+        NSMutableData *invalidRecovery = [configuration mutableCopy];
+        [invalidRecovery appendData:Hex(@"03 06 31 f1 3f 30 01 20 f1 3f")];
+        FramingPrefixes(invalidRecovery, 16, 21);
+        for (NSData *suffix in @[Hex(@"03 06 31 f1 3f"), Hex(@"02 06 f1 3f"), Hex(@"03 03 07 29 f1 3f")]) {
+            NSMutableData *incoming = [configuration mutableCopy];
+            [incoming appendData:suffix];
+            FramingPrefixes(incoming, 16, incoming.length);
+            for (NSUInteger split = 0; split <= incoming.length; split++)
+                ConfigurationCase(incoming, split, NO, YES, @[]);
+            ConfigurationCase(incoming, 0, YES, YES, @[]);
+        }
+        NSMutableData *crossing = [configuration mutableCopy];
+        [crossing appendData:Hex(@"03 03 01 01 10 04 04 f1 3f 00 00 f1 3f")];
+        FramingPrefixes(crossing, 0, 0);
+        Check(Parse(crossing.bytes, 25, 6, 4, &parsed) == -3 &&
+              Parse(crossing.bytes, crossing.length, 6, 4, &parsed) == -2,
+              "incomplete capability crossing the marker cannot become an accepted prefix");
+        for (NSUInteger split = 0; split <= crossing.length; split++)
+            ConfigurationCase(crossing, split, NO, NO, @[]);
+        ConfigurationCase(crossing, 0, YES, NO, @[]);
+        for (NSData *response in @[discover, Hex(@"12 01 04 08 42 00")]) {
+            NSMutableData *incoming = [response mutableCopy];
+            [incoming appendData:Hex(@"43 01 31 f1 3f")];
+            FramingPrefixes(incoming, response.length, incoming.length);
+            for (NSUInteger split = 0; split <= incoming.length; split++)
+                QueryCase(response, 1, Hex(@"43 01 31 f1 3f"), split, NO, YES, NO);
+            QueryCase(response, 1, Hex(@"43 01 31 f1 3f"), 0, YES, YES, NO);
+        }
+        FramingPrefixes(Hex(@"12 01 04 08 42 08 f1 3f 20 01"), 0, 0);
+        for (NSData *services in @[Hex(@"02 00 03 03 01 01 01"), Hex(@"02 06 00 00 00 00 00 00"),
+                                   Hex(@"03 06 01 01 01 00 00 00")]) {
+            NSMutableData *reply = [configuration mutableCopy];
+            [reply appendData:services];
+            Check((DecodeReply(reply, 6, 4, 1, NO) != nil) == (((const uint8_t *)services.bytes)[1] == 0),
+                  "Reporting and Recovery lengths match their protocol grammar");
+        }
+        NSMutableData *interleaved = [configuration mutableCopy];
+        [interleaved appendData:Hex(@"20 01 63 01 31 73 04 31 f2 06 30 0d 04 00 64 60 01 f1 3f")];
+        NSArray *peerReplies = @[Hex(@"22 01 06 00"), Hex(@"32 0d"), Hex(@"62 01 06 00")];
+        for (NSUInteger split = 0; split <= interleaved.length; split++)
+            ConfigurationCase(interleaved, split, NO, YES, peerReplies);
+        ConfigurationCase(interleaved, 0, YES, YES, peerReplies);
+        for (NSString *suffix in @[@"63 01 31", @"63 01 31 f1", @"63 01 f1 3f", @"63 f1 3f",
+                                  @"67 01 31 f1 3f", @"62 01 04 08 f1 3f", @"63 3f 31 f1 3f",
+                                  @"63 0e 31 f1 3f", @"63 04 31 f1 3f", @"63 01 31 ff f1 3f",
+                                  @"63 01 31 30 07 04 f1 3f"]) {
+            NSMutableData *invalid = [configuration mutableCopy];
+            [invalid appendData:Hex(suffix)];
+            for (NSUInteger split = 0; split <= invalid.length; split++)
+                ConfigurationCase(invalid, split, NO, NO, @[]);
+            ConfigurationCase(invalid, 0, YES, NO, @[]);
+        }
+        for (NSNumber *size in @[@9, @11]) {
+            NSMutableData *invalid = [captured mutableCopy];
+            ((uint8_t *)invalid.mutableBytes)[5] = size.unsignedCharValue;
+            for (NSUInteger split = 0; split <= invalid.length; split++)
+                ConfigurationCase(invalid, split, NO, NO, @[]);
+            ConfigurationCase(invalid, 0, YES, NO, @[]);
+        }
         for (NSUInteger boundary = 0; boundary < 4; boundary++) {
             for (NSData *unframed in @[Hex(@"f2 01 04 08"), Hex(@"f7 01 31"), Hex(@"f1 3f"), Hex(@"f3 3f 31")]) {
                 ResetParent();
@@ -394,6 +517,7 @@ int main(void) {
                 output.onWrite = nil;
             }
         }
+        parserClock = 0;
         ResetParent();
         DirectPlaybackProbe *rollover = Probe();
         TestInput *rollInput = (id)rollover.input;

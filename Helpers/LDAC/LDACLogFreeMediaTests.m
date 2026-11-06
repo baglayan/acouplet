@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <mach/mach_time.h>
 #include "ldacBT.h"
 
 static int CheckedEncode(HANDLE_LDAC_BT encoder, void *pcm, int *used,
@@ -301,6 +302,44 @@ static BOOL AdaptiveChecks(void) {
     return passed;
 }
 
+static BOOL ManualQualityChecks(void) {
+    BOOL passed = YES;
+    for (NSNumber *rate in @[@44100, @48000, @88200, @96000]) {
+        DirectMediaProbe *probe = TestProbe();
+        LDACProfile profile;
+        SelectProfile(rate.unsignedIntValue, @"high", &profile);
+        probe.profile = profile;
+        probe.encoder = ldacBT_get_handle();
+        passed &= ldacBT_init_handle_encode(probe.encoder, 679, profile.eqmid,
+            LDACBT_CHANNEL_MODE_STEREO, LDACBT_SMPL_FMT_F32, profile.sampleRate) == 0;
+        LDACAdaptivePolicy policy = LDACAdaptivePolicyInit();
+        BOOL adaptive = NO;
+        uint64_t timestamp = 0;
+        NSUInteger sequence = 0;
+        for (NSString *quality in @[@"low", @"mid", @"high", @"auto", @"high", @"low"]) {
+            probe.pendingQuality = quality;
+            ApplyLiveQuality(probe, &profile, &policy, &adaptive);
+            passed &= !probe.failed && adaptive == [quality isEqualToString:@"auto"];
+            LDACFrameFormat format = {0};
+            for (int block = 0; block < 100; block++) {
+                float pcm[256] = {0};
+                uint8_t packet[LDACBT_MAX_NBYTES + 13];
+                NSUInteger length = 0;
+                int frames = 0;
+                passed &= EncodePacket(probe.encoder, profile, pcm, sequence, timestamp, 679, 679,
+                    packet, &length, &frames, &format);
+                if (frames) { sequence++; timestamp += frames * profile.frameSamples; }
+            }
+            LDACProfile expected;
+            SelectProfile(profile.sampleRate, quality, &expected);
+            passed &= format.bitrateKbps == expected.bitrateKbps;
+        }
+        ldacBT_free_handle(probe.encoder);
+        probe.encoder = NULL;
+    }
+    return Check(passed, "manual-quality-transitions-all-sample-rates");
+}
+
 static BOOL FullRingCheck(void) {
     int descriptors[2];
     if (pipe(descriptors) != 0) return NO;
@@ -445,7 +484,10 @@ static BOOL SenderCheck(BOOL adaptive, useconds_t delay, int stall, int terminal
     return passed;
 }
 
-static BOOL IndependentSourceCheck(BOOL adaptive) {
+enum { SourceSteady, SourceBursts, SourceRecovery, SourceDeficit };
+
+static BOOL IndependentSourceCheck(BOOL adaptive, int scenario) {
+    const char *names[] = {"steady", "recoverable-bursts", "shrinking-debt", "mild-deficit"};
     int sockets[2], controls[2], pcm[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0 || pipe(controls) != 0 || pipe(pcm) != 0) abort();
     int savedInput = dup(STDIN_FILENO);
@@ -474,14 +516,17 @@ static BOOL IndependentSourceCheck(BOOL adaptive) {
     RecordOwnedOpen(probe, (CBL2CAPChannel *)channel, 0);
     int flags = fcntl(sockets[0], F_GETFL), lowWater, noSigPipe;
     if (!ReadOption(sockets[0], SO_SNDLOWAT, &lowWater) || !ReadOption(sockets[0], SO_NOSIGPIPE, &noSigPipe)) abort();
-    double duration = adaptive ? 22 : 8;
+    double duration = scenario == SourceBursts ? 6 : scenario == SourceRecovery ? 12 :
+        scenario == SourceDeficit ? 28 : adaptive ? 22 : 8;
     double began = MonotonicTime();
     double deadline = began + duration + 3;
     atomic_bool finished = false;
     atomic_bool *done = &finished;
     __block BOOL produced = YES, received = YES, stopSent = NO, sawLower = NO, returnedHQ = NO;
     __block uint64_t producedFrames = 0, packets = 0, samples = 0, timestampEnd = 0, timestampSkips = 0;
-    __block double producerLateness = 0, maximumDebt = 0, recoveryDebt = 0;
+    __block double producerLateness = 0, maximumDebt = 0, recoveryDebt = 0, highDebtSeconds = 0;
+    __block uint64_t maximumPacketSamples = 0;
+    __block NSUInteger bursts = 0;
     int writer = pcm[1], reader = sockets[1], controlWriter = controls[1];
     dispatch_group_t group = dispatch_group_create();
     dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
@@ -518,6 +563,9 @@ static BOOL IndependentSourceCheck(BOOL adaptive) {
         if (!atomic_load(done)) shutdown(reader, SHUT_RDWR);
     });
     dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        mach_timebase_info_data_t timebase;
+        mach_timebase_info(&timebase);
+        double releaseAt = 0, highDebtBegan = 0;
         while (MonotonicTime() < deadline) {
             struct pollfd ready = {reader, POLLIN, 0};
             if (poll(&ready, 1, 1000) < 0) { if (errno == EINTR) continue; received = NO; break; }
@@ -537,8 +585,16 @@ static BOOL IndependentSourceCheck(BOOL adaptive) {
             }
             timestampSkips += timestamp - timestampEnd;
             double now = MonotonicTime();
-            maximumDebt = fmax(maximumDebt, now - began - (double)timestamp / profile.sampleRate);
-            if (now >= began + 18) recoveryDebt = fmax(recoveryDebt, now - began - (double)timestamp / profile.sampleRate);
+            double debt = now - began - (double)timestamp / profile.sampleRate;
+            maximumDebt = fmax(maximumDebt, debt);
+            if (now >= began + (scenario == SourceSteady ? 18 : duration - 1))
+                recoveryDebt = fmax(recoveryDebt, debt);
+            if (debt >= 0.1) {
+                if (!highDebtBegan) highDebtBegan = now;
+                highDebtSeconds = fmax(highDebtSeconds, now - highDebtBegan);
+            } else {
+                highDebtBegan = 0;
+            }
             sawLower |= format.frameBytes < 330;
             returnedHQ |= sawLower && format.frameBytes == 330;
             NSUInteger offset = 0;
@@ -548,11 +604,28 @@ static BOOL IndependentSourceCheck(BOOL adaptive) {
                 offset += part;
             }
             if (!received) break;
-            usleep(adaptive && now >= began + 2 && now < began + 5 ? 6000 : 1000);
+            if (scenario == SourceSteady) {
+                usleep(adaptive && now >= began + 2 && now < began + 5 ? 6000 : 1000);
+            } else {
+                double elapsed = now - began;
+                double wait = 0.001;
+                if (scenario == SourceBursts && elapsed >= 0.8 + bursts * 0.5 && elapsed < duration - 1) {
+                    wait = bursts ? 0.12 : 0.18;
+                    bursts++;
+                } else if (scenario == SourceRecovery && elapsed >= 0.8) {
+                    releaseAt = releaseAt ? releaseAt + 0.0048 + 0.0004 * fmin(1, (elapsed - 0.8) / 3) : now + 0.35;
+                    wait = fmax(0, releaseAt - MonotonicTime());
+                } else if (scenario == SourceDeficit) {
+                    releaseAt = releaseAt ? releaseAt + 0.0055 : now + 0.0055;
+                    wait = fmax(0, releaseAt - MonotonicTime());
+                }
+                mach_wait_until(mach_absolute_time() + (uint64_t)(wait * 1000000000) * timebase.denom / timebase.numer);
+            }
             uint8_t pending[2];
             received &= recv(reader, pending, sizeof(pending), MSG_PEEK | MSG_DONTWAIT) == 1;
             received &= recv(reader, actual + offset, 1, MSG_DONTWAIT) == 1 && !memcmp(packet, actual, count);
             uint64_t packetSamples = packet[12] * profile.frameSamples;
+            maximumPacketSamples = MAX(maximumPacketSamples, packetSamples);
             samples += packetSamples;
             timestampEnd = timestamp + packetSamples;
             packets++;
@@ -574,15 +647,24 @@ static BOOL IndependentSourceCheck(BOOL adaptive) {
         restoredNoSigPipe == noSigPipe && fcntl(sockets[0], F_GETFL) == flags;
     BOOL accounted = profile.prefillBytes + probe.pcmReadBytes ==
         checkedInputFrames * 8 + probe.pcmBytes + probe.pcmDiscardedBytes;
-    BOOL passed = fed && produced && received && checkedPCM && accounted && restored && stopSent &&
+    BOOL passed = produced && received && checkedPCM && accounted && restored &&
         !probe.pcmSkippedBytes && timestampSkips == probe.pcmSkippedBytes / 8 &&
-        samples >= checkedInputFrames && samples <= EncodedSampleLimit(checkedInputFrames, profile) &&
-        checkedInputFrames > (duration - 1) * profile.sampleRate && elapsed < duration + 5 &&
+        samples <= EncodedSampleLimit(checkedInputFrames, profile) && elapsed < duration + 5 &&
         ldacBT_get_eqmid(probe.encoder) == LDACBT_EQMID_HQ && (adaptive ? sawLower && returnedHQ : !sawLower);
-    printf("INDEPENDENT_SOURCE_CHECK adaptive=%d duration=%.0f packets=%llu producedFrames=%llu inputFrames=%llu encodedFrames=%llu skippedFrames=%llu bufferedFrames=%lu producerLateMax=%.6f debtMax=%.6f recoveryDebtMax=%.6f lower=%d returnedHQ=%d pcmExact=%d accounted=%d fed=%d elapsed=%.6f result=%s\n",
-           adaptive, duration, packets, producedFrames, checkedInputFrames, samples, probe.pcmSkippedBytes / 8,
+    if (scenario == SourceDeficit) {
+        passed &= !fed && probe.failed && !stopSent && elapsed < duration &&
+            maximumDebt >= ((double)(profile.capacityBytes - profile.prefillBytes) / 8 - 2 * maximumPacketSamples) / profile.sampleRate &&
+            samples <= checkedInputFrames && checkedInputFrames - samples <= maximumPacketSamples;
+    } else {
+        passed &= fed && stopSent && samples >= checkedInputFrames &&
+            checkedInputFrames > (duration - 1) * profile.sampleRate;
+    }
+    if (scenario == SourceBursts) passed &= bursts >= 4 && maximumDebt >= 0.1 && recoveryDebt < 0.1;
+    if (scenario == SourceRecovery) passed &= maximumDebt >= 0.3 && highDebtSeconds > 3 && recoveryDebt < 0.1;
+    printf("INDEPENDENT_SOURCE_CHECK scenario=%s adaptive=%d duration=%.0f packets=%llu producedFrames=%llu inputFrames=%llu encodedFrames=%llu skippedFrames=%llu bufferedFrames=%lu producerLateMax=%.6f debtMax=%.6f recoveryDebtMax=%.6f lower=%d returnedHQ=%d pcmExact=%d accounted=%d fed=%d elapsed=%.6f highDebtSeconds=%.6f bursts=%lu result=%s\n",
+           names[scenario], adaptive, duration, packets, producedFrames, checkedInputFrames, samples, probe.pcmSkippedBytes / 8,
            probe.pcmBytes / 8, producerLateness, maximumDebt, recoveryDebt, sawLower, returnedHQ,
-           checkedPCM, accounted, fed, elapsed, passed ? "PASS" : "FAIL");
+           checkedPCM, accounted, fed, elapsed, highDebtSeconds, bursts, passed ? "PASS" : "FAIL");
     checkedProbe = nil;
     if (dup2(savedInput, STDIN_FILENO) < 0) abort();
     close(savedInput); close(controls[0]); close(controls[1]);
@@ -591,6 +673,7 @@ static BOOL IndependentSourceCheck(BOOL adaptive) {
 }
 
 int main(void) {
+    if (!ManualQualityChecks()) return 1;
     @autoreleasepool {
         BOOL refresh = RefreshChecks();
         BOOL lifecycle = LifecycleChecks();
@@ -606,8 +689,11 @@ int main(void) {
         sender &= SenderCheck(NO, 6000, NO, 1);
         sender &= SenderCheck(NO, 6000, NO, 2);
         sender &= SenderCheck(NO, 6000, NO, 3);
-        sender &= IndependentSourceCheck(NO);
-        sender &= IndependentSourceCheck(YES);
+        sender &= IndependentSourceCheck(NO, SourceSteady);
+        sender &= IndependentSourceCheck(YES, SourceSteady);
+        sender &= IndependentSourceCheck(NO, SourceBursts);
+        sender &= IndependentSourceCheck(NO, SourceRecovery);
+        sender &= IndependentSourceCheck(NO, SourceDeficit);
         BOOL passed = refresh && lifecycle && daemon && policy && ring && sender;
         printf("MEDIA_LIFECYCLE_TESTS result=%s hardwareAccess=0\n", passed ? "PASS" : "FAIL");
         return passed ? 0 : 1;

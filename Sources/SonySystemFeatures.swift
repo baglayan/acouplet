@@ -394,7 +394,7 @@ struct SonySystemFeatures: Equatable, Sendable {
             let isBoolean: Bool
             let titleStart: Int
             if generation == .v1 {
-                guard payload.count >= 5 else { return false }
+                guard payload.count >= 5, payload[2] <= 0x02 else { return false }
                 titleStart = 4
             } else {
                 guard payload.count >= 6, payload[2] == 0x00, payload[3] <= 1 else { return false }
@@ -405,8 +405,8 @@ struct SonySystemFeatures: Equatable, Sendable {
             let summaryEnd = titleEnd + 1 + Int(payload[titleEnd])
             if generation == .v1 {
                 guard payload.count == summaryEnd + 1 || (payload.count == summaryEnd + 2 && payload.last == 0),
-                      payload[summaryEnd] == 0x01 else { return false }
-                isBoolean = payload[2] == 0x02
+                      payload[summaryEnd] == 0x01 || (payload[summaryEnd] == 0x02 && payload.count == summaryEnd + 2) else { return false }
+                isBoolean = payload[2] == 0x02 && payload[summaryEnd] == 0x01
             } else {
                 guard payload.count == summaryEnd else { return false }
                 isBoolean = payload[3] == 1

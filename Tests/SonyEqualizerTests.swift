@@ -82,6 +82,54 @@ final class SonyEqualizerTests: XCTestCase {
         XCTAssertNil(prepared(layout: SonyEqualizerBand.tenBand, steps: 13).settingsPayload(outOfRange))
     }
 
+    func testAdvertisedLayoutsAndEvenLevelsRoundTripAcrossWritableDialects() throws {
+        let layout: [SonyEqualizerBand] = [
+            SonyEqualizerBand(informationType: 2, value: 3), .clearBass,
+            SonyEqualizerBand(informationType: 1, value: 80),
+        ]
+        for (generation, type): (SonyProtocolInfo.Generation, UInt8) in [(.v1, 1), (.v2, 0), (.v2, 4)] {
+            var equalizer = prepared(layout: layout, steps: 12, type: type, generation: generation, advertisedBandCount: 1)
+            XCTAssertTrue(equalizer.canEdit)
+            XCTAssertEqual(equalizer.flatSettings?.levelRange, -5...6)
+            XCTAssertTrue(equalizer.update([0x59, type, 0xA0, 3, 0, 11, 5]))
+            let settings = try XCTUnwrap(equalizer.settings)
+            XCTAssertEqual(settings.layout, layout)
+            XCTAssertEqual(settings.values, [-5, 6, 0])
+            XCTAssertEqual(settings.clearBass, 6)
+            XCTAssertEqual(settings.bands, [-5, 0])
+            let restored = try JSONDecoder().decode(EqualizerSettings.self, from: JSONEncoder().encode(settings))
+            let payload: [UInt8] = [0x58, type, generation == .v1 ? 0xFF : 0xA0, 3, 0, 11, 5]
+            XCTAssertEqual(equalizer.settingsPayload(restored), payload)
+            XCTAssertTrue(equalizer.acceptsSetPayload(payload))
+            XCTAssertEqual(equalizer.confirmationValue(payload), equalizer.confirmationValue([0x59, type, 0xA0, 3, 0, 11, 5]))
+
+            var clamped = settings
+            clamped[0] = -99
+            clamped[1] = 99
+            XCTAssertEqual(clamped, settings)
+            let previous = equalizer
+            for invalid: [UInt8] in [[0x59, type, 0xA0, 2, 0, 11], [0x59, type, 0xA0, 3, 0, 12, 5]] {
+                XCTAssertFalse(equalizer.update(invalid))
+                XCTAssertEqual(equalizer, previous)
+            }
+            XCTAssertNil(equalizer.settingsPayload(EqualizerSettings(layout: layout.reversed(), levelSteps: 12, values: settings.values)))
+            XCTAssertNil(equalizer.settingsPayload(EqualizerSettings(layout: layout, levelSteps: 12, values: [-6, 6, 0])))
+            XCTAssertNil(equalizer.settingsPayload(EqualizerSettings(layout: layout, levelSteps: 12, values: [-5, 7, 0])))
+        }
+    }
+
+    func testUnlabelledAndRepeatedFrequencyBandsPreserveTheirAdvertisedPositions() throws {
+        let layout = [0, 1_750, 1_750].map { SonyEqualizerBand(informationType: 1, value: UInt16($0)) }
+            + [SonyEqualizerBand(informationType: 0x7F, value: 0xBEEF)]
+        var equalizer = prepared(layout: layout, steps: 255)
+        XCTAssertTrue(equalizer.update([0x59, 0, 0xA0, 4, 0, 127, 128, 254]))
+        let settings = try XCTUnwrap(equalizer.settings)
+        XCTAssertEqual(settings.layout, layout)
+        XCTAssertEqual(settings.values, [-127, 0, 1, 127])
+        XCTAssertEqual(equalizer.settingsPayload(settings), [0x58, 0, 0xA0, 4, 0, 127, 128, 254])
+        XCTAssertEqual(try JSONDecoder().decode(EqualizerSettings.self, from: JSONEncoder().encode(settings)), settings)
+    }
+
     func testUnavailableStateInvalidatesQueuedCurveAndPresetWrites() throws {
         var equalizer = prepared()
         let curve = try XCTUnwrap(equalizer.settingsPayload(.flat))
@@ -117,14 +165,14 @@ final class SonyEqualizerTests: XCTestCase {
         XCTAssertEqual(withErrors.parameterQueryPayload, [0x56, 4])
     }
 
-    func testUnsupportedMetadataStepsAndULTNeverBecomeOrdinaryWritableEQ() {
+    func testEmptyMetadataInvalidStepsAndULTNeverBecomeOrdinaryWritableEQ() {
         var equalizer = prepared()
-        XCTAssertTrue(equalizer.update([0x5B, 0, 1, 0x7F, 0xBE, 0xEF]))
-        XCTAssertEqual(equalizer.bandInformation, [SonyEqualizerBand(informationType: 0x7F, value: 0xBEEF)])
+        XCTAssertTrue(equalizer.update([0x5B, 0, 0]))
+        XCTAssertEqual(equalizer.bandInformation, [])
         XCTAssertNotNil(equalizer.rawValues)
         XCTAssertNil(equalizer.settings)
         XCTAssertFalse(equalizer.canEdit)
-        for steps: UInt8 in [0, 1, 12] {
+        for steps: UInt8 in [0, 1] {
             XCTAssertNil(prepared(steps: steps).flatSettings)
         }
         var ult = SonyEqualizer(supportedFunctions: [0x53])
@@ -141,10 +189,11 @@ final class SonyEqualizerTests: XCTestCase {
     }
 
     private func prepared(layout: [SonyEqualizerBand] = SonyEqualizerBand.legacy, steps: UInt8 = 21,
-                          type: UInt8 = 0) -> SonyEqualizer {
-        let function: UInt8 = type == 4 ? 0x57 : type == 2 ? 0x52 : 0x50
-        var equalizer = SonyEqualizer(supportedFunctions: [function])
-        XCTAssertTrue(equalizer.update([0x51, type, UInt8(layout.count), steps, 2, 0, 0, 0xA0, 0]))
+                          type: UInt8 = 0, generation: SonyProtocolInfo.Generation = .v2,
+                          advertisedBandCount: UInt8? = nil) -> SonyEqualizer {
+        let function: UInt8 = generation == .v1 ? 0x51 : type == 4 ? 0x57 : type == 2 ? 0x52 : 0x50
+        var equalizer = SonyEqualizer(supportedFunctions: [function], generation: generation)
+        XCTAssertTrue(equalizer.update([0x51, type, advertisedBandCount ?? UInt8(layout.count), steps, 2, 0, 0, 0xA0, 0]))
         let metadata: [UInt8] = layout.flatMap { [$0.informationType, UInt8($0.value >> 8), UInt8($0.value & 0xFF)] }
         XCTAssertTrue(equalizer.update([0x5B, type, UInt8(layout.count)] + metadata))
         XCTAssertTrue(equalizer.update(type == 4 ? [0x53, type, 0, 0] : [0x53, type, 0]))

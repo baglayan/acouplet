@@ -177,8 +177,8 @@ final class SonyNoiseModeHUD {
         let date = Date()
         guard warning.reading.isFresh(at: date), !warning.reading.isCharging,
               let image = Self.lowBatteryImage(model: headphones.deviceModel, part: warning.reading.part, readings: readings,
-                                               leftConnected: headphones.audioFeatures.leftConnected,
-                                               rightConnected: headphones.audioFeatures.rightConnected, at: date) else { return false }
+                                               leftConnected: headphones.leftConnected,
+                                               rightConnected: headphones.rightConnected, at: date) else { return false }
         let title: String
         switch warning.reading.part {
         case .headphones: title = String(localized: "Low Battery")
@@ -194,8 +194,8 @@ final class SonyNoiseModeHUD {
         guard headphones.isReady, headphones.isDeviceConnected, !headphones.multipoint.inventoryIsStale,
               headphones.multipoint.selectedSource == source else { return false }
         let image = DeviceIcon.menuBarImage(model: headphones.deviceModel,
-                                          leftConnected: headphones.audioFeatures.leftConnected,
-                                          rightConnected: headphones.audioFeatures.rightConnected)
+                                          leftConnected: headphones.leftConnected,
+                                          rightConnected: headphones.rightConnected)
         return showNotice(title: String(localized: "Audio source: \(source.name)"), detail: nil,
                           image: image, headphones: headphones)
     }
@@ -203,8 +203,8 @@ final class SonyNoiseModeHUD {
     func showFirmware(version: String, headphones: SonyHeadphonesController) -> Bool {
         guard headphones.firmwareUpdateSession != nil else { return false }
         let image = DeviceIcon.menuBarImage(model: headphones.deviceModel,
-                                           leftConnected: headphones.audioFeatures.leftConnected,
-                                           rightConnected: headphones.audioFeatures.rightConnected)
+                                           leftConnected: headphones.leftConnected,
+                                           rightConnected: headphones.rightConnected)
         return showNotice(title: String(localized: "Firmware \(version) Available"), detail: String(localized: "Update in Sony | Sound Connect."),
                           image: image, headphones: headphones)
     }

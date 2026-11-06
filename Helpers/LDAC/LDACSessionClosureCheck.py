@@ -91,17 +91,21 @@ final class SessionEvents {
 
 final class FixturePriority: @unchecked Sendable {
     let lock = NSLock()
+    let available: Bool
     var enabled = false
     var requests: [Bool] = []
+
+    init(available: Bool) { self.available = available }
 
     var control: LDACPriorityControl {
         LDACPriorityControl(request: { enabled, removed in
             self.lock.withLock {
-                self.enabled = enabled
+                self.enabled = enabled && self.available
                 self.requests.append(enabled)
             }
         }, state: {
-            self.lock.withLock { .init(phase: self.enabled ? "configured" : "idle", error: nil) }
+            self.lock.withLock { .init(phase: self.enabled ? "configured" : self.requests.isEmpty ? "observing" : "idle", error: nil,
+                prioritySent: self.enabled, targetPublicationSeen: self.enabled, targetPublicationWithdrawn: false) }
         })
     }
 }
@@ -115,10 +119,62 @@ extension LDACNativeSession.Helpers {
     }
 }
 extension LDACNativeSession {
+    static func priorityPreparationCheck(executable: URL) throws {
+        for phase in ["preparation-failed", "cleanup-required", "observing"] {
+            for stage in ["preflight", "disconnect"] {
+                let state = LDACPriorityControl.State(phase: phase,
+                    error: phase == "observing" ? "Audio-host connection was invalidated." : nil,
+                    prioritySent: false, targetPublicationSeen: false, targetPublicationWithdrawn: false)
+                let priority = LDACPriorityControl(request: { _, _ in fatalError("Preparation sent a priority mutation") },
+                    state: { state })
+                let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                    helpers: Helpers(fixture: executable), gain: 0, priority: priority, receive: { _ in })
+                let preflight = try LDACNativeChild(executable: URL(fileURLWithPath: "/usr/bin/true"), arguments: [], inheritedPCM: nil)
+                defer { cleanUp(Array(session.children.values)) }
+                session.children["preflight"] = preflight
+                try waitUntil {
+                    _ = try preflight.readLines()
+                    preflight.reap()
+                    return preflight.finished
+                }
+                session.preflightReady = true
+                session.deadline = DispatchTime.now() + 10
+                var rejected = false
+                do {
+                    if stage == "preflight" { try session.advance() }
+                    else { try session.handle("probe", line: "SIGNALING_ARMED time_ns=\(clock_gettime_nsec_np(CLOCK_MONOTONIC))") }
+                } catch {
+                    rejected = true
+                    try require(error.localizedDescription == state.diagnosticDescription, "Preparation failure lost publication evidence")
+                }
+                try require(rejected && !session.handoffRequested && session.children["probe"] == nil &&
+                    session.children["disconnect"] == nil && session.priorityPhase == .unused,
+                    "Failed priority preparation disrupted ordinary Bluetooth audio at \(stage)")
+            }
+        }
+    }
+
+    static func priorityActivationFailureCheck(executable: URL) throws {
+        for (phase, sent, error) in [("idle", nil, nil), ("idle", true, nil),
+                                     ("cleanup-required", true, nil), ("idle", false, "Connection failed")] as [(String, Bool?, String?)] {
+            let priority = LDACPriorityControl(request: { _, _ in fatalError("Activation check sent another mutation") },
+                state: { .init(phase: phase, error: error, prioritySent: sent) })
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(fixture: executable), gain: 0, priority: priority, receive: { _ in })
+            session.startAccepted = true
+            session.priorityPhase = .configuring
+            session.deadline = DispatchTime.now() + 10
+            var rejected = false
+            do { try session.advance() } catch { rejected = true }
+            try require(rejected && !session.started && session.priorityPhase == .configuring,
+                "Uncertain or failed priority was treated as an unavailable hint")
+        }
+    }
+
     @MainActor
-    static func logfreePlaybackCheck(executable: URL) async throws {
+    static func logfreePlaybackCheck(executable: URL, priorityAvailable: Bool) async throws {
         let events = SessionEvents()
-        let priority = FixturePriority()
+        let priority = FixturePriority(available: priorityAvailable)
         let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
             helpers: Helpers(fixture: executable), gain: 0.25, outputDeviceUID: "fixture-output",
             priority: priority.control, receive: { events.values.append($0) })
@@ -152,7 +208,8 @@ extension LDACNativeSession {
         }
         try require(handedOff && gainApplied && stopped && completion.message == nil,
             "Log-free capture/playback/stop failed: \(completion.message ?? "missing active state")")
-        try require(priority.lock.withLock { priority.requests } == [true, false], "Playback priority did not bracket the live feed")
+        try require(priority.lock.withLock { priority.requests } == (priorityAvailable ? [true, false] : [true]),
+            "Priority requests did not preserve available-hint cleanup or unavailable-hint skipping")
         try require(session.captureDestroyed && session.captureStoppedCleanly && session.connectorSettled,
             "Capture or connection guardian cleanup was not confirmed")
         try require(session.signalingGate.closed && session.mediaGate.closed && !session.shutdownUnverified,
@@ -160,11 +217,22 @@ extension LDACNativeSession {
         let log = try String(contentsOf: session.rawURL!.deletingLastPathComponent().appendingPathComponent("session.log"), encoding: .utf8)
         try require(!log.contains("LAUNCH daemon") && !log.contains("transport-closed") && !log.contains("COMMAND probe 0x"),
             "Log-free playback still required daemon framing or fabricated closure")
+        if priorityAvailable {
+            try require(!log.contains("PRIORITY_CONFIGURATION_SKIPPED"), "Available priority was skipped")
+        } else {
+            try require(!log.contains("PRIORITY_STOP_REQUESTED") &&
+                log.contains("PRIORITY_CONFIGURATION_SKIPPED unavailable=1 prioritySent=0"),
+                "Unavailable priority was not explicitly skipped without cleanup mutation")
+            try require(events.values.contains(where: {
+                if case let .diagnostic(value) = $0 { return value.detail == "Bluetooth playback hint unavailable; skipped without sending." }
+                return false
+            }), "Unavailable hint diagnostic was not emitted")
+        }
         for (first, second) in [("SIGNALING_ARMED", "LAUNCH disconnect"), ("ACL_CONNECTED", "COMMAND probe acquire"),
             ("CONNECT_READY", "LAUNCH media"), ("PREPARE_MEDIA", "LAUNCH media"),
             ("PCM_CAPTURE_READY", "COMMAND probe media-ready"), ("PCM_READY", "COMMAND probe media-ready"),
-            ("PRIORITY_CONFIGURATION_ATTEMPT_COMPLETED", "COMMAND media start"),
-            ("FEED_COMPLETE", "PRIORITY_STOP_REQUESTED"), ("DESTROY_TAP", "COMMAND probe media-finished"),
+            (priorityAvailable ? "PRIORITY_CONFIGURATION_ATTEMPT_COMPLETED" : "PRIORITY_CONFIGURATION_SKIPPED", "COMMAND media start"),
+            ("FEED_COMPLETE", priorityAvailable ? "PRIORITY_STOP_REQUESTED" : "COMMAND probe media-finished"), ("DESTROY_TAP", "COMMAND probe media-finished"),
             ("media OWNED_CLOSED", "COMMAND probe media-closed")] {
             guard let before = log.range(of: first), let after = log.range(of: second) else {
                 throw ClosureCheckError(description: "Missing lifecycle marker: \(first), \(second)")
@@ -872,8 +940,11 @@ enum LDACSessionClosureCheck {
         }
         if CommandLine.arguments.dropFirst().first == "--fixture" { child() }
         let executable = URL(fileURLWithPath: CommandLine.arguments[0])
+        try LDACNativeSession.priorityPreparationCheck(executable: executable)
+        try LDACNativeSession.priorityActivationFailureCheck(executable: executable)
         try LDACNativeSession.acquisitionCheck(executable: executable)
-        try await LDACNativeSession.logfreePlaybackCheck(executable: executable)
+        try await LDACNativeSession.logfreePlaybackCheck(executable: executable, priorityAvailable: true)
+        try await LDACNativeSession.logfreePlaybackCheck(executable: executable, priorityAvailable: false)
         print("PASS log-free acquisition, deferred media, live capture, gain, priority and owned shutdown")
         for handle in [nil, 0, 1] as [Int?] {
             try LDACNativeSession.checkRestoreArguments(executable: executable, handle: handle)

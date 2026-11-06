@@ -771,7 +771,7 @@ final class SonyLegacyControllerTests: XCTestCase {
         XCTAssertTrue(controller.canChangeNoiseControl)
     }
 
-    func testAcknowledgedLegacyNoiseMetadataReadsHaveBoundedLifetime() async {
+    func testAcknowledgedLegacyNoiseMetadataReadsExpireWithoutLosingTheSession() async {
         for query: [UInt8] in [[0x60, 2], [0x62, 2]] {
             let controller = beginController()
             defer { controller.simulateControlLoss() }
@@ -781,10 +781,14 @@ final class SonyLegacyControllerTests: XCTestCase {
             XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == query })
             controller.simulateNoiseReadTimeout(query)
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect the headphones to try again."))
-            controller.simulateProtocolMessage(capability, session: session)
-            XCTAssertNil(controller.legacyControls)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            controller.simulateProtocolMessage(query[0] == 0x60 ? capability : [0x63, 2, 0], session: session)
+            XCTAssertNotNil(controller.legacyControls)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            if query[0] == 0x60 { XCTAssertNil(controller.legacyControls?.noiseCapability) }
+            else { XCTAssertNil(controller.legacyControls?.noiseAvailable) }
         }
     }
 
@@ -799,9 +803,11 @@ final class SonyLegacyControllerTests: XCTestCase {
         let session = controller.simulatedControlSession
         controller.simulateNoiseReadTimeout([0x66, 2])
         for _ in 0..<4 { await Task.yield() }
-        XCTAssertFalse(controller.isReady)
-        XCTAssertGreaterThan(controller.simulatedControlSession, session)
-        XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect the headphones to try again."))
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.simulatedControlSession, session)
+        XCTAssertNil(controller.noiseControlMode)
+        XCTAssertNil(controller.legacyControls?.noiseState)
+        XCTAssertFalse(controller.canChangeNoiseControl)
         controller.simulateDeviceConnection(named: "WF-1000XM4", galleryModel: .wfXM4)
         controller.simulateNoiseReadTimeout([0x66, 2])
         controller.simulateProtocolMessage(ambient, session: session)
@@ -880,12 +886,22 @@ final class SonyLegacyControllerTests: XCTestCase {
         deliver([0xE7, 2, 1], to: controller)
         XCTAssertNil(controller.dseeMode)
         deliver([0xE7, 2, 0, 0], to: controller)
-        XCTAssertEqual(controller.dseeMode, .off)
+        XCTAssertNil(controller.dseeMode)
         XCTAssertFalse(controller.canSetDSEE)
         deliver([0xE3, 2, 0], to: controller)
+        XCTAssertNil(controller.dseeAvailable)
         XCTAssertFalse(controller.canSetDSEE)
         deliver([0xE1, 2, 0, 0], to: controller)
         XCTAssertEqual(controller.dseeType, .hx)
+        XCTAssertFalse(controller.canSetDSEE)
+        acknowledgeAll(controller)
+        deliver([0xE3, 2, 0], to: controller)
+        XCTAssertFalse(controller.canSetDSEE)
+        acknowledgeAll(controller)
+        deliver([0xE7, 2, 1], to: controller)
+        XCTAssertNil(controller.dseeMode)
+        deliver([0xE7, 2, 0, 0], to: controller)
+        XCTAssertEqual(controller.dseeMode, .off)
         XCTAssertTrue(controller.canSetDSEE)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xE0 }.map(\.payload), [[0xE0, 2]])
         XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E })
@@ -979,11 +995,14 @@ final class SonyLegacyControllerTests: XCTestCase {
 
     func testAcknowledgedLegacyDSEEReadExpiryIsIsolatedAndLateRepliesRequireAFreshRead() async {
         let replies: [[UInt8]] = [[0xE1, 2, 0, 0], [0xE3, 2, 0], [0xE7, 2, 0, 1]]
-        for reply in replies {
+        for (index, reply) in replies.enumerated() {
             let query: [UInt8] = [reply[0] - 1, 2]
             let controller = makeController(supportsDSEE: true)
             defer { controller.simulateControlLoss() }
-            for other in replies where other != reply { deliver(other, to: controller) }
+            for previous in replies.prefix(index) {
+                deliver(previous, to: controller)
+                acknowledgeAll(controller)
+            }
             let session = controller.simulatedControlSession
             XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == query })
             controller.simulateLegacyDSEEReadTimeout(query)
@@ -1006,6 +1025,11 @@ final class SonyLegacyControllerTests: XCTestCase {
             acknowledgeAll(controller)
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == query }.count, reads + 1)
             deliver(reply, to: controller)
+            acknowledgeAll(controller)
+            for next in replies.dropFirst(index + 1) {
+                deliver(next, to: controller)
+                acknowledgeAll(controller)
+            }
             XCTAssertTrue(controller.canSetDSEE)
             XCTAssertNil(controller.settingErrors[.dsee])
         }
@@ -1352,6 +1376,7 @@ final class SonyLegacyControllerTests: XCTestCase {
                                 [0x51, 1, 6, 21, 1, 0xA0, 0], [0x53, 1, 0], [0x5B, 1, 6] + metadata,
                                 [0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
             deliver(payload, to: controller)
+            acknowledgeAll(controller)
         }
         XCTAssertTrue(controller.canChangeConnectionMode)
         controller.setConnectionMode(.stableConnection)
@@ -1383,6 +1408,7 @@ final class SonyLegacyControllerTests: XCTestCase {
             for payload: [UInt8] in [[0x51, 1, 6, 21, 2, 0xA0, 0, 0x16, 0], [0x53, 1, 0],
                                     [0x57, 1, 0x16, 0], [0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
                 deliver(payload, to: controller)
+                acknowledgeAll(controller)
             }
             acknowledgeAll(controller)
             XCTAssertTrue(controller.canChangeConnectionMode)
@@ -1528,8 +1554,16 @@ final class SonyLegacyControllerTests: XCTestCase {
         XCTAssertNil(controller.systemFeatureState(.pauseOnRemoval)?.enabled)
         deliver([0xF3, 3, 0], to: controller)
         deliver([0xF7, 3, 0, 0], to: controller)
+        XCTAssertNil(controller.legacyControls?.wearingControl.available)
+        XCTAssertNil(controller.systemFeatureState(.pauseOnRemoval)?.enabled)
         XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
         deliver([0xF1, 3, 0], to: controller)
+        XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+        acknowledgeAll(controller)
+        deliver([0xF3, 3, 0], to: controller)
+        XCTAssertFalse(controller.canSetSystemFeature(.pauseOnRemoval))
+        acknowledgeAll(controller)
+        deliver([0xF7, 3, 0, 0], to: controller)
         XCTAssertTrue(controller.canSetSystemFeature(.pauseOnRemoval))
         XCTAssertEqual(controller.systemFeatureState(.pauseOnRemoval)?.enabled, false)
         deliver([0xF1, 3, 1], to: controller)
@@ -1637,13 +1671,18 @@ final class SonyLegacyControllerTests: XCTestCase {
             ([0xF2, 3], [0xF3, 3, 0xFF]),
             ([0xF6, 3], [0xF7, 3, 0, 0xFF]),
         ]
-        for testCase in cases {
+        let replies: [[UInt8]] = [[0xF1, 3, 0], [0xF3, 3, 0], [0xF7, 3, 0, 0]]
+        for (index, testCase) in cases.enumerated() {
             let controller = beginWearingController()
             defer { controller.simulateControlLoss() }
             controller.simulateSystemReadTimeout(testCase.query)
             for _ in 0..<4 { await Task.yield() }
             XCTAssertTrue(controller.isReady)
             acknowledgeAll(controller)
+            for reply in replies.prefix(index) {
+                deliver(reply, to: controller)
+                acknowledgeAll(controller)
+            }
             XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == testCase.query })
             deliver(testCase.unknown, to: controller)
             let session = controller.simulatedControlSession
@@ -1731,7 +1770,10 @@ final class SonyLegacyControllerTests: XCTestCase {
         }
         XCTAssertNil(controller.automaticPowerOff?.options)
         XCTAssertNil(controller.automaticPowerOff?.current)
-        for reply in replies { deliver(reply, to: controller) }
+        for reply in replies {
+            deliver(reply, to: controller)
+            acknowledgeAll(controller)
+        }
         XCTAssertTrue(controller.canSetAutomaticPowerOff)
         XCTAssertNil(controller.systemFeatures.automaticPowerOff)
         controller.refresh()
@@ -1843,7 +1885,10 @@ final class SonyLegacyControllerTests: XCTestCase {
     func testBackgroundQualityTimeoutPreservesMainControls() async {
         let controller = makeController(supportsConnectionQuality: true)
         defer { controller.simulateControlLoss() }
-        for reply: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] { deliver(reply, to: controller) }
+        for reply: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
+            deliver(reply, to: controller)
+            acknowledgeAll(controller)
+        }
         XCTAssertTrue(controller.isReady)
         XCTAssertTrue(controller.canChangeConnectionMode)
         let session = controller.simulatedControlSession
@@ -1936,8 +1981,11 @@ final class SonyLegacyControllerTests: XCTestCase {
     private func makeDSEEController() -> SonyHeadphonesController {
         let controller = makeController(supportsDSEE: true)
         deliver([0xE1, 2, 0, 0], to: controller)
+        acknowledgeAll(controller)
         deliver([0xE3, 2, 0], to: controller)
+        acknowledgeAll(controller)
         deliver([0xE7, 2, 0, 0], to: controller)
+        acknowledgeAll(controller)
         return controller
     }
 
@@ -1954,7 +2002,10 @@ final class SonyLegacyControllerTests: XCTestCase {
     private func makeWearingController() -> SonyHeadphonesController {
         let controller = beginWearingController()
         acknowledgeAll(controller)
-        for reply: [UInt8] in [[0xF1, 3, 0], [0xF3, 3, 0], [0xF7, 3, 0, 0]] { deliver(reply, to: controller) }
+        for reply: [UInt8] in [[0xF1, 3, 0], [0xF3, 3, 0], [0xF7, 3, 0, 0]] {
+            deliver(reply, to: controller)
+            acknowledgeAll(controller)
+        }
         XCTAssertTrue(controller.canSetSystemFeature(.pauseOnRemoval))
         return controller
     }
@@ -1974,6 +2025,7 @@ final class SonyLegacyControllerTests: XCTestCase {
         acknowledgeAll(controller)
         for reply: [UInt8] in [[0xF1, 4, 3, 0x10, 0x11, 1], [0xF3, 4, 0], [0xF7, 4, 1, 0x10, 3]] {
             deliver(reply, to: controller)
+            acknowledgeAll(controller)
         }
         XCTAssertTrue(controller.canSetAutomaticPowerOff)
         return controller
@@ -2231,6 +2283,10 @@ final class SonyLegacyMultipointTests: XCTestCase {
         XCTAssertTrue(MultipointControls.isVisible(for: headphones.multipoint))
         XCTAssertNil(headphones.multipoint.selectedSource)
 
+        headphones.simulateProtocolMessage([0x39, 0x01, 0x00, 0x00], type: 0x0E)
+        XCTAssertTrue(headphones.multipoint.devices.isEmpty)
+        headphones.simulateProtocolMessage([0x39] + legacyList.dropFirst(), type: 0x0E)
+        XCTAssertEqual(headphones.multipoint.devices.map(\.name), ["Test Laptop", "Test Phone"])
         var notification = legacyList
         notification[0] = 0x39
         notification[20] = 0

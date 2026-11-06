@@ -1,0 +1,3802 @@
+{
+  "sourceSHA256": "0e00851ca3e471ed2a513c34fb2de21f8b9d9fef8bc6b2a4097fc490fa802614",
+  "models": {
+    "htAN7": {
+      "catalogName": "BRAVIA Theatre U",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog0d20c30b18e44086a78757e2c2f028b4",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0d20c30b-18e4-4086-a787-57e2c2f028b4.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.375,
+            "width": 0.5486111111111112,
+            "x": 0.2263888888888889,
+            "y": 0.3416666666666667
+          }
+        }
+      }
+    },
+    "mdrXB950B1": {
+      "catalogName": "MDR-XB950B1",
+      "colors": {
+        "0": {
+          "hero": "SonyCataloga51fccef059b4b428ad2183dca40b9a3",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/a51fccef-059b-4b42-8ad2-183dca40b9a3.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5680555555555555,
+            "width": 0.40555555555555556,
+            "x": 0.28055555555555556,
+            "y": 0.20833333333333334
+          }
+        },
+        "1": {
+          "hero": "SonyCataloga51fccef059b4b428ad2183dca40b9a3",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/a51fccef-059b-4b42-8ad2-183dca40b9a3.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5680555555555555,
+            "width": 0.40555555555555556,
+            "x": 0.28055555555555556,
+            "y": 0.20833333333333334
+          }
+        },
+        "4": {
+          "hero": "SonyCatalog8b35274b50a74bbea93da9db99843f76",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8b35274b-50a7-4bbe-a93d-a9db99843f76.png",
+          "finish": "color-04",
+          "heroBounds": {
+            "height": 0.5680555555555555,
+            "width": 0.4041666666666667,
+            "x": 0.28055555555555556,
+            "y": 0.20833333333333334
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog9edd7cf41dcc49efb660ced762b2bb8e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/9edd7cf4-1dcc-49ef-b660-ced762b2bb8e.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5680555555555555,
+            "width": 0.4041666666666667,
+            "x": 0.28055555555555556,
+            "y": 0.20833333333333334
+          }
+        }
+      }
+    },
+    "mdrXB950N1": {
+      "catalogName": "MDR-XB950N1",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog3c01fa6826cd4acbb0d4ec4ff9a9a889",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/3c01fa68-26cd-4acb-b0d4-ec4ff9a9a889.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5597222222222222,
+            "width": 0.4388888888888889,
+            "x": 0.26944444444444443,
+            "y": 0.2125
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog3c01fa6826cd4acbb0d4ec4ff9a9a889",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/3c01fa68-26cd-4acb-b0d4-ec4ff9a9a889.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5597222222222222,
+            "width": 0.4388888888888889,
+            "x": 0.26944444444444443,
+            "y": 0.2125
+          }
+        },
+        "8": {
+          "hero": "SonyCatalogc724d99e874e4ee8a186569722f2744d",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c724d99e-874e-4ee8-a186-569722f2744d.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.5597222222222222,
+            "width": 0.4388888888888889,
+            "x": 0.26944444444444443,
+            "y": 0.2125
+          }
+        },
+        "9": {
+          "hero": "SonyCatalog0cf98cc060084e5aaab8dedb264415f5",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0cf98cc0-6008-4e5a-aab8-dedb264415f5.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.5597222222222222,
+            "width": 0.4388888888888889,
+            "x": 0.26944444444444443,
+            "y": 0.2125
+          }
+        }
+      }
+    },
+    "srsLS1": {
+      "catalogName": "LinkBuds Speaker",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogd67e2cb08ab64ed0ba000bfef15dbd2d",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d67e2cb0-8ab6-4ed0-ba00-0bfef15dbd2d.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5319444444444444,
+            "width": 0.3402777777777778,
+            "x": 0.33055555555555555,
+            "y": 0.2388888888888889
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogd67e2cb08ab64ed0ba000bfef15dbd2d",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d67e2cb0-8ab6-4ed0-ba00-0bfef15dbd2d.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5319444444444444,
+            "width": 0.3402777777777778,
+            "x": 0.33055555555555555,
+            "y": 0.2388888888888889
+          }
+        },
+        "9": {
+          "hero": "SonyCatalogebe3a1c30bbd4afc8d6f7c069584f3f6",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ebe3a1c3-0bbd-4afc-8d6f-7c069584f3f6.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.5180555555555556,
+            "width": 0.3402777777777778,
+            "x": 0.33055555555555555,
+            "y": 0.2388888888888889
+          }
+        }
+      }
+    },
+    "srsNS7": {
+      "catalogName": "SRS-NS7",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog37f70d87d87144e0a204d50a9a78b51a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/37f70d87-d871-44e0-a204-d50a9a78b51a.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.3736111111111111,
+            "width": 0.6180555555555556,
+            "x": 0.18888888888888888,
+            "y": 0.3416666666666667
+          }
+        }
+      }
+    },
+    "srsNS7R": {
+      "catalogName": "SRS-NS7R",
+      "colors": {
+        "0": {
+          "hero": "SonyCataloga9d064da4bd94e89a7dd41c0bbb59b43",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/a9d064da-4bd9-4e89-a7dd-41c0bbb59b43.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.3736111111111111,
+            "width": 0.6180555555555556,
+            "x": 0.18888888888888888,
+            "y": 0.3416666666666667
+          }
+        }
+      }
+    },
+    "srsULT10": {
+      "catalogName": "ULT FIELD 1",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog1b181b228aa14d508c6fbf0127942cc6",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/1b181b22-8aa1-4d50-8c6f-bf0127942cc6.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.2638888888888889,
+            "width": 0.7472222222222222,
+            "x": 0.058333333333333334,
+            "y": 0.375
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog1b181b228aa14d508c6fbf0127942cc6",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/1b181b22-8aa1-4d50-8c6f-bf0127942cc6.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.2638888888888889,
+            "width": 0.7472222222222222,
+            "x": 0.058333333333333334,
+            "y": 0.375
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog106c7bc726d24e5ea36e1db8338e107a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/106c7bc7-26d2-4e5e-a36e-1db8338e107a.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.2638888888888889,
+            "width": 0.7472222222222222,
+            "x": 0.05555555555555555,
+            "y": 0.375
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog8cc9428b8ee94be1be390426fe724d4e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8cc9428b-8ee9-4be1-be39-0426fe724d4e.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.2638888888888889,
+            "width": 0.7486111111111111,
+            "x": 0.058333333333333334,
+            "y": 0.3763888888888889
+          }
+        },
+        "9": {
+          "hero": "SonyCatalogce718659b93c40c0ae6c506df7903013",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ce718659-b93c-40c0-ae6c-506df7903013.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.2638888888888889,
+            "width": 0.7472222222222222,
+            "x": 0.058333333333333334,
+            "y": 0.375
+          }
+        },
+        "12": {
+          "hero": "SonyCatalogacc6b3f8567f46979bd2aa3efa3b77b1",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/acc6b3f8-567f-4697-9bd2-aa3efa3b77b1.png",
+          "finish": "color-0c",
+          "heroBounds": {
+            "height": 0.2638888888888889,
+            "width": 0.7472222222222222,
+            "x": 0.058333333333333334,
+            "y": 0.375
+          }
+        }
+      }
+    },
+    "srsULT1000": {
+      "catalogName": "ULT TOWER 10",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog7ad63f4ad4094f78840a75269104ccd8",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/7ad63f4a-d409-4f78-840a-75269104ccd8.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.6402777777777777,
+            "width": 0.2361111111111111,
+            "x": 0.3819444444444444,
+            "y": 0.17222222222222222
+          }
+        }
+      }
+    },
+    "srsULT30": {
+      "catalogName": "ULT FIELD 3",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog5d9a841cbe344717b1bb57fc5321c69f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/5d9a841c-be34-4717-b1bb-57fc5321c69f.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.27361111111111114,
+            "width": 0.625,
+            "x": 0.1875,
+            "y": 0.3625
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog5d9a841cbe344717b1bb57fc5321c69f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/5d9a841c-be34-4717-b1bb-57fc5321c69f.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.27361111111111114,
+            "width": 0.625,
+            "x": 0.1875,
+            "y": 0.3625
+          }
+        },
+        "2": {
+          "hero": "SonyCataloga25bdb1b4977448eb43103b1f445f673",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/a25bdb1b-4977-448e-b431-03b1f445f673.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.275,
+            "width": 0.625,
+            "x": 0.1875,
+            "y": 0.3625
+          }
+        },
+        "9": {
+          "hero": "SonyCatalog7e5f7c4ec61e4ddabdc869d9360dd45c",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/7e5f7c4e-c61e-4dda-bdc8-69d9360dd45c.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.275,
+            "width": 0.625,
+            "x": 0.1875,
+            "y": 0.3625
+          }
+        }
+      }
+    },
+    "srsULT3000": {
+      "catalogName": "ULT TOWER MAX",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog9c88b4d3638c408e9f81582ae2186b3c",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/9c88b4d3-638c-408e-9f81-582ae2186b3c.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.6194444444444445,
+            "width": 0.3111111111111111,
+            "x": 0.3458333333333333,
+            "y": 0.19027777777777777
+          }
+        }
+      }
+    },
+    "srsULT50": {
+      "catalogName": "ULT FIELD 5",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogdea7a0b5892843fa8dc19375fd79b159",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/dea7a0b5-8928-43fa-8dc1-9375fd79b159.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.2791666666666667,
+            "width": 0.6208333333333333,
+            "x": 0.19027777777777777,
+            "y": 0.3597222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogdea7a0b5892843fa8dc19375fd79b159",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/dea7a0b5-8928-43fa-8dc1-9375fd79b159.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.2791666666666667,
+            "width": 0.6208333333333333,
+            "x": 0.19027777777777777,
+            "y": 0.3597222222222222
+          }
+        },
+        "2": {
+          "hero": "SonyCatalogf034c150279747edb35ac9856f891e69",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/f034c150-2797-47ed-b35a-c9856f891e69.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.2777777777777778,
+            "width": 0.6208333333333333,
+            "x": 0.19027777777777777,
+            "y": 0.3611111111111111
+          }
+        }
+      }
+    },
+    "srsULT500": {
+      "catalogName": "ULT TOWER 5",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogb0407eebf58749dda116ee7623739a68",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/b0407eeb-f587-49dd-a116-ee7623739a68.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.475,
+            "width": 0.31805555555555554,
+            "x": 0.3402777777777778,
+            "y": 0.2625
+          }
+        }
+      }
+    },
+    "srsULT70": {
+      "catalogName": "ULT FIELD 7",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog2004971f766a4ab58dd49509f13cec8e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2004971f-766a-4ab5-8dd4-9509f13cec8e.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.28194444444444444,
+            "width": 0.6569444444444444,
+            "x": 0.17222222222222222,
+            "y": 0.35694444444444445
+          }
+        }
+      }
+    },
+    "srsULT700": {
+      "catalogName": "ULT TOWER 7",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog0b0b69e9c26d498b8c8b6e5287c141e0",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0b0b69e9-c26d-498b-8c8b-6e5287c141e0.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5430555555555555,
+            "width": 0.32083333333333336,
+            "x": 0.3402777777777778,
+            "y": 0.22916666666666666
+          }
+        }
+      }
+    },
+    "srsULT900": {
+      "catalogName": "ULT TOWER 9",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog25e610b967da4ba495314bf09ec66d32",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/25e610b9-67da-4ba4-9531-4bf09ec66d32.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.6111111111111112,
+            "width": 0.26944444444444443,
+            "x": 0.3625,
+            "y": 0.17083333333333334
+          }
+        }
+      }
+    },
+    "srsULT900AC": {
+      "catalogName": "ULT TOWER 9AC",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog031e7e510f55447387259dbcada133de",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/031e7e51-0f55-4473-8725-9dbcada133de.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.6111111111111112,
+            "width": 0.26944444444444443,
+            "x": 0.3625,
+            "y": 0.17083333333333334
+          }
+        }
+      }
+    },
+    "wf1000X": {
+      "catalogName": "WF-1000X",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog9782a22400db48e18913b794cd1c8e70",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/9782a224-00db-48e1-8913-b794cd1c8e70.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.42916666666666664,
+            "width": 0.5888888888888889,
+            "x": 0.2,
+            "y": 0.3138888888888889
+          },
+          "left": "SonyCatalog9782a22400db48e18913b794cd1c8e70",
+          "right": "SonyCatalog9782a22400db48e18913b794cd1c8e70",
+          "leftBounds": {
+            "height": 0.19027777777777777,
+            "width": 0.3333333333333333,
+            "x": 0.45555555555555555,
+            "y": 0.3138888888888889
+          },
+          "rightBounds": {
+            "height": 0.20416666666666666,
+            "width": 0.31666666666666665,
+            "x": 0.2,
+            "y": 0.5388888888888889
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog9782a22400db48e18913b794cd1c8e70",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/9782a224-00db-48e1-8913-b794cd1c8e70.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.42916666666666664,
+            "width": 0.5888888888888889,
+            "x": 0.2,
+            "y": 0.3138888888888889
+          },
+          "left": "SonyCatalog9782a22400db48e18913b794cd1c8e70",
+          "right": "SonyCatalog9782a22400db48e18913b794cd1c8e70",
+          "leftBounds": {
+            "height": 0.19027777777777777,
+            "width": 0.3333333333333333,
+            "x": 0.45555555555555555,
+            "y": 0.3138888888888889
+          },
+          "rightBounds": {
+            "height": 0.20416666666666666,
+            "width": 0.31666666666666665,
+            "x": 0.2,
+            "y": 0.5388888888888889
+          }
+        },
+        "10": {
+          "hero": "SonyCatalogf4b0b33bd3b64df09f108a5d44dfd6c5",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/f4b0b33b-d3b6-4df0-9f10-8a5d44dfd6c5.png",
+          "finish": "color-0a",
+          "heroBounds": {
+            "height": 0.42916666666666664,
+            "width": 0.5888888888888889,
+            "x": 0.2,
+            "y": 0.3138888888888889
+          },
+          "left": "SonyCatalogf4b0b33bd3b64df09f108a5d44dfd6c5",
+          "right": "SonyCatalogf4b0b33bd3b64df09f108a5d44dfd6c5",
+          "leftBounds": {
+            "height": 0.19027777777777777,
+            "width": 0.3333333333333333,
+            "x": 0.45555555555555555,
+            "y": 0.3138888888888889
+          },
+          "rightBounds": {
+            "height": 0.20416666666666666,
+            "width": 0.31666666666666665,
+            "x": 0.2,
+            "y": 0.5388888888888889
+          }
+        }
+      }
+    },
+    "wfC500": {
+      "catalogName": "WF-C500",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogd47218b4950a44b591eca8ca675af615",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d47218b4-950a-44b5-91ec-a8ca675af615.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.6402777777777777,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCatalogd47218b4950a44b591eca8ca675af615",
+          "right": "SonyCatalogd47218b4950a44b591eca8ca675af615",
+          "leftBounds": {
+            "height": 0.23472222222222222,
+            "width": 0.29444444444444445,
+            "x": 0.5222222222222223,
+            "y": 0.4083333333333333
+          },
+          "rightBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.25416666666666665,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogd47218b4950a44b591eca8ca675af615",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d47218b4-950a-44b5-91ec-a8ca675af615.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.6402777777777777,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCatalogd47218b4950a44b591eca8ca675af615",
+          "right": "SonyCatalogd47218b4950a44b591eca8ca675af615",
+          "leftBounds": {
+            "height": 0.23472222222222222,
+            "width": 0.29444444444444445,
+            "x": 0.5222222222222223,
+            "y": 0.4083333333333333
+          },
+          "rightBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.25416666666666665,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog9a9faaceb0dc4adfa2143d862544c7f6",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/9a9faace-b0dc-4adf-a214-3d862544c7f6.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.6402777777777777,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCatalog9a9faaceb0dc4adfa2143d862544c7f6",
+          "right": "SonyCatalog9a9faaceb0dc4adfa2143d862544c7f6",
+          "leftBounds": {
+            "height": 0.23472222222222222,
+            "width": 0.29444444444444445,
+            "x": 0.5222222222222223,
+            "y": 0.4083333333333333
+          },
+          "rightBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.25416666666666665,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          }
+        },
+        "8": {
+          "hero": "SonyCatalog821c5cf5e087497ea8e50660fad836dc",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/821c5cf5-e087-497e-a8e5-0660fad836dc.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.6402777777777777,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCatalog821c5cf5e087497ea8e50660fad836dc",
+          "right": "SonyCatalog821c5cf5e087497ea8e50660fad836dc",
+          "leftBounds": {
+            "height": 0.23472222222222222,
+            "width": 0.29444444444444445,
+            "x": 0.5222222222222223,
+            "y": 0.4083333333333333
+          },
+          "rightBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.25416666666666665,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          }
+        },
+        "12": {
+          "hero": "SonyCataloge68b9c495cab46b3a5c68a76d2b402e7",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/e68b9c49-5cab-46b3-a5c6-8a76d2b402e7.png",
+          "finish": "color-0c",
+          "heroBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.6402777777777777,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCataloge68b9c495cab46b3a5c68a76d2b402e7",
+          "right": "SonyCataloge68b9c495cab46b3a5c68a76d2b402e7",
+          "leftBounds": {
+            "height": 0.23472222222222222,
+            "width": 0.29444444444444445,
+            "x": 0.5222222222222223,
+            "y": 0.4083333333333333
+          },
+          "rightBounds": {
+            "height": 0.24444444444444444,
+            "width": 0.25416666666666665,
+            "x": 0.1763888888888889,
+            "y": 0.39861111111111114
+          }
+        }
+      }
+    },
+    "wfC510": {
+      "catalogName": "WF-C510",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogec4790f5ed064a7fbb44646a3139a237",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ec4790f5-ed06-4a7f-bb44-646a3139a237.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.6513888888888889,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          },
+          "left": "SonyCatalogec4790f5ed064a7fbb44646a3139a237",
+          "right": "SonyCatalogec4790f5ed064a7fbb44646a3139a237",
+          "leftBounds": {
+            "height": 0.21944444444444444,
+            "width": 0.30416666666666664,
+            "x": 0.5222222222222223,
+            "y": 0.3888888888888889
+          },
+          "rightBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.28055555555555556,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogec4790f5ed064a7fbb44646a3139a237",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ec4790f5-ed06-4a7f-bb44-646a3139a237.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.6513888888888889,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          },
+          "left": "SonyCatalogec4790f5ed064a7fbb44646a3139a237",
+          "right": "SonyCatalogec4790f5ed064a7fbb44646a3139a237",
+          "leftBounds": {
+            "height": 0.21944444444444444,
+            "width": 0.30416666666666664,
+            "x": 0.5222222222222223,
+            "y": 0.3888888888888889
+          },
+          "rightBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.28055555555555556,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog10bda0d345af47c5a7e0ee5cafa3d23a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/10bda0d3-45af-47c5-a7e0-ee5cafa3d23a.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.6513888888888889,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          },
+          "left": "SonyCatalog10bda0d345af47c5a7e0ee5cafa3d23a",
+          "right": "SonyCatalog10bda0d345af47c5a7e0ee5cafa3d23a",
+          "leftBounds": {
+            "height": 0.21944444444444444,
+            "width": 0.30416666666666664,
+            "x": 0.5222222222222223,
+            "y": 0.3888888888888889
+          },
+          "rightBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.28055555555555556,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog13f82464133c465f837d54426a31ddd0",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/13f82464-133c-465f-837d-54426a31ddd0.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.6513888888888889,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          },
+          "left": "SonyCatalog13f82464133c465f837d54426a31ddd0",
+          "right": "SonyCatalog13f82464133c465f837d54426a31ddd0",
+          "leftBounds": {
+            "height": 0.21944444444444444,
+            "width": 0.30277777777777776,
+            "x": 0.5236111111111111,
+            "y": 0.3888888888888889
+          },
+          "rightBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.28055555555555556,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          }
+        },
+        "7": {
+          "hero": "SonyCatalog42f634a90aad474ca55b7f1ca5e3f5fb",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/42f634a9-0aad-474c-a55b-7f1ca5e3f5fb.png",
+          "finish": "color-07",
+          "heroBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.6513888888888889,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          },
+          "left": "SonyCatalog42f634a90aad474ca55b7f1ca5e3f5fb",
+          "right": "SonyCatalog42f634a90aad474ca55b7f1ca5e3f5fb",
+          "leftBounds": {
+            "height": 0.21944444444444444,
+            "width": 0.30416666666666664,
+            "x": 0.5222222222222223,
+            "y": 0.3888888888888889
+          },
+          "rightBounds": {
+            "height": 0.2222222222222222,
+            "width": 0.28055555555555556,
+            "x": 0.175,
+            "y": 0.3888888888888889
+          }
+        }
+      }
+    },
+    "wfC700N": {
+      "catalogName": "WF-C700N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog01701f9a56b84c8caa63671700d12c90",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/01701f9a-56b8-4c8c-aa63-671700d12c90.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.25555555555555554,
+            "width": 0.6333333333333333,
+            "x": 0.1875,
+            "y": 0.38333333333333336
+          },
+          "left": "SonyCatalog01701f9a56b84c8caa63671700d12c90",
+          "right": "SonyCatalog01701f9a56b84c8caa63671700d12c90",
+          "leftBounds": {
+            "height": 0.24861111111111112,
+            "width": 0.32222222222222224,
+            "x": 0.4986111111111111,
+            "y": 0.38333333333333336
+          },
+          "rightBounds": {
+            "height": 0.2513888888888889,
+            "width": 0.25277777777777777,
+            "x": 0.1875,
+            "y": 0.3875
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog01701f9a56b84c8caa63671700d12c90",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/01701f9a-56b8-4c8c-aa63-671700d12c90.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.25555555555555554,
+            "width": 0.6333333333333333,
+            "x": 0.1875,
+            "y": 0.38333333333333336
+          },
+          "left": "SonyCatalog01701f9a56b84c8caa63671700d12c90",
+          "right": "SonyCatalog01701f9a56b84c8caa63671700d12c90",
+          "leftBounds": {
+            "height": 0.24861111111111112,
+            "width": 0.32222222222222224,
+            "x": 0.4986111111111111,
+            "y": 0.38333333333333336
+          },
+          "rightBounds": {
+            "height": 0.2513888888888889,
+            "width": 0.25277777777777777,
+            "x": 0.1875,
+            "y": 0.3875
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog6e9048db09154b15ab44ff2bd0b6747f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/6e9048db-0915-4b15-ab44-ff2bd0b6747f.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.25555555555555554,
+            "width": 0.6333333333333333,
+            "x": 0.1875,
+            "y": 0.38333333333333336
+          },
+          "left": "SonyCatalog6e9048db09154b15ab44ff2bd0b6747f",
+          "right": "SonyCatalog6e9048db09154b15ab44ff2bd0b6747f",
+          "leftBounds": {
+            "height": 0.24861111111111112,
+            "width": 0.32222222222222224,
+            "x": 0.4986111111111111,
+            "y": 0.38333333333333336
+          },
+          "rightBounds": {
+            "height": 0.2513888888888889,
+            "width": 0.25277777777777777,
+            "x": 0.1875,
+            "y": 0.3875
+          }
+        },
+        "8": {
+          "hero": "SonyCatalogefe03989592b44739905c0bb5825f9d4",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/efe03989-592b-4473-9905-c0bb5825f9d4.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.25555555555555554,
+            "width": 0.6333333333333333,
+            "x": 0.1875,
+            "y": 0.38333333333333336
+          },
+          "left": "SonyCatalogefe03989592b44739905c0bb5825f9d4",
+          "right": "SonyCatalogefe03989592b44739905c0bb5825f9d4",
+          "leftBounds": {
+            "height": 0.24861111111111112,
+            "width": 0.32222222222222224,
+            "x": 0.4986111111111111,
+            "y": 0.38333333333333336
+          },
+          "rightBounds": {
+            "height": 0.2513888888888889,
+            "width": 0.25277777777777777,
+            "x": 0.1875,
+            "y": 0.3875
+          }
+        },
+        "14": {
+          "hero": "SonyCatalog8d025ac48b994ac68e0feee94dbc18ae",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8d025ac4-8b99-4ac6-8e0f-eee94dbc18ae.png",
+          "finish": "color-0e",
+          "heroBounds": {
+            "height": 0.25555555555555554,
+            "width": 0.6333333333333333,
+            "x": 0.1875,
+            "y": 0.38333333333333336
+          },
+          "left": "SonyCatalog8d025ac48b994ac68e0feee94dbc18ae",
+          "right": "SonyCatalog8d025ac48b994ac68e0feee94dbc18ae",
+          "leftBounds": {
+            "height": 0.24861111111111112,
+            "width": 0.32222222222222224,
+            "x": 0.4986111111111111,
+            "y": 0.38333333333333336
+          },
+          "rightBounds": {
+            "height": 0.2513888888888889,
+            "width": 0.25277777777777777,
+            "x": 0.1875,
+            "y": 0.3875
+          }
+        }
+      }
+    },
+    "wfC710N": {
+      "catalogName": "WF-C710N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog7e1a6abdb1f04504a871998e980c5b00",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/7e1a6abd-b1f0-4504-a871-998e980c5b00.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.24166666666666667,
+            "width": 0.6347222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCatalog7e1a6abdb1f04504a871998e980c5b00",
+          "right": "SonyCatalog7e1a6abdb1f04504a871998e980c5b00",
+          "leftBounds": {
+            "height": 0.24166666666666667,
+            "width": 0.31527777777777777,
+            "x": 0.4986111111111111,
+            "y": 0.39861111111111114
+          },
+          "rightBounds": {
+            "height": 0.2361111111111111,
+            "width": 0.2652777777777778,
+            "x": 0.17916666666666667,
+            "y": 0.4041666666666667
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog7e1a6abdb1f04504a871998e980c5b00",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/7e1a6abd-b1f0-4504-a871-998e980c5b00.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.24166666666666667,
+            "width": 0.6347222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCatalog7e1a6abdb1f04504a871998e980c5b00",
+          "right": "SonyCatalog7e1a6abdb1f04504a871998e980c5b00",
+          "leftBounds": {
+            "height": 0.24166666666666667,
+            "width": 0.31527777777777777,
+            "x": 0.4986111111111111,
+            "y": 0.39861111111111114
+          },
+          "rightBounds": {
+            "height": 0.2361111111111111,
+            "width": 0.2652777777777778,
+            "x": 0.17916666666666667,
+            "y": 0.4041666666666667
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog86df950fe51a45269d1fd80338cee459",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/86df950f-e51a-4526-9d1f-d80338cee459.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.24166666666666667,
+            "width": 0.6347222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCatalog86df950fe51a45269d1fd80338cee459",
+          "right": "SonyCatalog86df950fe51a45269d1fd80338cee459",
+          "leftBounds": {
+            "height": 0.24166666666666667,
+            "width": 0.31527777777777777,
+            "x": 0.4986111111111111,
+            "y": 0.39861111111111114
+          },
+          "rightBounds": {
+            "height": 0.2361111111111111,
+            "width": 0.2652777777777778,
+            "x": 0.17916666666666667,
+            "y": 0.4041666666666667
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog27f47a6e5b1d40bdb2365594d0396db7",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/27f47a6e-5b1d-40bd-b236-5594d0396db7.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.24305555555555555,
+            "width": 0.6347222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCatalog27f47a6e5b1d40bdb2365594d0396db7",
+          "right": "SonyCatalog27f47a6e5b1d40bdb2365594d0396db7",
+          "leftBounds": {
+            "height": 0.24166666666666667,
+            "width": 0.31527777777777777,
+            "x": 0.4986111111111111,
+            "y": 0.39861111111111114
+          },
+          "rightBounds": {
+            "height": 0.2375,
+            "width": 0.2652777777777778,
+            "x": 0.17916666666666667,
+            "y": 0.4041666666666667
+          }
+        },
+        "6": {
+          "hero": "SonyCatalog1cfb67faac984de9bf1d7963a8ee9739",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/1cfb67fa-ac98-4de9-bf1d-7963a8ee9739.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.24166666666666667,
+            "width": 0.6347222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.39861111111111114
+          },
+          "left": "SonyCatalog1cfb67faac984de9bf1d7963a8ee9739",
+          "right": "SonyCatalog1cfb67faac984de9bf1d7963a8ee9739",
+          "leftBounds": {
+            "height": 0.24166666666666667,
+            "width": 0.31527777777777777,
+            "x": 0.4986111111111111,
+            "y": 0.39861111111111114
+          },
+          "rightBounds": {
+            "height": 0.2361111111111111,
+            "width": 0.2652777777777778,
+            "x": 0.17916666666666667,
+            "y": 0.4041666666666667
+          }
+        }
+      }
+    },
+    "wfG700N": {
+      "catalogName": "INZONE Buds",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog30e48f50185443d381d9b4fe9917063d",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/30e48f50-1854-43d3-81d9-b4fe9917063d.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.4305555555555556,
+            "width": 0.6333333333333333,
+            "x": 0.18055555555555555,
+            "y": 0.3
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogda73c771469546d5b744e569bb3cdd30",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/da73c771-4695-46d5-b744-e569bb3cdd30.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.42916666666666664,
+            "width": 0.6333333333333333,
+            "x": 0.18055555555555555,
+            "y": 0.3013888888888889
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog3d0ebc4192454565bf2095bcfe649757",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/3d0ebc41-9245-4565-bf20-95bcfe649757.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.4305555555555556,
+            "width": 0.6347222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.3
+          }
+        },
+        "14": {
+          "hero": "SonyCatalog30e48f50185443d381d9b4fe9917063d",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/30e48f50-1854-43d3-81d9-b4fe9917063d.png",
+          "finish": "color-0e",
+          "heroBounds": {
+            "height": 0.4305555555555556,
+            "width": 0.6333333333333333,
+            "x": 0.18055555555555555,
+            "y": 0.3
+          }
+        }
+      }
+    },
+    "wfH800": {
+      "catalogName": "WF-H800",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog26b0f7fc75334a3881492669cc7b2cb1",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/26b0f7fc-7533-4a38-8149-2669cc7b2cb1.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.2375,
+            "width": 0.6361111111111111,
+            "x": 0.17916666666666667,
+            "y": 0.41388888888888886
+          },
+          "left": "SonyCatalog26b0f7fc75334a3881492669cc7b2cb1",
+          "right": "SonyCatalog26b0f7fc75334a3881492669cc7b2cb1",
+          "leftBounds": {
+            "height": 0.20694444444444443,
+            "width": 0.2625,
+            "x": 0.5527777777777778,
+            "y": 0.41388888888888886
+          },
+          "rightBounds": {
+            "height": 0.22083333333333333,
+            "width": 0.2847222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.4305555555555556
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog26b0f7fc75334a3881492669cc7b2cb1",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/26b0f7fc-7533-4a38-8149-2669cc7b2cb1.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.2375,
+            "width": 0.6361111111111111,
+            "x": 0.17916666666666667,
+            "y": 0.41388888888888886
+          },
+          "left": "SonyCatalog26b0f7fc75334a3881492669cc7b2cb1",
+          "right": "SonyCatalog26b0f7fc75334a3881492669cc7b2cb1",
+          "leftBounds": {
+            "height": 0.20694444444444443,
+            "width": 0.2625,
+            "x": 0.5527777777777778,
+            "y": 0.41388888888888886
+          },
+          "rightBounds": {
+            "height": 0.22083333333333333,
+            "width": 0.2847222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.4305555555555556
+          }
+        },
+        "4": {
+          "hero": "SonyCatalogc4ccc246a8754a13a62e8256f4d67f42",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c4ccc246-a875-4a13-a62e-8256f4d67f42.png",
+          "finish": "color-04",
+          "heroBounds": {
+            "height": 0.2375,
+            "width": 0.6361111111111111,
+            "x": 0.17916666666666667,
+            "y": 0.41388888888888886
+          },
+          "left": "SonyCatalogc4ccc246a8754a13a62e8256f4d67f42",
+          "right": "SonyCatalogc4ccc246a8754a13a62e8256f4d67f42",
+          "leftBounds": {
+            "height": 0.20694444444444443,
+            "width": 0.2625,
+            "x": 0.5527777777777778,
+            "y": 0.41388888888888886
+          },
+          "rightBounds": {
+            "height": 0.22083333333333333,
+            "width": 0.2847222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.4305555555555556
+          }
+        },
+        "5": {
+          "hero": "SonyCatalogea3a7a9d85904062933a405faad90cd7",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ea3a7a9d-8590-4062-933a-405faad90cd7.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.2375,
+            "width": 0.6361111111111111,
+            "x": 0.17916666666666667,
+            "y": 0.41388888888888886
+          },
+          "left": "SonyCatalogea3a7a9d85904062933a405faad90cd7",
+          "right": "SonyCatalogea3a7a9d85904062933a405faad90cd7",
+          "leftBounds": {
+            "height": 0.20694444444444443,
+            "width": 0.2625,
+            "x": 0.5527777777777778,
+            "y": 0.41388888888888886
+          },
+          "rightBounds": {
+            "height": 0.22083333333333333,
+            "width": 0.2847222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.4305555555555556
+          }
+        },
+        "8": {
+          "hero": "SonyCatalogb2994e2105244346b7d7a7a699265592",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/b2994e21-0524-4346-b7d7-a7a699265592.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.2375,
+            "width": 0.6361111111111111,
+            "x": 0.17916666666666667,
+            "y": 0.41388888888888886
+          },
+          "left": "SonyCatalogb2994e2105244346b7d7a7a699265592",
+          "right": "SonyCatalogb2994e2105244346b7d7a7a699265592",
+          "leftBounds": {
+            "height": 0.20694444444444443,
+            "width": 0.2625,
+            "x": 0.5527777777777778,
+            "y": 0.41388888888888886
+          },
+          "rightBounds": {
+            "height": 0.22083333333333333,
+            "width": 0.2847222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.4305555555555556
+          }
+        },
+        "12": {
+          "hero": "SonyCatalog1d88bdf223d14cdf8c6c9349ae5b0d92",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/1d88bdf2-23d1-4cdf-8c6c-9349ae5b0d92.png",
+          "finish": "color-0c",
+          "heroBounds": {
+            "height": 0.2375,
+            "width": 0.6361111111111111,
+            "x": 0.17916666666666667,
+            "y": 0.41388888888888886
+          },
+          "left": "SonyCatalog1d88bdf223d14cdf8c6c9349ae5b0d92",
+          "right": "SonyCatalog1d88bdf223d14cdf8c6c9349ae5b0d92",
+          "leftBounds": {
+            "height": 0.20694444444444443,
+            "width": 0.2625,
+            "x": 0.5527777777777778,
+            "y": 0.41388888888888886
+          },
+          "rightBounds": {
+            "height": 0.22083333333333333,
+            "width": 0.2847222222222222,
+            "x": 0.17916666666666667,
+            "y": 0.4305555555555556
+          }
+        }
+      }
+    },
+    "wfL900": {
+      "catalogName": "LinkBuds",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog2e309fdbc27443d6850b35b269807504",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2e309fdb-c274-43d6-850b-35b269807504.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.41944444444444445,
+            "width": 0.5263888888888889,
+            "x": 0.24722222222222223,
+            "y": 0.29444444444444445
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog2e309fdbc27443d6850b35b269807504",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2e309fdb-c274-43d6-850b-35b269807504.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.41944444444444445,
+            "width": 0.5263888888888889,
+            "x": 0.24722222222222223,
+            "y": 0.29444444444444445
+          }
+        },
+        "9": {
+          "hero": "SonyCatalog0db301f11a5541d3a25508dad829f0a8",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0db301f1-1a55-41d3-a255-08dad829f0a8.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.41388888888888886,
+            "width": 0.5222222222222223,
+            "x": 0.2513888888888889,
+            "y": 0.3
+          }
+        }
+      }
+    },
+    "wfL900UC": {
+      "catalogName": "LinkBuds UC",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogc457e1e6eed44735ac24cd0f5dea6845",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c457e1e6-eed4-4735-ac24-cd0f5dea6845.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.41388888888888886,
+            "width": 0.5222222222222223,
+            "x": 0.2513888888888889,
+            "y": 0.3
+          }
+        },
+        "9": {
+          "hero": "SonyCatalogc457e1e6eed44735ac24cd0f5dea6845",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c457e1e6-eed4-4735-ac24-cd0f5dea6845.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.41388888888888886,
+            "width": 0.5222222222222223,
+            "x": 0.2513888888888889,
+            "y": 0.3
+          }
+        }
+      }
+    },
+    "wfL910": {
+      "catalogName": "LinkBuds Open",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogeeb73a465f3349998bb9818db1ef17b7",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/eeb73a46-5f33-4999-8bb9-818db1ef17b7.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.6555555555555556,
+            "x": 0.17222222222222222,
+            "y": 0.33194444444444443
+          },
+          "left": "SonyCatalogeeb73a465f3349998bb9818db1ef17b7",
+          "right": "SonyCatalogeeb73a465f3349998bb9818db1ef17b7",
+          "leftBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.24583333333333332,
+            "x": 0.5819444444444445,
+            "y": 0.33194444444444443
+          },
+          "rightBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.2569444444444444,
+            "x": 0.17222222222222222,
+            "y": 0.33194444444444443
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogeeb73a465f3349998bb9818db1ef17b7",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/eeb73a46-5f33-4999-8bb9-818db1ef17b7.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.6555555555555556,
+            "x": 0.17222222222222222,
+            "y": 0.33194444444444443
+          },
+          "left": "SonyCatalogeeb73a465f3349998bb9818db1ef17b7",
+          "right": "SonyCatalogeeb73a465f3349998bb9818db1ef17b7",
+          "leftBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.24583333333333332,
+            "x": 0.5819444444444445,
+            "y": 0.33194444444444443
+          },
+          "rightBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.2569444444444444,
+            "x": 0.17222222222222222,
+            "y": 0.33194444444444443
+          }
+        },
+        "2": {
+          "hero": "SonyCatalogc72fb61edbee42a89d7d55993a0a72a3",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c72fb61e-dbee-42a8-9d7d-55993a0a72a3.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.6555555555555556,
+            "x": 0.17222222222222222,
+            "y": 0.33194444444444443
+          },
+          "left": "SonyCatalogc72fb61edbee42a89d7d55993a0a72a3",
+          "right": "SonyCatalogc72fb61edbee42a89d7d55993a0a72a3",
+          "leftBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.24583333333333332,
+            "x": 0.5819444444444445,
+            "y": 0.33194444444444443
+          },
+          "rightBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.2569444444444444,
+            "x": 0.17222222222222222,
+            "y": 0.33194444444444443
+          }
+        },
+        "14": {
+          "hero": "SonyCatalogaceb1a29700d458c8be3e21968ca69a4",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/aceb1a29-700d-458c-8be3-e21968ca69a4.png",
+          "finish": "color-0e",
+          "heroBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.6555555555555556,
+            "x": 0.17222222222222222,
+            "y": 0.33194444444444443
+          },
+          "left": "SonyCatalogaceb1a29700d458c8be3e21968ca69a4",
+          "right": "SonyCatalogaceb1a29700d458c8be3e21968ca69a4",
+          "leftBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.24583333333333332,
+            "x": 0.5819444444444445,
+            "y": 0.33194444444444443
+          },
+          "rightBounds": {
+            "height": 0.30833333333333335,
+            "width": 0.2569444444444444,
+            "x": 0.17222222222222222,
+            "y": 0.33194444444444443
+          }
+        }
+      }
+    },
+    "wfLC900": {
+      "catalogName": "LinkBuds Clip",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog264be38a73674cfd812e50115663fa5b",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/264be38a-7367-4cfd-812e-50115663fa5b.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.6819444444444445,
+            "x": 0.1597222222222222,
+            "y": 0.38055555555555554
+          },
+          "left": "SonyCatalog264be38a73674cfd812e50115663fa5b",
+          "right": "SonyCatalog264be38a73674cfd812e50115663fa5b",
+          "leftBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.28194444444444444,
+            "x": 0.5597222222222222,
+            "y": 0.38055555555555554
+          },
+          "rightBounds": {
+            "height": 0.2375,
+            "width": 0.3416666666666667,
+            "x": 0.1597222222222222,
+            "y": 0.3819444444444444
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog264be38a73674cfd812e50115663fa5b",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/264be38a-7367-4cfd-812e-50115663fa5b.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.6819444444444445,
+            "x": 0.1597222222222222,
+            "y": 0.38055555555555554
+          },
+          "left": "SonyCatalog264be38a73674cfd812e50115663fa5b",
+          "right": "SonyCatalog264be38a73674cfd812e50115663fa5b",
+          "leftBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.28194444444444444,
+            "x": 0.5597222222222222,
+            "y": 0.38055555555555554
+          },
+          "rightBounds": {
+            "height": 0.2375,
+            "width": 0.3416666666666667,
+            "x": 0.1597222222222222,
+            "y": 0.3819444444444444
+          }
+        },
+        "8": {
+          "hero": "SonyCatalog99ae0a00fe28425a90f04599ddecab5f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/99ae0a00-fe28-425a-90f0-4599ddecab5f.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.6819444444444445,
+            "x": 0.1597222222222222,
+            "y": 0.38055555555555554
+          },
+          "left": "SonyCatalog99ae0a00fe28425a90f04599ddecab5f",
+          "right": "SonyCatalog99ae0a00fe28425a90f04599ddecab5f",
+          "leftBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.28194444444444444,
+            "x": 0.5597222222222222,
+            "y": 0.38055555555555554
+          },
+          "rightBounds": {
+            "height": 0.2375,
+            "width": 0.3416666666666667,
+            "x": 0.1597222222222222,
+            "y": 0.3819444444444444
+          }
+        },
+        "10": {
+          "hero": "SonyCatalogd5e4fc47f1a345fcac44259bc77a0c1f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d5e4fc47-f1a3-45fc-ac44-259bc77a0c1f.png",
+          "finish": "color-0a",
+          "heroBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.6819444444444445,
+            "x": 0.1597222222222222,
+            "y": 0.38055555555555554
+          },
+          "left": "SonyCatalogd5e4fc47f1a345fcac44259bc77a0c1f",
+          "right": "SonyCatalogd5e4fc47f1a345fcac44259bc77a0c1f",
+          "leftBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.28194444444444444,
+            "x": 0.5597222222222222,
+            "y": 0.38055555555555554
+          },
+          "rightBounds": {
+            "height": 0.2375,
+            "width": 0.3416666666666667,
+            "x": 0.1597222222222222,
+            "y": 0.3819444444444444
+          }
+        },
+        "11": {
+          "hero": "SonyCatalog2fc3cc62a9224b0cb332a11d677eba47",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2fc3cc62-a922-4b0c-b332-a11d677eba47.png",
+          "finish": "color-0b",
+          "heroBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.6819444444444445,
+            "x": 0.1597222222222222,
+            "y": 0.38055555555555554
+          },
+          "left": "SonyCatalog2fc3cc62a9224b0cb332a11d677eba47",
+          "right": "SonyCatalog2fc3cc62a9224b0cb332a11d677eba47",
+          "leftBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.28194444444444444,
+            "x": 0.5597222222222222,
+            "y": 0.38055555555555554
+          },
+          "rightBounds": {
+            "height": 0.2375,
+            "width": 0.3416666666666667,
+            "x": 0.1597222222222222,
+            "y": 0.3819444444444444
+          }
+        },
+        "14": {
+          "hero": "SonyCatalog8029e3d1c8f54934a65df5bfb9ba5335",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8029e3d1-c8f5-4934-a65d-f5bfb9ba5335.png",
+          "finish": "color-0e",
+          "heroBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.6819444444444445,
+            "x": 0.1597222222222222,
+            "y": 0.38055555555555554
+          },
+          "left": "SonyCatalog8029e3d1c8f54934a65df5bfb9ba5335",
+          "right": "SonyCatalog8029e3d1c8f54934a65df5bfb9ba5335",
+          "leftBounds": {
+            "height": 0.24027777777777778,
+            "width": 0.28194444444444444,
+            "x": 0.5597222222222222,
+            "y": 0.38055555555555554
+          },
+          "rightBounds": {
+            "height": 0.2375,
+            "width": 0.3416666666666667,
+            "x": 0.1597222222222222,
+            "y": 0.3819444444444444
+          }
+        }
+      }
+    },
+    "wfLS900N": {
+      "catalogName": "LinkBuds S",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogc3e8e3f3e66f47258f2065fedcdb0e30",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c3e8e3f3-e66f-4725-8f20-65fedcdb0e30.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.375,
+            "width": 0.5555555555555556,
+            "x": 0.22083333333333333,
+            "y": 0.3402777777777778
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogc3e8e3f3e66f47258f2065fedcdb0e30",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c3e8e3f3-e66f-4725-8f20-65fedcdb0e30.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.375,
+            "width": 0.5555555555555556,
+            "x": 0.22083333333333333,
+            "y": 0.3402777777777778
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog686e7f02fb6245eda9d26040be3779be",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/686e7f02-fb62-45ed-a9d2-6040be3779be.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.375,
+            "width": 0.5555555555555556,
+            "x": 0.22083333333333333,
+            "y": 0.3402777777777778
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog76e4e03eb1ce4449b9d51ebe86db9371",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/76e4e03e-b1ce-4449-b9d5-1ebe86db9371.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.375,
+            "width": 0.5555555555555556,
+            "x": 0.22083333333333333,
+            "y": 0.3402777777777778
+          }
+        },
+        "11": {
+          "hero": "SonyCatalog4eec68c766534c5a8f905c9a8569ef69",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4eec68c7-6653-4c5a-8f90-5c9a8569ef69.png",
+          "finish": "color-0b",
+          "heroBounds": {
+            "height": 0.375,
+            "width": 0.5555555555555556,
+            "x": 0.22083333333333333,
+            "y": 0.3402777777777778
+          }
+        },
+        "14": {
+          "hero": "SonyCatalogb4254dbdf9914c40a46be8f3cc7fd5c5",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/b4254dbd-f991-4c40-a46b-e8f3cc7fd5c5.png",
+          "finish": "color-0e",
+          "heroBounds": {
+            "height": 0.375,
+            "width": 0.5555555555555556,
+            "x": 0.22083333333333333,
+            "y": 0.3402777777777778
+          }
+        }
+      }
+    },
+    "wfLS910N": {
+      "catalogName": "LinkBuds Fit",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog2fb831824ac1432f8b5974520ee2611e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2fb83182-4ac1-432f-8b59-74520ee2611e.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.6638888888888889,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          },
+          "left": "SonyCatalog2fb831824ac1432f8b5974520ee2611e",
+          "right": "SonyCatalog2fb831824ac1432f8b5974520ee2611e",
+          "leftBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.30694444444444446,
+            "x": 0.525,
+            "y": 0.3347222222222222
+          },
+          "rightBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.2569444444444444,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog2fb831824ac1432f8b5974520ee2611e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2fb83182-4ac1-432f-8b59-74520ee2611e.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.6638888888888889,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          },
+          "left": "SonyCatalog2fb831824ac1432f8b5974520ee2611e",
+          "right": "SonyCatalog2fb831824ac1432f8b5974520ee2611e",
+          "leftBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.30694444444444446,
+            "x": 0.525,
+            "y": 0.3347222222222222
+          },
+          "rightBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.2569444444444444,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog0c85f05d0e70476284c2bca24a32726e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0c85f05d-0e70-4762-84c2-bca24a32726e.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.6638888888888889,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          },
+          "left": "SonyCatalog0c85f05d0e70476284c2bca24a32726e",
+          "right": "SonyCatalog0c85f05d0e70476284c2bca24a32726e",
+          "leftBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.30694444444444446,
+            "x": 0.525,
+            "y": 0.3347222222222222
+          },
+          "rightBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.2569444444444444,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          }
+        },
+        "6": {
+          "hero": "SonyCatalogac298b914e744275841c688eda0c87fe",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ac298b91-4e74-4275-841c-688eda0c87fe.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.275,
+            "width": 0.6194444444444445,
+            "x": 0.19444444444444445,
+            "y": 0.38055555555555554
+          },
+          "left": "SonyCatalogac298b914e744275841c688eda0c87fe",
+          "right": "SonyCatalogac298b914e744275841c688eda0c87fe",
+          "leftBounds": {
+            "height": 0.275,
+            "width": 0.2777777777777778,
+            "x": 0.5361111111111111,
+            "y": 0.38055555555555554
+          },
+          "rightBounds": {
+            "height": 0.27361111111111114,
+            "width": 0.22777777777777777,
+            "x": 0.19444444444444445,
+            "y": 0.38055555555555554
+          }
+        },
+        "8": {
+          "hero": "SonyCatalog9795b46c92834a6a970cea66a525b4d3",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/9795b46c-9283-4a6a-970c-ea66a525b4d3.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.6638888888888889,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          },
+          "left": "SonyCatalog9795b46c92834a6a970cea66a525b4d3",
+          "right": "SonyCatalog9795b46c92834a6a970cea66a525b4d3",
+          "leftBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.30694444444444446,
+            "x": 0.525,
+            "y": 0.3347222222222222
+          },
+          "rightBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.2569444444444444,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          }
+        },
+        "14": {
+          "hero": "SonyCatalog7de976afebfa4d45b178c69ec4bd394b",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/7de976af-ebfa-4d45-b178-c69ec4bd394b.png",
+          "finish": "color-0e",
+          "heroBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.6638888888888889,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          },
+          "left": "SonyCatalog7de976afebfa4d45b178c69ec4bd394b",
+          "right": "SonyCatalog7de976afebfa4d45b178c69ec4bd394b",
+          "leftBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.30694444444444446,
+            "x": 0.525,
+            "y": 0.3347222222222222
+          },
+          "rightBounds": {
+            "height": 0.3055555555555556,
+            "width": 0.2569444444444444,
+            "x": 0.16805555555555557,
+            "y": 0.3347222222222222
+          }
+        }
+      }
+    },
+    "wfSP700N": {
+      "catalogName": "WF-SP700N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog8671f9d68c444f2895fea918530eed19",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8671f9d6-8c44-4f28-95fe-a918530eed19.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.55,
+            "width": 0.5180555555555556,
+            "x": 0.23333333333333334,
+            "y": 0.20972222222222223
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog8671f9d68c444f2895fea918530eed19",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8671f9d6-8c44-4f28-95fe-a918530eed19.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.55,
+            "width": 0.5180555555555556,
+            "x": 0.23333333333333334,
+            "y": 0.20972222222222223
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog0733f031bf52439b8c6f46667b45f413",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0733f031-bf52-439b-8c6f-46667b45f413.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.55,
+            "width": 0.5166666666666667,
+            "x": 0.23472222222222222,
+            "y": 0.20972222222222223
+          }
+        },
+        "5": {
+          "hero": "SonyCatalogf366a839a15a4f2496913b70d046d8b2",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/f366a839-a15a-4f24-9691-3b70d046d8b2.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.55,
+            "width": 0.5180555555555556,
+            "x": 0.23333333333333334,
+            "y": 0.2111111111111111
+          }
+        },
+        "6": {
+          "hero": "SonyCatalog1aa9330f7efb4be1a0cbf35890af5f16",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/1aa9330f-7efb-4be1-a0cb-f35890af5f16.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.5486111111111112,
+            "width": 0.5166666666666667,
+            "x": 0.23472222222222222,
+            "y": 0.2111111111111111
+          }
+        },
+        "7": {
+          "hero": "SonyCatalogb09e75d128d547f38085ed3cbf21ff5e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/b09e75d1-28d5-47f3-8085-ed3cbf21ff5e.png",
+          "finish": "color-07",
+          "heroBounds": {
+            "height": 0.55,
+            "width": 0.5180555555555556,
+            "x": 0.23333333333333334,
+            "y": 0.20972222222222223
+          }
+        }
+      }
+    },
+    "wfSP800N": {
+      "catalogName": "WF-SP800N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog0596b4eab1894bd9af195c4e97ed02fc",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0596b4ea-b189-4bd9-af19-5c4e97ed02fc.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.31805555555555554,
+            "width": 0.6430555555555556,
+            "x": 0.175,
+            "y": 0.36666666666666664
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog0596b4eab1894bd9af195c4e97ed02fc",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0596b4ea-b189-4bd9-af19-5c4e97ed02fc.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.31805555555555554,
+            "width": 0.6430555555555556,
+            "x": 0.175,
+            "y": 0.36666666666666664
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog180bc62923ec4250bc08bbbf09b87d3a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/180bc629-23ec-4250-bc08-bbbf09b87d3a.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.31805555555555554,
+            "width": 0.6430555555555556,
+            "x": 0.175,
+            "y": 0.36666666666666664
+          }
+        },
+        "5": {
+          "hero": "SonyCatalogba722b958dc7465cbfc6cd6e98cd039c",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ba722b95-8dc7-465c-bfc6-cd6e98cd039c.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.31805555555555554,
+            "width": 0.6430555555555556,
+            "x": 0.175,
+            "y": 0.36666666666666664
+          }
+        },
+        "12": {
+          "hero": "SonyCatalog0c6a064e0bbc421ebabd0c7a53caea44",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0c6a064e-0bbc-421e-babd-0c7a53caea44.png",
+          "finish": "color-0c",
+          "heroBounds": {
+            "height": 0.31805555555555554,
+            "width": 0.6430555555555556,
+            "x": 0.175,
+            "y": 0.36666666666666664
+          }
+        }
+      }
+    },
+    "wfSP900": {
+      "catalogName": "WF-SP900",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog7bf17dd9d2bc4440a7cc9fed0910fb93",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/7bf17dd9-d2bc-4440-a7cc-9fed0910fb93.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5625,
+            "width": 0.5333333333333333,
+            "x": 0.2263888888888889,
+            "y": 0.2222222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog7bf17dd9d2bc4440a7cc9fed0910fb93",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/7bf17dd9-d2bc-4440-a7cc-9fed0910fb93.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5625,
+            "width": 0.5333333333333333,
+            "x": 0.2263888888888889,
+            "y": 0.2222222222222222
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog4a46db78dfff4a17913229be7bbbf331",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4a46db78-dfff-4a17-9132-29be7bbbf331.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.5625,
+            "width": 0.5333333333333333,
+            "x": 0.2263888888888889,
+            "y": 0.2222222222222222
+          }
+        },
+        "6": {
+          "hero": "SonyCatalogf48da94490ba4983b46941cd77b0b2f3",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/f48da944-90ba-4983-b469-41cd77b0b2f3.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.5625,
+            "width": 0.5333333333333333,
+            "x": 0.2263888888888889,
+            "y": 0.2222222222222222
+          }
+        },
+        "7": {
+          "hero": "SonyCatalog1a65885d818f4ca5b1d8e3398b8d0efb",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/1a65885d-818f-4ca5-b1d8-e3398b8d0efb.png",
+          "finish": "color-07",
+          "heroBounds": {
+            "height": 0.5625,
+            "width": 0.5333333333333333,
+            "x": 0.2263888888888889,
+            "y": 0.2222222222222222
+          }
+        }
+      }
+    },
+    "wfXM3": {
+      "catalogName": "WF-1000XM3",
+      "colors": {
+        "0": {
+          "hero": "wfXM3Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4357c544-a39a-4c45-8dd0-b75fa3db07d3.png",
+          "finish": "default",
+          "suffix": "",
+          "left": "wfXM3ProductLeft",
+          "right": "wfXM3ProductRight",
+          "caseImage": "wfXM3CaseProduct"
+        },
+        "1": {
+          "hero": "wfXM3Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4357c544-a39a-4c45-8dd0-b75fa3db07d3.png",
+          "finish": "black",
+          "suffix": "",
+          "left": "wfXM3ProductLeft",
+          "right": "wfXM3ProductRight",
+          "caseImage": "wfXM3CaseProduct"
+        },
+        "3": {
+          "hero": "wfXM3ProductSilver",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0fa64cf8-c69e-44da-8228-21d54897ed3e.png",
+          "finish": "platinum-silver",
+          "suffix": "Silver",
+          "left": "wfXM3ProductLeftSilver",
+          "right": "wfXM3ProductRightSilver",
+          "caseImage": "wfXM3CaseProductSilver"
+        }
+      }
+    },
+    "wfXM4": {
+      "catalogName": "WF-1000XM4",
+      "colors": {
+        "0": {
+          "hero": "wfXM4Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/91924b74-3e6a-43b4-9655-08020d513951.png",
+          "finish": "default",
+          "suffix": "",
+          "left": "wfXM4ProductLeft",
+          "right": "wfXM4ProductRight",
+          "caseImage": "wfXM4CaseProduct"
+        },
+        "1": {
+          "hero": "wfXM4Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/91924b74-3e6a-43b4-9655-08020d513951.png",
+          "finish": "black",
+          "suffix": "",
+          "left": "wfXM4ProductLeft",
+          "right": "wfXM4ProductRight",
+          "caseImage": "wfXM4CaseProduct"
+        },
+        "3": {
+          "hero": "wfXM4ProductSilver",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/b18c4427-ca71-4d3f-84f4-e328dc002ce3.png",
+          "finish": "platinum-silver",
+          "suffix": "Silver",
+          "left": "wfXM4ProductLeftSilver",
+          "right": "wfXM4ProductRightSilver",
+          "caseImage": "wfXM4CaseProductSilver"
+        }
+      }
+    },
+    "wfXM5": {
+      "catalogName": "WF-1000XM5",
+      "colors": {
+        "0": {
+          "hero": "WFXM5Hero",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/b195e9ac-6901-442f-8dc9-e0d32c1de12d.png",
+          "finish": "default",
+          "suffix": "",
+          "left": "WFXM5Front",
+          "right": "WFXM5Front",
+          "caseImage": "wfXM5CaseProduct",
+          "openCase": "wfXM5OpenCaseProduct",
+          "leftBounds": {
+            "x": 0.5,
+            "y": 0,
+            "width": 0.5,
+            "height": 1
+          },
+          "rightBounds": {
+            "x": 0,
+            "y": 0,
+            "width": 0.5,
+            "height": 1
+          }
+        },
+        "1": {
+          "hero": "WFXM5Hero",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/b195e9ac-6901-442f-8dc9-e0d32c1de12d.png",
+          "finish": "black",
+          "suffix": "",
+          "left": "WFXM5Front",
+          "right": "WFXM5Front",
+          "caseImage": "wfXM5CaseProduct",
+          "openCase": "wfXM5OpenCaseProduct",
+          "leftBounds": {
+            "x": 0.5,
+            "y": 0,
+            "width": 0.5,
+            "height": 1
+          },
+          "rightBounds": {
+            "x": 0,
+            "y": 0,
+            "width": 0.5,
+            "height": 1
+          }
+        },
+        "3": {
+          "hero": "SonyCatalogad387762be024acca49b819bb1e69771",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ad387762-be02-4acc-a49b-819bb1e69771.png",
+          "finish": "platinum-silver",
+          "suffix": "Silver",
+          "left": "WFXM5FrontSilver",
+          "right": "WFXM5FrontSilver",
+          "caseImage": "wfXM5CaseProductSilver",
+          "openCase": "wfXM5OpenCaseProductSilver",
+          "heroBounds": {
+            "height": 0.48055555555555557,
+            "width": 0.5722222222222222,
+            "x": 0.21388888888888888,
+            "y": 0.28055555555555556
+          },
+          "leftBounds": {
+            "x": 0.5,
+            "y": 0,
+            "width": 0.5,
+            "height": 1
+          },
+          "rightBounds": {
+            "x": 0,
+            "y": 0,
+            "width": 0.5,
+            "height": 1
+          }
+        },
+        "6": {
+          "hero": "SonyCatalog338d6904db3c4cbe87edd05f61b83399",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/338d6904-db3c-4cbe-87ed-d05f61b83399.png",
+          "finish": "smoky-pink",
+          "suffix": "SmokyPink",
+          "left": "WFXM5FrontSmokyPink",
+          "right": "WFXM5FrontSmokyPink",
+          "caseImage": "wfXM5CaseProductSmokyPink",
+          "openCase": "wfXM5OpenCaseProductSmokyPink",
+          "heroBounds": {
+            "height": 0.48055555555555557,
+            "width": 0.5722222222222222,
+            "x": 0.21388888888888888,
+            "y": 0.28055555555555556
+          },
+          "leftBounds": {
+            "x": 0.5,
+            "y": 0,
+            "width": 0.5,
+            "height": 1
+          },
+          "rightBounds": {
+            "x": 0,
+            "y": 0,
+            "width": 0.5,
+            "height": 1
+          }
+        }
+      }
+    },
+    "wfXM6": {
+      "catalogName": "WF-1000XM6",
+      "colors": {
+        "0": {
+          "hero": "wfXM6Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/428e2f01-b043-48aa-96bc-01a924dbe531.png",
+          "finish": "default",
+          "suffix": "",
+          "left": "wfXM6ProductLeft",
+          "right": "wfXM6ProductRight",
+          "caseImage": "wfXM6CaseProduct",
+          "openCase": "wfXM6OpenCaseProduct"
+        },
+        "1": {
+          "hero": "wfXM6Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/428e2f01-b043-48aa-96bc-01a924dbe531.png",
+          "finish": "black",
+          "suffix": "",
+          "left": "wfXM6ProductLeft",
+          "right": "wfXM6ProductRight",
+          "caseImage": "wfXM6CaseProduct",
+          "openCase": "wfXM6OpenCaseProduct"
+        },
+        "3": {
+          "hero": "wfXM6ProductSilver",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d66b5c08-ef4e-4929-8025-ab63d7cf3bf7.png",
+          "finish": "platinum-silver",
+          "suffix": "Silver",
+          "left": "wfXM6ProductLeftSilver",
+          "right": "wfXM6ProductRightSilver",
+          "caseImage": "wfXM6CaseProductSilver",
+          "openCase": "wfXM6OpenCaseProductSilver"
+        }
+      }
+    },
+    "wh1000XX": {
+      "catalogName": "1000X THE COLLEXION",
+      "colors": {
+        "0": {
+          "hero": "wh1000XXProduct",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/e477bc88-6a30-419a-ae8a-210d38f416b1.png",
+          "finish": "default",
+          "suffix": ""
+        },
+        "1": {
+          "hero": "wh1000XXProduct",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/e477bc88-6a30-419a-ae8a-210d38f416b1.png",
+          "finish": "black",
+          "suffix": ""
+        },
+        "2": {
+          "hero": "wh1000XXProductPlatinum",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/bd0464c3-14c6-481c-94ad-e0fb2c2b549a.png",
+          "finish": "platinum",
+          "suffix": "Platinum"
+        }
+      }
+    },
+    "whCH520": {
+      "catalogName": "WH-CH520",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog2a5c0a5865fe4039b281232b7415dc43",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2a5c0a58-65fe-4039-b281-232b7415dc43.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.37916666666666665,
+            "x": 0.29444444444444445,
+            "y": 0.19305555555555556
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog2a5c0a5865fe4039b281232b7415dc43",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2a5c0a58-65fe-4039-b281-232b7415dc43.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.37916666666666665,
+            "x": 0.29444444444444445,
+            "y": 0.19305555555555556
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog42f721257fb748aeb3f1a48bb81737de",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/42f72125-7fb7-48ae-b3f1-a48bb81737de.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.37916666666666665,
+            "x": 0.29444444444444445,
+            "y": 0.19305555555555556
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog3944a2df4ca94b7892a20ae78121685f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/3944a2df-4ca9-4b78-92a2-0ae78121685f.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.37916666666666665,
+            "x": 0.29444444444444445,
+            "y": 0.19305555555555556
+          }
+        },
+        "6": {
+          "hero": "SonyCatalogbb04b6c0c5a7429eafad217c6402cbde",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/bb04b6c0-c5a7-429e-afad-217c6402cbde.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.5986111111111111,
+            "width": 0.3861111111111111,
+            "x": 0.2861111111111111,
+            "y": 0.1875
+          }
+        },
+        "7": {
+          "hero": "SonyCatalogb6068258acff4e36a5c347176752e58c",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/b6068258-acff-4e36-a5c3-47176752e58c.png",
+          "finish": "color-07",
+          "heroBounds": {
+            "height": 0.5986111111111111,
+            "width": 0.3861111111111111,
+            "x": 0.2861111111111111,
+            "y": 0.1875
+          }
+        },
+        "11": {
+          "hero": "SonyCatalog84e1a8a601744ab784fa496175d5f9e5",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/84e1a8a6-0174-4ab7-84fa-496175d5f9e5.png",
+          "finish": "color-0b",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.37916666666666665,
+            "x": 0.29444444444444445,
+            "y": 0.19305555555555556
+          }
+        }
+      }
+    },
+    "whCH530": {
+      "catalogName": "WH-CH530 series",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogfe29c15129f449b7a35ac95d305f1ac6",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/fe29c151-29f4-49b7-a35a-c95d305f1ac6.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogfe29c15129f449b7a35ac95d305f1ac6",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/fe29c151-29f4-49b7-a35a-c95d305f1ac6.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "2": {
+          "hero": "SonyCatalogad4bf089666c45ef98f8749822cfe715",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ad4bf089-666c-45ef-98f8-749822cfe715.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "4": {
+          "hero": "SonyCatalogdd7f208e147d415d982e70afd6a95329",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/dd7f208e-147d-415d-982e-70afd6a95329.png",
+          "finish": "color-04",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog8264f680c4c74a1fa665fcc40e8b9722",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8264f680-c4c7-4a1f-a665-fcc40e8b9722.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "6": {
+          "hero": "SonyCatalog73996b7f0bea42569203ebf5d1161f20",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/73996b7f-0bea-4256-9203-ebf5d1161f20.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "8": {
+          "hero": "SonyCatalogecc04cab0285402292722564e8eb0b42",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ecc04cab-0285-4022-9272-2564e8eb0b42.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        }
+      }
+    },
+    "whCH535": {
+      "catalogName": "WH-CH530 series",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogfe29c15129f449b7a35ac95d305f1ac6",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/fe29c151-29f4-49b7-a35a-c95d305f1ac6.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogfe29c15129f449b7a35ac95d305f1ac6",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/fe29c151-29f4-49b7-a35a-c95d305f1ac6.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "2": {
+          "hero": "SonyCatalogad4bf089666c45ef98f8749822cfe715",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ad4bf089-666c-45ef-98f8-749822cfe715.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "4": {
+          "hero": "SonyCatalogdd7f208e147d415d982e70afd6a95329",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/dd7f208e-147d-415d-982e-70afd6a95329.png",
+          "finish": "color-04",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog8264f680c4c74a1fa665fcc40e8b9722",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8264f680-c4c7-4a1f-a665-fcc40e8b9722.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "6": {
+          "hero": "SonyCatalog73996b7f0bea42569203ebf5d1161f20",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/73996b7f-0bea-4256-9203-ebf5d1161f20.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        },
+        "8": {
+          "hero": "SonyCatalogecc04cab0285402292722564e8eb0b42",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ecc04cab-0285-4022-9272-2564e8eb0b42.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.6125,
+            "width": 0.39444444444444443,
+            "x": 0.2777777777777778,
+            "y": 0.19444444444444445
+          }
+        }
+      }
+    },
+    "whCH700N": {
+      "catalogName": "WH-CH700N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogc892e1934aad430cb3ba5c5e70de6cca",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c892e193-4aad-430c-b3ba-5c5e70de6cca.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.3875,
+            "x": 0.2861111111111111,
+            "y": 0.19722222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogc892e1934aad430cb3ba5c5e70de6cca",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c892e193-4aad-430c-b3ba-5c5e70de6cca.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.3875,
+            "x": 0.2861111111111111,
+            "y": 0.19722222222222222
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog7cc131a794914701bf8b2d34627aeb95",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/7cc131a7-9491-4701-bf8b-2d34627aeb95.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.3861111111111111,
+            "x": 0.2861111111111111,
+            "y": 0.19722222222222222
+          }
+        },
+        "9": {
+          "hero": "SonyCatalog85810808bf8e4baa8fd48c685cff33a4",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/85810808-bf8e-4baa-8fd4-8c685cff33a4.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.3861111111111111,
+            "x": 0.2861111111111111,
+            "y": 0.1986111111111111
+          }
+        }
+      }
+    },
+    "whCH720N": {
+      "catalogName": "WH-CH720N",
+      "colors": {
+        "0": {
+          "hero": "whCH720NProduct",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c26f383f-79e9-4b97-84a3-29bb4007598d.png",
+          "finish": "default",
+          "suffix": ""
+        },
+        "1": {
+          "hero": "whCH720NProduct",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c26f383f-79e9-4b97-84a3-29bb4007598d.png",
+          "finish": "black",
+          "suffix": ""
+        },
+        "2": {
+          "hero": "whCH720NProductWhite",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/a7b7dd05-0db7-49cd-bac2-66e3b4aef73a.png",
+          "finish": "white",
+          "suffix": "White"
+        },
+        "5": {
+          "hero": "whCH720NProductBlue",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/5bd19958-cede-43f8-a0ea-27a9527dfd6c.png",
+          "finish": "blue",
+          "suffix": "Blue"
+        },
+        "6": {
+          "hero": "whCH720NProductPink",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/7d72b6d5-6f48-481b-89c8-7d9f0f7a09d4.png",
+          "finish": "pink",
+          "suffix": "Pink"
+        }
+      }
+    },
+    "whCH730N": {
+      "catalogName": "WH-CH730N series",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog2b9a45dcf5b34a599ff904ccc5740568",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2b9a45dc-f5b3-4a59-9ff9-04ccc5740568.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog2b9a45dcf5b34a599ff904ccc5740568",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2b9a45dc-f5b3-4a59-9ff9-04ccc5740568.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog6fc8a1f3e78e4268bbb692950c37e0bd",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/6fc8a1f3-e78e-4268-bbb6-92950c37e0bd.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog4ee7313733e24f0cad03619cc344cf38",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4ee73137-33e2-4f0c-ad03-619cc344cf38.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "6": {
+          "hero": "SonyCatalogc89674c8d74f4a65ac484cffd93984f8",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c89674c8-d74f-4a65-ac48-4cffd93984f8.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "11": {
+          "hero": "SonyCatalog4077c1c6527542949aed43e000b76a1d",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4077c1c6-5275-4294-9aed-43e000b76a1d.png",
+          "finish": "color-0b",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        }
+      }
+    },
+    "whCH735N": {
+      "catalogName": "WH-CH730N series",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog2b9a45dcf5b34a599ff904ccc5740568",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2b9a45dc-f5b3-4a59-9ff9-04ccc5740568.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog2b9a45dcf5b34a599ff904ccc5740568",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2b9a45dc-f5b3-4a59-9ff9-04ccc5740568.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog6fc8a1f3e78e4268bbb692950c37e0bd",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/6fc8a1f3-e78e-4268-bbb6-92950c37e0bd.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog4ee7313733e24f0cad03619cc344cf38",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4ee73137-33e2-4f0c-ad03-619cc344cf38.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "6": {
+          "hero": "SonyCatalogc89674c8d74f4a65ac484cffd93984f8",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/c89674c8-d74f-4a65-ac48-4cffd93984f8.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        },
+        "11": {
+          "hero": "SonyCatalog4077c1c6527542949aed43e000b76a1d",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4077c1c6-5275-4294-9aed-43e000b76a1d.png",
+          "finish": "color-0b",
+          "heroBounds": {
+            "height": 0.5833333333333334,
+            "width": 0.4,
+            "x": 0.27361111111111114,
+            "y": 0.20833333333333334
+          }
+        }
+      }
+    },
+    "whG910N": {
+      "catalogName": "INZONE H9 II",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog2acb2089dced4eec80dbe679dbaa9104",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2acb2089-dced-4eec-80db-e679dbaa9104.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.5736111111111111,
+            "x": 0.11805555555555555,
+            "y": 0.19722222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog2acb2089dced4eec80dbe679dbaa9104",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2acb2089-dced-4eec-80db-e679dbaa9104.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.5736111111111111,
+            "x": 0.11805555555555555,
+            "y": 0.19722222222222222
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog22cc5dc8b57044a3b1216c6eee0e6d18",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/22cc5dc8-b570-44a3-b121-6c6eee0e6d18.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.5736111111111111,
+            "x": 0.11805555555555555,
+            "y": 0.19722222222222222
+          }
+        },
+        "12": {
+          "hero": "SonyCatalogcf069c599c5d4d10a6c84ed72471960f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/cf069c59-9c5d-4d10-a6c8-4ed72471960f.png",
+          "finish": "color-0c",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.575,
+            "x": 0.11666666666666667,
+            "y": 0.19722222222222222
+          }
+        }
+      }
+    },
+    "whH800": {
+      "catalogName": "WH-H800",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog18670fd666a54ae5a108a67755517731",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/18670fd6-66a5-4ae5-a108-a67755517731.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5930555555555556,
+            "width": 0.3597222222222222,
+            "x": 0.29305555555555557,
+            "y": 0.19444444444444445
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog18670fd666a54ae5a108a67755517731",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/18670fd6-66a5-4ae5-a108-a67755517731.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5930555555555556,
+            "width": 0.3597222222222222,
+            "x": 0.29305555555555557,
+            "y": 0.19444444444444445
+          }
+        },
+        "4": {
+          "hero": "SonyCatalog364c7ac857ef40a7817f578c1e33082a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/364c7ac8-57ef-40a7-817f-578c1e33082a.png",
+          "finish": "color-04",
+          "heroBounds": {
+            "height": 0.5930555555555556,
+            "width": 0.3597222222222222,
+            "x": 0.29305555555555557,
+            "y": 0.19444444444444445
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog4081a4c7801245dea75d8bbd11befd28",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4081a4c7-8012-45de-a75d-8bbd11befd28.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5930555555555556,
+            "width": 0.3597222222222222,
+            "x": 0.29305555555555557,
+            "y": 0.19444444444444445
+          }
+        },
+        "8": {
+          "hero": "SonyCatalog72a85af3f7ad40aa8a0c2a2cfa93764a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/72a85af3-f7ad-40aa-8a0c-2a2cfa93764a.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.5930555555555556,
+            "width": 0.3597222222222222,
+            "x": 0.29305555555555557,
+            "y": 0.19444444444444445
+          }
+        },
+        "10": {
+          "hero": "SonyCatalogec60be6cdb624b2ca9f3adf8e750c7b2",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/ec60be6c-db62-4b2c-a9f3-adf8e750c7b2.png",
+          "finish": "color-0a",
+          "heroBounds": {
+            "height": 0.5930555555555556,
+            "width": 0.3597222222222222,
+            "x": 0.29305555555555557,
+            "y": 0.19444444444444445
+          }
+        }
+      }
+    },
+    "whH810": {
+      "catalogName": "WH-H810",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog8effc3ed82c14d70bdf8d91d93beb8c8",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8effc3ed-82c1-4d70-bdf8-d91d93beb8c8.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.36666666666666664,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog8effc3ed82c14d70bdf8d91d93beb8c8",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8effc3ed-82c1-4d70-bdf8-d91d93beb8c8.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.36666666666666664,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "4": {
+          "hero": "SonyCatalogfae710d66a264ce1862b3959ab2c4a20",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/fae710d6-6a26-4ce1-862b-3959ab2c4a20.png",
+          "finish": "color-04",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.36666666666666664,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog4000d62cdc444027907ec412772221dc",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4000d62c-dc44-4027-907e-c412772221dc.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.36666666666666664,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "8": {
+          "hero": "SonyCatalog85e91d0f3dbb4963bf5a5c67ce423c1e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/85e91d0f-3dbb-4963-bf5a-5c67ce423c1e.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.36666666666666664,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "12": {
+          "hero": "SonyCatalog5844c29f772b4eb39e25f97a4b2a4905",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/5844c29f-772b-4eb3-9e25-f97a4b2a4905.png",
+          "finish": "color-0c",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.36666666666666664,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        }
+      }
+    },
+    "whH900N": {
+      "catalogName": "WH-H900N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog8ccf177fa10a4794b29dbe64ccec5240",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8ccf177f-a10a-4794-b29d-be64ccec5240.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.37222222222222223,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog8ccf177fa10a4794b29dbe64ccec5240",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8ccf177f-a10a-4794-b29d-be64ccec5240.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.37222222222222223,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "4": {
+          "hero": "SonyCatalog5f7e501065774fedbc222ec753e1b500",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/5f7e5010-6577-4fed-bc22-2ec753e1b500.png",
+          "finish": "color-04",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.37222222222222223,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "5": {
+          "hero": "SonyCatalogd05fb20ea19d451c9d07caa88c5f6725",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d05fb20e-a19d-451c-9d07-caa88c5f6725.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.37222222222222223,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "8": {
+          "hero": "SonyCatalog2711e699da1c493fbfb415256d0704ce",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2711e699-da1c-493f-bfb4-15256d0704ce.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.37222222222222223,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        },
+        "10": {
+          "hero": "SonyCatalog0f336ad117944277b792a560b077de1d",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0f336ad1-1794-4277-b792-a560b077de1d.png",
+          "finish": "color-0a",
+          "heroBounds": {
+            "height": 0.5875,
+            "width": 0.37222222222222223,
+            "x": 0.29583333333333334,
+            "y": 0.19722222222222222
+          }
+        }
+      }
+    },
+    "whH910N": {
+      "catalogName": "WH-H910N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog1a780a6274bf4754b6a4dfe7f2c2c19c",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/1a780a62-74bf-4754-b6a4-dfe7f2c2c19c.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.3736111111111111,
+            "x": 0.2986111111111111,
+            "y": 0.19722222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog1a780a6274bf4754b6a4dfe7f2c2c19c",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/1a780a62-74bf-4754-b6a4-dfe7f2c2c19c.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.3736111111111111,
+            "x": 0.2986111111111111,
+            "y": 0.19722222222222222
+          }
+        },
+        "4": {
+          "hero": "SonyCatalogeecb8a0a7fe7477d9d4efe914ae31cdb",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/eecb8a0a-7fe7-477d-9d4e-fe914ae31cdb.png",
+          "finish": "color-04",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.3736111111111111,
+            "x": 0.2986111111111111,
+            "y": 0.19722222222222222
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog322e40805aa84cdaa1108419226cdddf",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/322e4080-5aa8-4cda-a110-8419226cdddf.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.3736111111111111,
+            "x": 0.2986111111111111,
+            "y": 0.19722222222222222
+          }
+        },
+        "8": {
+          "hero": "SonyCatalog984392e255a2458cb7526f9dfbfefcc7",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/984392e2-55a2-458c-b752-6f9dfbfefcc7.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.3736111111111111,
+            "x": 0.2986111111111111,
+            "y": 0.19722222222222222
+          }
+        },
+        "12": {
+          "hero": "SonyCatalogb8a93a51c57543b49e7d543f9e3aa5b5",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/b8a93a51-c575-43b4-9e7d-543f9e3aa5b5.png",
+          "finish": "color-0c",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.3736111111111111,
+            "x": 0.2986111111111111,
+            "y": 0.19722222222222222
+          }
+        }
+      }
+    },
+    "whULT900N": {
+      "catalogName": "ULT WEAR",
+      "colors": {
+        "0": {
+          "hero": "whULT900NProduct",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/a2c9308f-44db-4f22-96b2-d85f1df8821a.png",
+          "finish": "default",
+          "suffix": ""
+        },
+        "1": {
+          "hero": "whULT900NProduct",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/a2c9308f-44db-4f22-96b2-d85f1df8821a.png",
+          "finish": "black",
+          "suffix": ""
+        },
+        "2": {
+          "hero": "whULT900NProductOffWhite",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/66f174b8-4680-4fd3-99f5-73db83a628b2.png",
+          "finish": "off-white",
+          "suffix": "OffWhite"
+        },
+        "9": {
+          "hero": "whULT900NProductForestGray",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/6c4af94e-7ade-4c59-9959-81d4c5dc9dae.png",
+          "finish": "forest-gray",
+          "suffix": "ForestGray"
+        }
+      }
+    },
+    "whXB700": {
+      "catalogName": "WH-XB700",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogbf6dede3d31d419b92e71d2109f48f68",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/bf6dede3-d31d-419b-92e7-1d2109f48f68.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5847222222222223,
+            "width": 0.4,
+            "x": 0.29583333333333334,
+            "y": 0.1986111111111111
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogbf6dede3d31d419b92e71d2109f48f68",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/bf6dede3-d31d-419b-92e7-1d2109f48f68.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5847222222222223,
+            "width": 0.4,
+            "x": 0.29583333333333334,
+            "y": 0.1986111111111111
+          }
+        },
+        "5": {
+          "hero": "SonyCatalogcb47a2f6aa044a86a9ff92a78983f05a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/cb47a2f6-aa04-4a86-a9ff-92a78983f05a.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5847222222222223,
+            "width": 0.4,
+            "x": 0.29583333333333334,
+            "y": 0.1986111111111111
+          }
+        }
+      }
+    },
+    "whXB900N": {
+      "catalogName": "WH-XB900N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog899244b6aee44d87b287fae964dba1f1",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/899244b6-aee4-4d87-b287-fae964dba1f1.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.4027777777777778,
+            "x": 0.29305555555555557,
+            "y": 0.19583333333333333
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog899244b6aee44d87b287fae964dba1f1",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/899244b6-aee4-4d87-b287-fae964dba1f1.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.4027777777777778,
+            "x": 0.29305555555555557,
+            "y": 0.19583333333333333
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog29edc4438e5d44bcb0e7a1093a9d484c",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/29edc443-8e5d-44bc-b0e7-a1093a9d484c.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.4027777777777778,
+            "x": 0.29305555555555557,
+            "y": 0.19583333333333333
+          }
+        },
+        "9": {
+          "hero": "SonyCatalog3ffae6bd790f4e469287e4256d673b8d",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/3ffae6bd-790f-4e46-9287-e4256d673b8d.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.5902777777777778,
+            "width": 0.4027777777777778,
+            "x": 0.29305555555555557,
+            "y": 0.19583333333333333
+          }
+        }
+      }
+    },
+    "whXB910N": {
+      "catalogName": "WH-XB910N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog078b29ea61e84c9ca11fe4eadb792036",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/078b29ea-61e8-4c9c-a11f-e4eadb792036.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5944444444444444,
+            "width": 0.4111111111111111,
+            "x": 0.28055555555555556,
+            "y": 0.1986111111111111
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog078b29ea61e84c9ca11fe4eadb792036",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/078b29ea-61e8-4c9c-a11f-e4eadb792036.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5944444444444444,
+            "width": 0.4111111111111111,
+            "x": 0.28055555555555556,
+            "y": 0.1986111111111111
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog88bb9af8b0de495a8c5844da07c836eb",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/88bb9af8-b0de-495a-8c58-44da07c836eb.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5944444444444444,
+            "width": 0.4111111111111111,
+            "x": 0.28055555555555556,
+            "y": 0.1986111111111111
+          }
+        },
+        "9": {
+          "hero": "SonyCatalogf1bdd8930e2c4f0da1da6d688e3f2325",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/f1bdd893-0e2c-4f0d-a1da-6d688e3f2325.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.5930555555555556,
+            "width": 0.4097222222222222,
+            "x": 0.28194444444444444,
+            "y": 0.2
+          }
+        }
+      }
+    },
+    "whXM2": {
+      "catalogName": "WH-1000XM2",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog23b6830acdaa43f58ba4d650b868f60a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/23b6830a-cdaa-43f5-8ba4-d650b868f60a.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.39444444444444443,
+            "x": 0.2833333333333333,
+            "y": 0.1986111111111111
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog23b6830acdaa43f58ba4d650b868f60a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/23b6830a-cdaa-43f5-8ba4-d650b868f60a.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.39444444444444443,
+            "x": 0.2833333333333333,
+            "y": 0.1986111111111111
+          }
+        },
+        "10": {
+          "hero": "SonyCatalog415f42adc4e14bf18b6fa3657148eb0c",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/415f42ad-c4e1-4bf1-8b6f-a3657148eb0c.png",
+          "finish": "color-0a",
+          "heroBounds": {
+            "height": 0.5888888888888889,
+            "width": 0.39444444444444443,
+            "x": 0.2833333333333333,
+            "y": 0.1986111111111111
+          }
+        }
+      }
+    },
+    "whXM3": {
+      "catalogName": "WH-1000XM3",
+      "colors": {
+        "0": {
+          "hero": "whXM3Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/dc832d01-d2a4-4c66-83c7-6708ef1e1749.png",
+          "finish": "default",
+          "suffix": ""
+        },
+        "1": {
+          "hero": "whXM3Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/dc832d01-d2a4-4c66-83c7-6708ef1e1749.png",
+          "finish": "black",
+          "suffix": ""
+        },
+        "3": {
+          "hero": "whXM3ProductSilver",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0d84ce9f-cfea-4e35-9734-248942bcf80e.png",
+          "finish": "silver",
+          "suffix": "Silver"
+        }
+      }
+    },
+    "whXM4": {
+      "catalogName": "WH-1000XM4",
+      "colors": {
+        "0": {
+          "hero": "whXM4Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8ea91f30-6237-4b4e-b261-f26a9d199cf7.png",
+          "finish": "default",
+          "suffix": ""
+        },
+        "1": {
+          "hero": "whXM4Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/8ea91f30-6237-4b4e-b261-f26a9d199cf7.png",
+          "finish": "black",
+          "suffix": ""
+        },
+        "2": {
+          "hero": "whXM4ProductSilentWhite",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4d9b1afb-44f6-40b1-941f-48275c019fe0.png",
+          "finish": "silent-white",
+          "suffix": "SilentWhite"
+        },
+        "3": {
+          "hero": "whXM4ProductSilver",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/05fd2e73-d4ae-4329-850d-2ba2a5b1666f.png",
+          "finish": "platinum-silver",
+          "suffix": "Silver"
+        },
+        "5": {
+          "hero": "whXM4ProductMidnightBlue",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/47712ab8-1dff-4cd7-a193-c7f978cb74c3.png",
+          "finish": "midnight-blue",
+          "suffix": "MidnightBlue"
+        }
+      }
+    },
+    "whXM4C": {
+      "catalogName": "WH-1000XM4C",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog954d69036b7f4b3695a3f51397dca46e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/954d6903-6b7f-4b36-95a3-f51397dca46e.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5972222222222222,
+            "width": 0.4013888888888889,
+            "x": 0.2722222222222222,
+            "y": 0.19722222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog954d69036b7f4b3695a3f51397dca46e",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/954d6903-6b7f-4b36-95a3-f51397dca46e.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5972222222222222,
+            "width": 0.4013888888888889,
+            "x": 0.2722222222222222,
+            "y": 0.19722222222222222
+          }
+        },
+        "3": {
+          "hero": "SonyCatalogdbcebac20682496dbb8af78834c0e102",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/dbcebac2-0682-496d-bb8a-f78834c0e102.png",
+          "finish": "color-03",
+          "heroBounds": {
+            "height": 0.5972222222222222,
+            "width": 0.4013888888888889,
+            "x": 0.2722222222222222,
+            "y": 0.19722222222222222
+          }
+        },
+        "14": {
+          "hero": "SonyCatalog699246b5c2e943799491a470a2483bab",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/699246b5-c2e9-4379-9491-a470a2483bab.png",
+          "finish": "color-0e",
+          "heroBounds": {
+            "height": 0.5972222222222222,
+            "width": 0.4013888888888889,
+            "x": 0.2722222222222222,
+            "y": 0.19722222222222222
+          }
+        }
+      }
+    },
+    "whXM5": {
+      "catalogName": "WH-1000XM5",
+      "colors": {
+        "0": {
+          "hero": "XM5Hero",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4e2e1840-5028-461c-bacf-26e8b2bfc2a7.png",
+          "finish": "default",
+          "suffix": ""
+        },
+        "1": {
+          "hero": "XM5Hero",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/4e2e1840-5028-461c-bacf-26e8b2bfc2a7.png",
+          "finish": "black",
+          "suffix": ""
+        },
+        "3": {
+          "hero": "XM5HeroSilver",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/3335266d-ede0-4431-a2cf-282a0b38a47a.png",
+          "finish": "platinum-silver",
+          "suffix": "Silver"
+        },
+        "5": {
+          "hero": "XM5HeroMidnightBlue",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0aff6c4e-b47d-479b-8ed0-096093d685e0.png",
+          "finish": "midnight-blue",
+          "suffix": "MidnightBlue"
+        },
+        "6": {
+          "hero": "XM5HeroSmokyPink",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/228d02e3-58fe-4158-9611-b38a919897db.png",
+          "finish": "smoky-pink",
+          "suffix": "SmokyPink"
+        }
+      }
+    },
+    "whXM6": {
+      "catalogName": "WH-1000XM6",
+      "colors": {
+        "0": {
+          "hero": "whXM6Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d02be2aa-7fc9-4a98-88ea-ec04984bf361.png",
+          "finish": "default",
+          "suffix": ""
+        },
+        "1": {
+          "hero": "whXM6Product",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d02be2aa-7fc9-4a98-88ea-ec04984bf361.png",
+          "finish": "black",
+          "suffix": ""
+        },
+        "3": {
+          "hero": "whXM6ProductSilver",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0ab368f2-cb51-4ce1-bb8b-9853efbd57ed.png",
+          "finish": "platinum-silver",
+          "suffix": "Silver"
+        },
+        "5": {
+          "hero": "whXM6ProductMidnightBlue",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/87744c8f-92d9-4f26-9f2f-5c88d37f9b86.png",
+          "finish": "midnight-blue",
+          "suffix": "MidnightBlue"
+        },
+        "6": {
+          "hero": "whXM6ProductSandPink",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/781076da-9f9a-4604-9031-d69392fe5429.png",
+          "finish": "sand-pink",
+          "suffix": "SandPink"
+        },
+        "8": {
+          "hero": "whXM6ProductOliveGray",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/e21bed92-619f-4275-845c-0b9c8108198e.png",
+          "finish": "olive-gray",
+          "suffix": "OliveGray"
+        },
+        "13": {
+          "hero": "whXM6ProductSandstone",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/2d906990-8623-4a79-be4b-5b493879c993.png",
+          "finish": "sandstone",
+          "suffix": "Sandstone"
+        }
+      }
+    },
+    "wi1000X": {
+      "catalogName": "WI-1000X",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog837a98fdec114801812b2d3827f04ab3",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/837a98fd-ec11-4801-812b-2d3827f04ab3.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5041666666666667,
+            "width": 0.4722222222222222,
+            "x": 0.2638888888888889,
+            "y": 0.2611111111111111
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog837a98fdec114801812b2d3827f04ab3",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/837a98fd-ec11-4801-812b-2d3827f04ab3.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5041666666666667,
+            "width": 0.4722222222222222,
+            "x": 0.2638888888888889,
+            "y": 0.2611111111111111
+          }
+        },
+        "10": {
+          "hero": "SonyCatalog59a6b71a2fd94246813ffee7bb01f91f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/59a6b71a-2fd9-4246-813f-fee7bb01f91f.png",
+          "finish": "color-0a",
+          "heroBounds": {
+            "height": 0.5069444444444444,
+            "width": 0.4722222222222222,
+            "x": 0.2638888888888889,
+            "y": 0.25972222222222224
+          }
+        }
+      }
+    },
+    "wi1000XM2": {
+      "catalogName": "WI-1000XM2",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog6486bef99ebb422397f9bea90a3c5fed",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/6486bef9-9ebb-4223-97f9-bea90a3c5fed.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5486111111111112,
+            "width": 0.46111111111111114,
+            "x": 0.2791666666666667,
+            "y": 0.2388888888888889
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog6486bef99ebb422397f9bea90a3c5fed",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/6486bef9-9ebb-4223-97f9-bea90a3c5fed.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5486111111111112,
+            "width": 0.46111111111111114,
+            "x": 0.2791666666666667,
+            "y": 0.2388888888888889
+          }
+        },
+        "3": {
+          "hero": "SonyCatalog659630676c914241a0ab3cf95b6b8802",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/65963067-6c91-4241-a0ab-3cf95b6b8802.png",
+          "finish": "color-03",
+          "heroBounds": {
+            "height": 0.5486111111111112,
+            "width": 0.46111111111111114,
+            "x": 0.2791666666666667,
+            "y": 0.2388888888888889
+          }
+        }
+      }
+    },
+    "wiC100": {
+      "catalogName": "WI-C100",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog06e0432cd063426a9fd44fa8897e4b6a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/06e0432c-d063-426a-9fd4-4fa8897e4b6a.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5541666666666667,
+            "width": 0.4444444444444444,
+            "x": 0.29305555555555557,
+            "y": 0.2361111111111111
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog06e0432cd063426a9fd44fa8897e4b6a",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/06e0432c-d063-426a-9fd4-4fa8897e4b6a.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5541666666666667,
+            "width": 0.4444444444444444,
+            "x": 0.29305555555555557,
+            "y": 0.2361111111111111
+          }
+        },
+        "2": {
+          "hero": "SonyCatalog6762de44493b49829d4a1cc3964e4898",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/6762de44-493b-4982-9d4a-1cc3964e4898.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.5541666666666667,
+            "width": 0.4444444444444444,
+            "x": 0.29305555555555557,
+            "y": 0.2361111111111111
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog84f6c6294fac4bd0a35846ba4088518c",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/84f6c629-4fac-4bd0-a358-46ba4088518c.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5541666666666667,
+            "width": 0.4444444444444444,
+            "x": 0.29305555555555557,
+            "y": 0.2361111111111111
+          }
+        },
+        "11": {
+          "hero": "SonyCatalogd33b1ffbf456477297668cafcaca1e65",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/d33b1ffb-f456-4772-9766-8cafcaca1e65.png",
+          "finish": "color-0b",
+          "heroBounds": {
+            "height": 0.5541666666666667,
+            "width": 0.4444444444444444,
+            "x": 0.29305555555555557,
+            "y": 0.2361111111111111
+          }
+        }
+      }
+    },
+    "wiC600N": {
+      "catalogName": "WI-C600N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog5856a6ca9d8942f8896a34a652848858",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/5856a6ca-9d89-42f8-896a-34a652848858.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5527777777777778,
+            "width": 0.45,
+            "x": 0.29583333333333334,
+            "y": 0.2361111111111111
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog5856a6ca9d8942f8896a34a652848858",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/5856a6ca-9d89-42f8-896a-34a652848858.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5527777777777778,
+            "width": 0.45,
+            "x": 0.29583333333333334,
+            "y": 0.2361111111111111
+          }
+        },
+        "5": {
+          "hero": "SonyCataloge898b2a2c42140d08dcfae8159149846",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/e898b2a2-c421-40d0-8dcf-ae8159149846.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5527777777777778,
+            "width": 0.45,
+            "x": 0.29583333333333334,
+            "y": 0.2361111111111111
+          }
+        },
+        "9": {
+          "hero": "SonyCatalogcdec4347d05241dea0ce3d38d50e2bfa",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/cdec4347-d052-41de-a0ce-3d38d50e2bfa.png",
+          "finish": "color-09",
+          "heroBounds": {
+            "height": 0.5527777777777778,
+            "width": 0.45,
+            "x": 0.29583333333333334,
+            "y": 0.2361111111111111
+          }
+        }
+      }
+    },
+    "wiH700": {
+      "catalogName": "WI-H700",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalog3148c452cbd04382b07aa640aa97f97f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/3148c452-cbd0-4382-b07a-a640aa97f97f.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.5125,
+            "width": 0.4527777777777778,
+            "x": 0.27361111111111114,
+            "y": 0.2569444444444444
+          }
+        },
+        "1": {
+          "hero": "SonyCatalog3148c452cbd04382b07aa640aa97f97f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/3148c452-cbd0-4382-b07a-a640aa97f97f.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.5125,
+            "width": 0.4527777777777778,
+            "x": 0.27361111111111114,
+            "y": 0.2569444444444444
+          }
+        },
+        "4": {
+          "hero": "SonyCataloga902b5c56d974bcd900a36265b0647d1",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/a902b5c5-6d97-4bcd-900a-36265b0647d1.png",
+          "finish": "color-04",
+          "heroBounds": {
+            "height": 0.5125,
+            "width": 0.4527777777777778,
+            "x": 0.27361111111111114,
+            "y": 0.2569444444444444
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog1f2dafe5e9574a2ea40a94c8d33ea2c8",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/1f2dafe5-e957-4a2e-a40a-94c8d33ea2c8.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.5125,
+            "width": 0.4527777777777778,
+            "x": 0.27361111111111114,
+            "y": 0.2569444444444444
+          }
+        },
+        "8": {
+          "hero": "SonyCatalog436823d26bb048c390e28d4831e02e83",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/436823d2-6bb0-48c3-90e2-8d4831e02e83.png",
+          "finish": "color-08",
+          "heroBounds": {
+            "height": 0.5125,
+            "width": 0.4527777777777778,
+            "x": 0.27361111111111114,
+            "y": 0.2569444444444444
+          }
+        },
+        "10": {
+          "hero": "SonyCatalog295556aca54245ada3fafec4598ac324",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/295556ac-a542-45ad-a3fa-fec4598ac324.png",
+          "finish": "color-0a",
+          "heroBounds": {
+            "height": 0.5125,
+            "width": 0.4527777777777778,
+            "x": 0.27361111111111114,
+            "y": 0.2569444444444444
+          }
+        }
+      }
+    },
+    "wiSP600N": {
+      "catalogName": "WI-SP600N",
+      "colors": {
+        "0": {
+          "hero": "SonyCatalogcce4a9a07388457b94283c3ea23d65ac",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/cce4a9a0-7388-457b-9428-3c3ea23d65ac.png",
+          "finish": "default",
+          "heroBounds": {
+            "height": 0.4791666666666667,
+            "width": 0.5444444444444444,
+            "x": 0.25277777777777777,
+            "y": 0.2722222222222222
+          }
+        },
+        "1": {
+          "hero": "SonyCatalogcce4a9a07388457b94283c3ea23d65ac",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/cce4a9a0-7388-457b-9428-3c3ea23d65ac.png",
+          "finish": "color-01",
+          "heroBounds": {
+            "height": 0.4791666666666667,
+            "width": 0.5444444444444444,
+            "x": 0.25277777777777777,
+            "y": 0.2722222222222222
+          }
+        },
+        "2": {
+          "hero": "SonyCatalogeb1adb9cb7b44a97a31b077c44a1f21f",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/eb1adb9c-b7b4-4a97-a31b-077c44a1f21f.png",
+          "finish": "color-02",
+          "heroBounds": {
+            "height": 0.4791666666666667,
+            "width": 0.5444444444444444,
+            "x": 0.25277777777777777,
+            "y": 0.2722222222222222
+          }
+        },
+        "5": {
+          "hero": "SonyCatalog6ae26ce551f94168bdc60a18f4ef38d7",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/6ae26ce5-51f9-4168-bdc6-0a18f4ef38d7.png",
+          "finish": "color-05",
+          "heroBounds": {
+            "height": 0.4791666666666667,
+            "width": 0.5472222222222223,
+            "x": 0.25,
+            "y": 0.2722222222222222
+          }
+        },
+        "6": {
+          "hero": "SonyCatalog0fdb929b22f7480e9d911331c5c581f3",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/0fdb929b-22f7-480e-9d91-1331c5c581f3.png",
+          "finish": "color-06",
+          "heroBounds": {
+            "height": 0.4791666666666667,
+            "width": 0.5472222222222223,
+            "x": 0.25,
+            "y": 0.2722222222222222
+          }
+        },
+        "7": {
+          "hero": "SonyCatalog81a4d5de0f4e40aa84e485e60dc54995",
+          "sourceImageURL": "https://hpc-image.data-gateway.seeds.services/81a4d5de-0f4e-40aa-84e4-85e60dc54995.png",
+          "finish": "color-07",
+          "heroBounds": {
+            "height": 0.4791666666666667,
+            "width": 0.5444444444444444,
+            "x": 0.25277777777777777,
+            "y": 0.2722222222222222
+          }
+        }
+      }
+    }
+  },
+  "sideSources": {
+    "wf1000X": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/wf1000x/v1/en/contents/TP0001513141.html"
+    },
+    "wfC500": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/wfc500/v1/en/contents/TP1000447708.html"
+    },
+    "wfC510": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/2982/v1/en/contents/TP1001612412.html"
+    },
+    "wfC700N": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/2968/v1/en/contents/TP1000781970.html"
+    },
+    "wfC710N": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/2986/v1/en/contents/TP1001827919.html"
+    },
+    "wfL900": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/linkbuds/v1/en/contents/TP1000447708.html"
+    },
+    "wfL900UC": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/2969/v1/en/print.pdf"
+    },
+    "wfLC900": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/2999/v1/en/contents/F010_Wearing_the_headset.html"
+    },
+    "wfLS910N": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/2975/v1/en/contents/TP1001612412.html"
+    },
+    "wfL910": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/2964/v1/en/contents/TP1001298903.html"
+    },
+    "wfH800": {
+      "physicalLeft": "screen-right",
+      "guideURL": "https://helpguide.sony.net/mdr/wfh800/v1/en/contents/TP0002522258.html"
+    }
+  }
+}

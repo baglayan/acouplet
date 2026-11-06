@@ -82,6 +82,17 @@ def check_vector(path):
                 raise ValueError(f'Embedded or linked content: {path}')
 
 
+def required_photographs(source):
+    catalog = json.loads((source.parent / 'SonyArtworkCatalog.json').read_text())
+    references = {}
+    for model, entry in catalog['models'].items():
+        for color, images in entry['colors'].items():
+            for role in ('hero', 'left', 'right', 'caseImage', 'openCase'):
+                if images.get(role):
+                    references.setdefault(images[role], []).append(f'{model}/0x{int(color):02X}/{role}')
+    return references
+
+
 def prepare(source, destination, photographs=None):
     source = source.resolve()
     destination = destination.resolve()
@@ -115,6 +126,12 @@ def prepare(source, destination, photographs=None):
         photographs = photographs.resolve(strict=True)
         if photographs == destination or photographs in destination.parents or destination in photographs.parents:
             raise ValueError('Prepared catalog must be outside the photograph catalog')
+        references = required_photographs(source)
+        missing = [name for name in sorted(references) if not (photographs / (name + '.imageset')).is_dir()]
+        if missing:
+            details = '\n'.join(f'  {name}.imageset ({", ".join(references[name])})' for name in missing)
+            raise ValueError(f'Missing {len(missing)} required product photograph image sets in {photographs}:\n'
+                             f'{details}\nImport the complete catalog with Packaging/import-sony-artwork.py.')
         for folder in sorted(photographs.glob('*.imageset')):
             if folder.stem in mini_icons:
                 continue

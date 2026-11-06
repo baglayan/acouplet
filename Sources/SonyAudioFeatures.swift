@@ -148,7 +148,7 @@ struct SonyAudioFeatures: Equatable, Sendable {
     let supportsConnectionStatus: Bool
     let supportsCodecStatus: Bool
     let supportsDSEE: Bool
-    let supportsConnectionMode: Bool
+    let connectionModeInquiryType: UInt8?
     private(set) var codec: SonyAudioCodec?
     private(set) var dseeType: SonyDSEEType?
     private(set) var dseeAvailable: Bool?
@@ -166,18 +166,38 @@ struct SonyAudioFeatures: Equatable, Sendable {
         supportsConnectionStatus = supportedFunctions.contains(Self.connectionStatusFunction)
         supportsCodecStatus = supportedFunctions.contains(Self.codecFunction)
         supportsDSEE = supportedFunctions.contains(Self.dseeFunction)
-        supportsConnectionMode = supportedFunctions.contains(Self.connectionModeFunction)
+        connectionModeInquiryType = supportedFunctions.contains(Self.connectionModeFunction) ? 0x05
+            : supportedFunctions.contains(0xE3) ? 0x02 : supportedFunctions.contains(0xE1) ? 0x00 : nil
+        if let connectionModeInquiryType, connectionModeInquiryType != 0x05 {
+            supportedConnectionModes = [.soundQuality, .stableConnection]
+        }
+    }
+
+    var supportsConnectionMode: Bool {
+        connectionModeInquiryType != nil
     }
 
     var queryPayloads: [[UInt8]] {
-        (supportsConnectionStatus ? [[0x12, 0x01]] : [])
+        var queries: [[UInt8]] = (supportsConnectionStatus ? [[0x12, 0x01]] : [])
             + (supportsCodecStatus ? [[0x12, 0x02]] : [])
             + (supportsDSEE ? [[0xE0, 0x01], [0xE2, 0x01], [0xE6, 0x01]] : [])
-            + (supportsConnectionMode ? [[0xE0, 0x05], [0xE2, 0x05], [0xE6, 0x05]] : [])
+        if let inquiry = connectionModeInquiryType {
+            if inquiry == 0x05 { queries.append([0xE0, inquiry]) }
+            queries += [[0xE2, inquiry], [0xE6, inquiry]]
+        }
+        return queries
     }
 
     var connectionModeAvailable: Bool? {
         switch connectionModeStatus {
+        case 0x00: true
+        case 0x01: false
+        default: nil
+        }
+    }
+
+    var connectionModeLDACAvailable: Bool? {
+        switch connectionModeAdditionalStatus {
         case 0x00: true
         case 0x01: false
         default: nil
@@ -215,7 +235,7 @@ struct SonyAudioFeatures: Equatable, Sendable {
             guard supportsDSEE, payload.count == 3 else { return false }
             dseeMode = SonyDSEEMode(rawValue: payload[2])
         case (0xE1, 0x05):
-            guard supportsConnectionMode, payload.count >= 6 else { return false }
+            guard connectionModeInquiryType == payload[1], payload.count >= 6 else { return false }
             let modeCount = Int(payload[2])
             let exclusionCountIndex = 3 + modeCount
             guard modeCount >= 2, exclusionCountIndex < payload.count else { return false }
@@ -223,17 +243,17 @@ struct SonyAudioFeatures: Equatable, Sendable {
             guard payload.count == exclusionCountIndex + 1 + exclusionCount else { return false }
             supportedConnectionModes = payload[3..<exclusionCountIndex].map(SonyConnectionMode.init(rawValue:))
             connectionModeLDACExclusions = payload.suffix(exclusionCount).map(SonyLDACExclusiveFeature.init(rawValue:))
-        case (0xE3, 0x05), (0xE5, 0x05):
-            guard supportsConnectionMode, payload.count == 4 else { return false }
+        case (0xE3, 0x00), (0xE5, 0x00), (0xE3, 0x02), (0xE5, 0x02), (0xE3, 0x05), (0xE5, 0x05):
+            guard connectionModeInquiryType == payload[1], payload.count == (payload[1] == 0x00 ? 3 : 4) else { return false }
             connectionModeStatus = payload[2]
-            connectionModeAdditionalStatus = payload[3]
-        case (0xE7, 0x05):
-            guard supportsConnectionMode, payload.count == 3 else { return false }
+            connectionModeAdditionalStatus = payload[1] == 0x00 ? nil : payload[3]
+        case (0xE7, 0x00), (0xE7, 0x02), (0xE7, 0x05):
+            guard connectionModeInquiryType == payload[1], payload.count == 3 else { return false }
             connectionMode = SonyConnectionMode(rawValue: payload[2])
-        case (0xE9, 0x05):
-            guard supportsConnectionMode, payload.count == 4 else { return false }
+        case (0xE9, 0x00), (0xE9, 0x02), (0xE9, 0x05):
+            guard connectionModeInquiryType == payload[1], payload.count == (payload[1] == 0x05 ? 4 : 3) else { return false }
             connectionMode = SonyConnectionMode(rawValue: payload[2])
-            lastConnectionModeSwitchingStream = SonyConnectionStream(rawValue: payload[3])
+            lastConnectionModeSwitchingStream = payload[1] == 0x05 ? SonyConnectionStream(rawValue: payload[3]) : SonyConnectionStream.none
         default:
             return false
         }

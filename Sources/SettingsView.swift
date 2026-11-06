@@ -88,6 +88,9 @@ struct SettingsView: View {
         .onChange(of: headphones.connectionTransition?.alert, initial: true) { _, alert in
             if alert != nil { settings.selectedSettingsPane = "headphones" }
         }
+        .onChange(of: headphones.bluetoothStandbyAlert, initial: true) { _, alert in
+            if alert != nil { settings.selectedSettingsPane = "headphones" }
+        }
         .onChange(of: headphones.multipointTransition?.alert, initial: true) { _, alert in
             if alert != nil { settings.selectedSettingsPane = "headphones" }
         }
@@ -182,7 +185,7 @@ struct SettingsView: View {
                             Text(rate.displayName).tag(rate)
                         }
                     }
-                    .disabled(ldac.isSessionRunning || ldac.state == .waitingForDevice)
+                    .disabled(!ldac.canChangeConfiguration)
                     .accessibilityIdentifier("ldac.sampleRate")
                     Picker("Playback Quality", selection: $settings.ldacConfiguration.quality) {
                         ForEach(LDACQuality.allCases, id: \.self) { quality in
@@ -190,7 +193,7 @@ struct SettingsView: View {
                             Text(configuration.qualityDisplayName).tag(quality)
                         }
                     }
-                    .disabled(ldac.isSessionRunning || ldac.state == .waitingForDevice)
+                    .disabled(!ldac.canChangeConfiguration)
                     .accessibilityIdentifier("ldac.quality")
                     if !ldac.isSessionRunning { LDACDriverGuidance() }
                 }
@@ -318,9 +321,9 @@ struct SettingsView: View {
                     }
                 }
                 #endif
-                if headphones.audioFeatures.supportsCodecStatus {
+                if headphones.supportsCodecStatus {
                     LabeledContent("Headphone codec") {
-                        Text(headphones.audioFeatures.codec?.title ?? String(localized: "Unknown")).foregroundStyle(.primary)
+                        Text(headphones.audioCodec?.title ?? String(localized: "Unknown")).foregroundStyle(.primary)
                     }
                         .accessibilityIdentifier("audio.codec")
                         .help("Reported by the headphones. With two devices connected, this may describe audio from the other device.")
@@ -331,6 +334,22 @@ struct SettingsView: View {
                 if headphones.supportsDSEE {
                     DSEEControl().disabled(headphones.isRunningHeadphoneTest || headphones.powerOffState != nil || headphones.multipointTransition?.isFinished == false || headphones.deviceActionTransition?.isFinished == false)
                 }
+                if headphones.supportsUpscalingStatus {
+                    LabeledContent("Upscaling type", value: headphones.upscalingIndicatorType?.title ?? String(localized: "Unknown"))
+                        .accessibilityIdentifier("audio.upscalingType")
+                    LabeledContent("Upscaling status", value: headphones.upscalingIndicatorStatus?.title ?? String(localized: "Unknown"))
+                        .accessibilityIdentifier("audio.upscalingStatus")
+                }
+            }
+            if headphones.playback.isSupported {
+                Section("Playback") { HeadphonePlaybackControl() }
+            }
+            if headphones.legacyControls?.standaloneNoiseCancel != nil || headphones.legacyControls?.standaloneAmbient != nil {
+                Section("Listening Mode") {
+                    LegacyStandaloneNoiseControl(inquiry: 1)
+                    LegacyStandaloneNoiseControl(inquiry: 3)
+                    if let error = headphones.settingErrors[.noiseControl] { Text(error).font(.caption) }
+                }
             }
             if headphones.legacyOptimizer.isSupported || headphones.legacyOptimizerTransition != nil {
                 Section("Noise Cancelling") { LegacyOptimizerControl() }
@@ -338,6 +357,27 @@ struct SettingsView: View {
             if headphones.noiseControl?.inquiryType == 0x19 {
                 Section("Noise Adaptation") {
                     NoiseAdaptationControl()
+                }
+            }
+            if headphones.noiseToggle != nil || headphones.noiseTest?.active == true {
+                Section("Noise Control") {
+                    NoiseToggleControl()
+                    if headphones.noiseTest?.active == true {
+                        HStack {
+                            Text("A noise-control test is running.")
+                            Spacer()
+                            if headphones.pendingChanges[.noiseTest] != nil {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Button("End Test") { headphones.finishNoiseTest() }
+                                    .disabled(!headphones.canFinishNoiseTest)
+                                    .accessibilityIdentifier("noise.endTest")
+                            }
+                        }
+                        if let error = headphones.settingErrors[.noiseTest] {
+                            Text(error).font(.caption)
+                        }
+                    }
                 }
             }
             if headphones.systemFeatures[.headGestures] != nil || headphones.headGesturePractice.isSupported || headphones.headGesturePracticeTransition != nil {
@@ -378,12 +418,21 @@ struct SettingsView: View {
                 }
                 .disabled(headphones.isRunningHeadphoneTest || headphones.powerOffState != nil || headphones.multipointTransition?.isFinished == false || headphones.deviceActionTransition?.isFinished == false)
             }
-            if headphones.powerFeatures.batteryCare != nil || headphones.powerFeatures.autoPowerSave != nil || headphones.powerFeatures.touchPanelBacklight != nil || headphones.powerFeatures.stamina != nil {
-                Section("Battery") {
+            if headphones.powerFeatures.batteryCare != nil || headphones.powerFeatures.autoPowerSave != nil
+                || headphones.powerFeatures.touchPanelBacklight != nil || headphones.powerFeatures.stamina != nil
+                || headphones.powerFeatures.powerSavingMode != nil || headphones.powerFeatures.bluetoothStandby != nil
+                || headphones.powerFeatures.autoStandby != nil || headphones.powerFeatures.supportsChargeInUse {
+                Section("Power and Battery") {
                     BatteryCareControl()
                     AutoPowerSaveControl()
+                    SpeakerPowerControls()
                     StaminaControl()
                     TouchPanelBacklightControl()
+                    if headphones.powerFeatures.supportsChargeInUse {
+                        Text("While the headphones are in use, charging stops at about 80% to reduce battery wear. Turn them off to charge to 100%.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("power.chargeInUse")
+                    }
                 }
                 .disabled(!headphones.isReady || headphones.isRunningHeadphoneTest || headphones.powerOffState != nil
                           || headphones.connectionTransition?.isFinished == false || headphones.multipointTransition?.isFinished == false
@@ -1025,8 +1074,7 @@ private struct EarTipFitSheet: View {
 
     private func earbud(_ side: EarbudSide, seal: SonyEarTipFit.Seal?) -> some View {
         VStack(spacing: 8) {
-            EarbudArtwork(model: headphones.deviceModel, side: side, usesProductArtwork: headphones.usesProductArtwork,
-                          artworkSuffix: headphones.productArtworkSuffix)
+            EarbudArtwork(model: headphones.deviceModel, side: side, artwork: headphones.productArtwork)
                 .frame(width: 100, height: 100 * 103.0 / 137.0).accessibilityHidden(true)
             VStack(spacing: 8) {
                 Text(side == .left ? String(localized: "Left") : String(localized: "Right")).font(.headline)
@@ -1161,6 +1209,113 @@ private struct VoiceGuidanceControls: View {
     }
 }
 
+private struct HeadphonePlaybackControl: View {
+    @EnvironmentObject private var headphones: SonyHeadphonesController
+
+    var body: some View {
+        if let track = headphones.playback.track {
+            if let title = track.title { LabeledContent("Title", value: title) }
+            if let artist = track.artist { LabeledContent("Artist", value: artist) }
+            if let album = track.album { LabeledContent("Album", value: album) }
+            if let genre = track.genre { LabeledContent("Genre", value: genre) }
+        }
+        if headphones.playback.generation == .v2 {
+            HStack {
+                Button { headphones.controlPlayback(.previous) } label: {
+                    Label("Previous", systemImage: "backward.end.fill")
+                }
+                Button { headphones.controlPlayback(headphones.playback.state == .playing ? .pause : .play) } label: {
+                    if headphones.playback.state == .playing { Label("Pause", systemImage: "pause.fill") }
+                    else { Label("Play", systemImage: "play.fill") }
+                }
+                Button { headphones.controlPlayback(.next) } label: {
+                    Label("Next", systemImage: "forward.end.fill")
+                }
+            }
+            .disabled(!headphones.canControlPlayback)
+            .accessibilityIdentifier("playback.commands")
+        }
+        HeadphonePlaybackVolumeControl(isCall: false)
+            .id("music:\(headphones.preferencePaneSession):\(headphones.multipoint.selectedSource?.address ?? "")")
+        if headphones.playback.supportsCallVolume {
+            HeadphonePlaybackVolumeControl(isCall: true)
+                .id("call:\(headphones.preferencePaneSession):\(headphones.multipoint.selectedSource?.address ?? "")")
+        }
+        if let error = headphones.playbackReadError { Text(error).font(.caption) }
+    }
+}
+
+private struct HeadphonePlaybackVolumeControl: View {
+    let isCall: Bool
+    @EnvironmentObject private var headphones: SonyHeadphonesController
+    @State private var draft: Double?
+    @State private var isEditing = false
+
+    private var title: LocalizedStringKey { isCall ? "Call Volume" : "Music Volume" }
+    private var setting: SonyHeadphonesController.Setting { isCall ? .callVolume : .playbackVolume }
+    private var value: Int? { isCall ? headphones.playback.callVolume : headphones.playback.volume }
+    private var range: ClosedRange<Int>? { isCall ? headphones.playback.callVolumeRange : headphones.playback.musicVolumeRange }
+    private var muted: Bool? { isCall ? headphones.playback.callMuted : headphones.playback.musicMuted }
+
+    var body: some View {
+        if let value, let range {
+            if range.lowerBound < range.upperBound {
+                Slider(value: Binding(get: { isEditing ? draft ?? Double(value) : Double(value) }, set: {
+                    draft = $0
+                    if !isEditing { setVolume(Int($0)) }
+                }), in: Double(range.lowerBound)...Double(range.upperBound), step: 1, onEditingChanged: {
+                    isEditing = $0
+                    if !$0, let draft {
+                        setVolume(Int(draft))
+                        self.draft = nil
+                    }
+                }) { Text(title) }
+                .disabled(isCall ? !headphones.canControlCallVolume : !headphones.canControlMusicVolume)
+                .accessibilityIdentifier(isCall ? "playback.callVolume" : "playback.musicVolume")
+            } else {
+                LabeledContent(title, value: String(value))
+            }
+            if muted == true { Text("Muted").font(.caption).foregroundStyle(.secondary) }
+        } else {
+            LabeledContent(title, value: String(localized: "Unknown"))
+        }
+        if let error = headphones.settingErrors[setting] { Text(error).font(.caption) }
+    }
+
+    private func setVolume(_ value: Int) {
+        if isCall { headphones.setCallVolume(value) }
+        else { headphones.setPlaybackVolume(value) }
+    }
+}
+
+private struct LegacyStandaloneNoiseControl: View {
+    let inquiry: UInt8
+    @EnvironmentObject private var headphones: SonyHeadphonesController
+
+    private var title: LocalizedStringKey { inquiry == 1 ? "Noise Cancelling" : "Ambient Sound" }
+
+    var body: some View {
+        if let state = headphones.standaloneNoiseControl(inquiry) {
+            if let enabled = state.enabled {
+                Toggle(title, isOn: Binding(get: { enabled }, set: {
+                    headphones.setStandaloneNoiseControl(inquiry, enabled: $0)
+                }))
+                .disabled(!headphones.canSetStandaloneNoiseControl(inquiry))
+                .accessibilityIdentifier("noise.standalone.\(inquiry)")
+                if inquiry == 3, enabled, state.capability?.ambientSteps[1] != nil, let focus = state.state?.focusOnVoice {
+                    Toggle("Focus on Voice", isOn: Binding(get: { focus }, set: {
+                        headphones.setStandaloneNoiseControl(inquiry, enabled: true, focusOnVoice: $0)
+                    }))
+                    .disabled(!headphones.canSetStandaloneNoiseControl(inquiry))
+                }
+            } else {
+                LabeledContent(title, value: String(localized: "Unknown"))
+            }
+            if state.available == false { Text("Currently unavailable.").font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+}
+
 private struct SoundPressureControl: View {
     @EnvironmentObject private var headphones: SonyHeadphonesController
 
@@ -1208,7 +1363,7 @@ private struct TouchAssignmentControl: View {
             VStack(alignment: .leading, spacing: 8) {
                 VStack(spacing: 8) {
                     EarbudArtwork(model: headphones.deviceModel, side: key.key == 0x00 ? .left : .right,
-                                  usesProductArtwork: headphones.usesProductArtwork, artworkSuffix: headphones.productArtworkSuffix)
+                                  artwork: headphones.productArtwork)
                         .frame(width: 56, height: 56)
                         .accessibilityHidden(true)
                     Text(key.title(generation: headphones.touchAssignments.generation)).font(.headline)
@@ -1496,6 +1651,44 @@ private struct ConnectionModeControl: View {
         case .verifying: return String(localized: "Checking connection preference…")
         case .cancelled: return String(localized: "Change cancelled.")
         case .confirmed, .failed: return nil
+        }
+    }
+}
+
+private struct NoiseToggleControl: View {
+    @EnvironmentObject private var headphones: SonyHeadphonesController
+
+    var body: some View {
+        if let state = headphones.noiseToggle {
+            Picker("Mode cycle", selection: Binding(
+                get: { headphones.noiseToggle?.selected },
+                set: { if let option = $0 { headphones.setNoiseToggle(option) } }
+            )) {
+                if state.selected == nil {
+                    Text("Not reported").tag(Optional<UInt8>.none)
+                }
+                ForEach(state.options ?? [], id: \.self) { option in
+                    Text(title(option)).tag(Optional(option))
+                }
+            }
+            .pickerStyle(.menu)
+            .tint(.primary)
+            .disabled(!headphones.canSetNoiseToggle)
+            .accessibilityIdentifier("noise.modeCycle")
+            .help("Modes switched by the headphones’ noise-control button or touch sensor.")
+            if let error = headphones.settingErrors[.noiseToggle] {
+                Text(error).font(.caption).foregroundStyle(.primary)
+            }
+        }
+    }
+
+    private func title(_ option: UInt8) -> String {
+        switch option {
+        case 1: String(localized: "Noise Cancelling / Ambient Sound / Off")
+        case 2: String(localized: "Noise Cancelling / Ambient Sound")
+        case 3: String(localized: "Noise Cancelling / Off")
+        case 4: String(localized: "Ambient Sound / Off")
+        default: String(localized: "Unknown")
         }
     }
 }
@@ -1850,6 +2043,93 @@ private struct BatteryCareControl: View {
                 }
             }
         }
+    }
+}
+
+private struct SpeakerPowerControls: View {
+    @EnvironmentObject private var headphones: SonyHeadphonesController
+    @State private var presentedAlert: SonyConnectionAlert?
+    @State private var presentedRequestID: UUID?
+    @State private var showsAlert = false
+
+    var body: some View {
+        Group {
+            if let state = headphones.powerFeatures.powerSavingMode {
+                powerSwitch("Power Saving", enabled: state.enabled, available: state.available,
+                            setting: .powerSavingMode, canSet: headphones.canSetPowerSavingMode,
+                            identifier: "power.powerSavingMode", set: headphones.setPowerSavingMode)
+            }
+            if let state = headphones.powerFeatures.bluetoothStandby {
+                powerSwitch("Bluetooth Standby", enabled: state.enabled, available: state.available,
+                            setting: .bluetoothStandby, canSet: headphones.canSetBluetoothStandby,
+                            identifier: "power.bluetoothStandby", set: headphones.setBluetoothStandby)
+            }
+            if let state = headphones.powerFeatures.autoStandby {
+                VStack(alignment: .leading, spacing: 6) {
+                    powerSwitch("Automatic Standby", enabled: state.enabled, available: state.available,
+                                setting: .autoStandby, canSet: headphones.canSetAutoStandby,
+                                identifier: "power.autoStandby", set: headphones.setAutoStandby)
+                    if state.candidate == 0 {
+                        LabeledContent("Standby delay", value: String(localized: "15 minutes")).font(.caption)
+                    }
+                }
+            }
+        }
+        .onChange(of: headphones.bluetoothStandbyAlert, initial: true) { _, alert in
+            presentedAlert = alert
+            presentedRequestID = headphones.bluetoothStandbyAlertRequestID
+            showsAlert = alert != nil
+        }
+        .alert("Bluetooth Standby", isPresented: $showsAlert, presenting: presentedAlert) { alert in
+            if alert.availableActions.contains(.negative) {
+                Button("Cancel", role: .cancel) { headphones.respondToBluetoothStandbyAlert(alert, action: .negative, requestID: presentedRequestID) }
+            }
+            if alert.availableActions.contains(.positive) {
+                Button("Continue") { headphones.respondToBluetoothStandbyAlert(alert, action: .positive, requestID: presentedRequestID) }
+            } else if alert.actionType == .confirmationOnly {
+                Button("OK") { headphones.respondToBluetoothStandbyAlert(alert, action: nil, requestID: presentedRequestID) }
+            }
+        } message: { alert in
+            Text(alertMessage(alert))
+        }
+    }
+
+    private func powerSwitch(_ title: LocalizedStringKey, enabled: Bool?, available: Bool?,
+                             setting: SonyHeadphonesController.Setting, canSet: Bool,
+                             identifier: String, set: @escaping (Bool) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let enabled {
+                Toggle(isOn: Binding(get: { enabled }, set: set)) {
+                    HStack {
+                        Text(title)
+                        if headphones.pendingChanges[setting] != nil {
+                            ProgressView().controlSize(.mini).accessibilityLabel("Updating power setting")
+                        }
+                    }
+                }
+                .disabled(!canSet)
+                .accessibilityIdentifier(identifier)
+            } else {
+                LabeledContent(title, value: String(localized: "Unknown"))
+            }
+            if let error = headphones.settingErrors[setting] {
+                Text(error).font(.caption)
+            } else if available == false {
+                Text("Currently unavailable.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func alertMessage(_ alert: SonyConnectionAlert) -> String {
+        var message = String(localized: "Turning off Bluetooth Standby disables some features.")
+        let known = alert.affectedFeatures.filter { $0.title != String(localized: "Unknown feature") }.map(\.title)
+        if !known.isEmpty {
+            message += String(localized: "\n\nUnavailable with this change: ") + known.joined(separator: ", ") + "."
+        }
+        if known.count != alert.affectedFeatures.count {
+            message += String(localized: "\n\nThe headphones also report an affected feature this app cannot identify.")
+        }
+        return message
     }
 }
 

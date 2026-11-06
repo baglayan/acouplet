@@ -278,7 +278,7 @@ struct MenuBarView: View {
                 .tint(nil)
                 .controlSize(.small)
                 .fixedSize()
-                .disabled(ldac.isSessionRunning || ldac.state == .waitingForDevice)
+                .disabled(!ldac.canChangeConfiguration)
                 .accessibilityLabel("LDAC Settings")
                 .help("LDAC Settings")
                 .accessibilityIdentifier("audio.ldacSettings")
@@ -351,7 +351,8 @@ struct MenuBarView: View {
             }
             if headphones.isReady, headphones.isChargingInCase {
                 VStack(spacing: 10) {
-                    OpenChargingCaseArtwork(model: headphones.deviceModel, suffix: headphones.productArtworkSuffix)
+                    OpenChargingCaseArtwork(model: headphones.deviceModel, artwork: headphones.productArtwork,
+                                            suffix: headphones.productArtworkSuffix)
                     HStack(spacing: 22) {
                         battery("Left", value: headphones.batteries.left)
                         battery("Right", value: headphones.batteries.right)
@@ -365,15 +366,15 @@ struct MenuBarView: View {
                         earbudArtwork
                         if headphones.isReady {
                             HStack(spacing: 12) {
-                                battery("Left", value: headphones.batteries.left, connected: headphones.audioFeatures.leftConnected)
-                                battery("Right", value: headphones.batteries.right, connected: headphones.audioFeatures.rightConnected)
+                                battery("Left", value: headphones.batteries.left, connected: headphones.leftConnected)
+                                battery("Right", value: headphones.batteries.right, connected: headphones.rightConnected)
                             }
                         }
                     }
                     VStack(spacing: 10) {
                         Group {
-                            if headphones.usesProductArtwork {
-                                Image(headphones.deviceModel.rawValue + "CaseProduct" + headphones.productArtworkSuffix)
+                            if let name = headphones.productArtwork?.caseImage, let image = NSImage(named: name) {
+                                Image(nsImage: image)
                                     .resizable()
                                     .scaledToFit()
                                     .frame(width: 104, height: 76)
@@ -392,12 +393,12 @@ struct MenuBarView: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                if headphones.usesProductArtwork, let artwork = headphones.deviceModel.artwork {
-                    Image(artwork + headphones.productArtworkSuffix)
+                if let image = headphones.productArtwork?.heroImage {
+                    Image(nsImage: image)
                         .resizable()
                         .scaledToFit()
                         .frame(width: 80, height: 80)
-                        .accessibilityLabel("\(headphones.deviceModel.name) headphones")
+                        .accessibilityLabel(headphones.deviceModel.name)
                         .accessibilityIdentifier("device.artwork.\(headphones.deviceModel.rawValue)")
                 } else {
                     DeviceIcon(model: headphones.deviceModel, leftConnected: nil, rightConnected: nil)
@@ -412,19 +413,17 @@ struct MenuBarView: View {
 
     private var earbudArtwork: some View {
         HStack(spacing: 12) {
-            EarbudArtwork(model: headphones.deviceModel, side: .left, usesProductArtwork: headphones.usesProductArtwork,
-                          artworkSuffix: headphones.productArtworkSuffix)
+            EarbudArtwork(model: headphones.deviceModel, side: .left, artwork: headphones.productArtwork)
                 .frame(width: 68, height: 76)
-                .opacity(headphones.audioFeatures.leftConnected == false ? 0.35 : 1)
-            EarbudArtwork(model: headphones.deviceModel, side: .right, usesProductArtwork: headphones.usesProductArtwork,
-                          artworkSuffix: headphones.productArtworkSuffix)
+                .opacity(headphones.leftConnected == false ? 0.35 : 1)
+            EarbudArtwork(model: headphones.deviceModel, side: .right, artwork: headphones.productArtwork)
                 .frame(width: 68, height: 76)
-                .opacity(headphones.audioFeatures.rightConnected == false ? 0.35 : 1)
+                .opacity(headphones.rightConnected == false ? 0.35 : 1)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isImage)
         .accessibilityLabel("\(headphones.deviceModel.name) earbuds")
-        .accessibilityValue(DeviceIcon.connectionValue(left: headphones.audioFeatures.leftConnected, right: headphones.audioFeatures.rightConnected))
+        .accessibilityValue(DeviceIcon.connectionValue(left: headphones.leftConnected, right: headphones.rightConnected))
         .accessibilityIdentifier("device.artwork.\(headphones.deviceModel.rawValue)")
     }
 
@@ -510,8 +509,31 @@ struct MenuBarView: View {
                 modeButton(mode)
                     .headphoneButtonStyle(prominent: noiseControlMode == mode)
                     .tint(noiseControlMode == mode ? .primary : nil)
+                if mode == .anc, headphones.noiseControl?.inquiryType == 0x18 {
+                    voiceSpotlightButton
+                }
             }
         }
+    }
+
+    private var voiceSpotlightButton: some View {
+        let selected = headphones.noiseControlDisplayState?.isNoiseCancellingSS == true
+        return Button { headphones.setNoiseCancellingSS() } label: {
+            VStack(spacing: 7) {
+                Image(systemName: "person.wave.2").font(.title3)
+                Text("Voice")
+            }
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .foregroundStyle(selected ? Color(nsColor: .textBackgroundColor) : Color.primary)
+        }
+        .headphoneButtonStyle(prominent: selected)
+        .tint(selected ? .primary : nil)
+        .buttonBorderShape(.roundedRectangle(radius: 12))
+        .disabled(!headphones.canChangeNoiseControl)
+        .accessibilityLabel("Voice-spotlight")
+        .help("Voice-spotlight")
+        .accessibilityIdentifier("noiseControl.voiceSpotlight")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private func modeButton(_ mode: NoiseControlMode) -> some View {
@@ -994,8 +1016,32 @@ enum EarbudSide {
     case left, right
 }
 
+extension SonyProductArtwork {
+    var heroImage: NSImage? {
+        Self.image(named: hero, bounds: heroBounds)
+    }
+
+    func earbudImage(for side: EarbudSide) -> NSImage? {
+        guard let name = side == .left ? left : right else { return nil }
+        return Self.image(named: name, bounds: side == .left ? leftBounds : rightBounds)
+    }
+
+    private static func image(named name: String, bounds: Bounds?) -> NSImage? {
+        guard let image = NSImage(named: name) else { return nil }
+        guard let bounds,
+              let bitmap = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
+        let rect = CGRect(x: (bounds.x * Double(bitmap.width)).rounded(),
+                          y: (bounds.y * Double(bitmap.height)).rounded(),
+                          width: (bounds.width * Double(bitmap.width)).rounded(),
+                          height: (bounds.height * Double(bitmap.height)).rounded())
+        guard let cropped = bitmap.cropping(to: rect) else { return image }
+        return NSImage(cgImage: cropped, size: .zero)
+    }
+}
+
 private struct OpenChargingCaseArtwork: View {
     let model: SonyDeviceModel
+    let artwork: SonyProductArtwork?
     let suffix: String
 
     private var placement: (height: CGFloat, offset: CGFloat) {
@@ -1015,8 +1061,8 @@ private struct OpenChargingCaseArtwork: View {
             #if ACOUPLET_NO_SONY_ARTWORK
             caseSymbol
             #else
-            if model == .wfXM5 || model == .wfXM6 {
-                Image(model.rawValue + "OpenCaseProduct" + suffix)
+            if let name = artwork?.openCase, let image = NSImage(named: name) {
+                Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
                     .frame(height: placement.height)
@@ -1044,20 +1090,16 @@ private struct OpenChargingCaseArtwork: View {
 struct EarbudArtwork: View {
     let model: SonyDeviceModel
     let side: EarbudSide
-    let usesProductArtwork: Bool
-    let artworkSuffix: String
+    let artwork: SonyProductArtwork?
+
+    private var image: NSImage? {
+        artwork?.earbudImage(for: side)
+    }
 
     var body: some View {
         GeometryReader { geometry in
-            if model == .wfXM5, usesProductArtwork {
-                Image("WFXM5Front" + artworkSuffix)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: geometry.size.width * 2, height: geometry.size.height)
-                    .frame(width: geometry.size.width, alignment: side == .left ? .trailing : .leading)
-                    .clipped()
-            } else if usesProductArtwork {
-                Image(model.rawValue + (side == .left ? "ProductLeft" : "ProductRight") + artworkSuffix)
+            if let image {
+                Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
                     .frame(width: geometry.size.width, height: geometry.size.height)

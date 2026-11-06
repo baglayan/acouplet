@@ -165,9 +165,9 @@ struct EqualizerSettings: Codable, Equatable, Sendable {
     }
 
     var levelRange: ClosedRange<Int>? {
-        guard levelSteps > 1, levelSteps % 2 == 1 else { return nil }
+        guard levelSteps > 1 else { return nil }
         let center = (Int(levelSteps) - 1) / 2
-        return -center...center
+        return -center...(Int(levelSteps) - 1 - center)
     }
 
     private var clearBassIndex: Int {
@@ -432,6 +432,8 @@ enum SonyDeviceModel: String, CaseIterable, Sendable {
 
     private var names: [String] {
         switch self {
+        case .whCH530: [name, "WH-CH530 SERIES"]
+        case .whCH730N: [name, "WH-CH730N SERIES"]
         case .wfL900: [name, "LINKBUDS"]
         case .wfLC900: [name, "LINKBUDS CLIP"]
         case .wfLS910N: [name, "LINKBUDS FIT"]
@@ -647,49 +649,75 @@ enum SonyDeviceModel: String, CaseIterable, Sendable {
 
     var filledCaseSymbol: String? { caseSymbol.map { $0 + "Fill" } }
 
-    var artwork: String? {
+    var artwork: String? { productArtwork(for: nil)?.hero }
+
+    func productArtwork(for color: SonyDeviceColor?) -> SonyProductArtwork? {
         #if ACOUPLET_NO_SONY_ARTWORK
         nil
         #else
-        switch self {
-        case .wfXM5: "WFXM5Hero"
-        case .whXM5: "XM5Hero"
-        case .wfXM6, .wfXM4, .wfXM3, .whXM6, .whXM4, .whXM3, .whCH720N, .whULT900N, .wh1000XX: rawValue + "Product"
-        default: nil
-        }
+        artworkVariants?[String(color?.rawValue ?? 0)]
         #endif
     }
 
     func artworkSuffix(for color: SonyDeviceColor?) -> String? {
-        switch (self, color?.rawValue) {
-        case (.wfXM6, 0x01), (.wfXM5, 0x01), (.wfXM4, 0x01), (.wfXM3, 0x01),
-             (.whXM6, 0x01), (.whXM5, 0x01), (.whXM4, 0x01), (.whXM3, 0x01),
-             (.whCH720N, 0x01), (.whULT900N, 0x01), (.wh1000XX, 0x01): ""
-        case (.wfXM5, 0x03), (.wfXM4, 0x03), (.whXM5, 0x03), (.whXM4, 0x03), (.whXM3, 0x03): "Silver"
-        case (.whCH720N, 0x02): "White"
-        case (.whCH720N, 0x05): "Blue"
-        case (.whCH720N, 0x06): "Pink"
-        default: nil
-        }
+        artworkVariants?[String(color?.rawValue ?? 0)]?.suffix
+    }
+
+    var artworkColors: [SonyDeviceColor] {
+        let colors = (artworkVariants?.keys.map { UInt8($0)! } ?? []).sorted()
+        return colors.filter { $0 != 0 || colors.count == 1 }.map { SonyDeviceColor(rawValue: $0) }
+    }
+
+    private var artworkVariants: [String: SonyProductArtwork]? {
+        SonyArtworkCatalog.shared.models[rawValue]?.colors
     }
 
     #if DEBUG
+    func galleryArtworkColor(for finish: String) -> SonyDeviceColor? {
+        guard let entry = artworkVariants?.first(where: { $0.value.finish == finish }) else { return nil }
+        return SonyDeviceColor(rawValue: UInt8(entry.key)!)
+    }
+
     var galleryArtworkFinishes: [String: String] {
-        switch self {
-        case .wfXM6, .wfXM4, .wfXM3: ["black": "", "platinum-silver": "Silver"]
-        case .wfXM5: ["black": "", "platinum-silver": "Silver", "smoky-pink": "SmokyPink"]
-        case .whXM6: ["black": "", "platinum-silver": "Silver", "midnight-blue": "MidnightBlue",
-                      "sand-pink": "SandPink", "sandstone": "Sandstone", "olive-gray": "OliveGray"]
-        case .whXM5: ["black": "", "platinum-silver": "Silver", "midnight-blue": "MidnightBlue", "smoky-pink": "SmokyPink"]
-        case .whXM4: ["black": "", "platinum-silver": "Silver", "midnight-blue": "MidnightBlue", "silent-white": "SilentWhite"]
-        case .whXM3: ["black": "", "silver": "Silver"]
-        case .whCH720N: ["black": "", "white": "White", "blue": "Blue", "pink": "Pink"]
-        case .whULT900N: ["black": "", "forest-gray": "ForestGray", "off-white": "OffWhite"]
-        case .wh1000XX: ["black": "", "platinum": "Platinum"]
-        default: [:]
-        }
+        Dictionary(uniqueKeysWithValues: (artworkVariants ?? [:]).values.compactMap { artwork in
+            guard let finish = artwork.finish else { return nil }
+            return (finish, artwork.suffix ?? "")
+        })
     }
     #endif
+}
+
+struct SonyProductArtwork: Decodable, Equatable, Sendable {
+    struct Bounds: Decodable, Equatable, Sendable {
+        let x: Double
+        let y: Double
+        let width: Double
+        let height: Double
+    }
+
+    let heroBounds: Bounds?
+    let leftBounds: Bounds?
+    let rightBounds: Bounds?
+    let hero: String
+    let left: String?
+    let right: String?
+    let caseImage: String?
+    let openCase: String?
+    let suffix: String?
+    let finish: String?
+}
+
+private struct SonyArtworkCatalog: Decodable, Sendable {
+    struct Model: Decodable, Sendable {
+        let colors: [String: SonyProductArtwork]
+    }
+
+    let models: [String: Model]
+
+    static let shared: Self = {
+        let url = Bundle.main.url(forResource: "SonyArtworkCatalog", withExtension: "json")!
+        return try! JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
+    }()
 }
 
 struct SonyProtocolInfo: Equatable, Sendable {
@@ -779,10 +807,16 @@ struct BatteryReading: Equatable, Sendable {
 
     let level: Int
     let chargingState: ChargingState
+    let lowBatteryThreshold: UInt8?
 
     var isCharging: Bool { chargingState == .charging }
 
-    init?(level: UInt8, charging: UInt8, generation: SonyProtocolInfo.Generation = .v2) {
+    var isBelowLowBatteryThreshold: Bool? {
+        guard let lowBatteryThreshold, lowBatteryThreshold <= 100 else { return nil }
+        return level < Int(lowBatteryThreshold)
+    }
+
+    init?(level: UInt8, charging: UInt8, generation: SonyProtocolInfo.Generation = .v2, lowBatteryThreshold: UInt8? = nil) {
         guard level <= 100 else { return nil }
         switch generation {
         case .v1:
@@ -797,6 +831,7 @@ struct BatteryReading: Equatable, Sendable {
             chargingState = state
         }
         self.level = Int(level)
+        self.lowBatteryThreshold = lowBatteryThreshold
     }
 
     var symbol: String {
@@ -828,17 +863,17 @@ struct SonyBatteries: Equatable, Sendable {
         switch payload[1] {
         case 0x00, 0x08:
             guard payload.count == (payload[1] == 0x00 ? 4 : 5) else { return false }
-            single = BatteryReading(level: payload[2], charging: payload[3])
+            single = BatteryReading(level: payload[2], charging: payload[3], lowBatteryThreshold: payload[1] == 0x08 ? payload[4] : nil)
             left = nil
             right = nil
         case 0x01, 0x09:
-            guard payload.count == 6 || (payload[1] == 0x09 && payload.count == 8) else { return false }
+            guard payload.count == (payload[1] == 0x01 ? 6 : 8) else { return false }
             single = nil
-            left = payload[2] == 0 ? nil : BatteryReading(level: payload[2], charging: payload[3])
-            right = payload[4] == 0 ? nil : BatteryReading(level: payload[4], charging: payload[5])
+            left = payload[2] == 0 ? nil : BatteryReading(level: payload[2], charging: payload[3], lowBatteryThreshold: payload[1] == 0x09 ? payload[6] : nil)
+            right = payload[4] == 0 ? nil : BatteryReading(level: payload[4], charging: payload[5], lowBatteryThreshold: payload[1] == 0x09 ? payload[7] : nil)
         case 0x02, 0x0A:
-            guard payload.count == 4 || (payload[1] == 0x0A && payload.count == 5) else { return false }
-            caseBattery = payload[2] == 0 ? nil : BatteryReading(level: payload[2], charging: payload[3])
+            guard payload.count == (payload[1] == 0x02 ? 4 : 5) else { return false }
+            caseBattery = payload[2] == 0 ? nil : BatteryReading(level: payload[2], charging: payload[3], lowBatteryThreshold: payload[1] == 0x0A ? payload[4] : nil)
         default:
             return false
         }

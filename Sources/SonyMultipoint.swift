@@ -108,14 +108,14 @@ struct SonyMultipointInventory: Equatable, Sendable {
 
     fileprivate init?(payload: [UInt8], legacy: Bool = false) {
         guard payload.count >= 4 else { return nil }
-        let classLength = legacy ? 0 : 3
+        let classLength = !legacy && payload[1] == 0x02 ? 3 : 0
         var offset = 3
         var receivedDevices: [SonyMultipointDevice] = []
         for _ in 0..<payload[2] {
             guard offset + 19 + classLength < payload.count,
                   let address = multipointAddress(payload[offset..<(offset + 17)]) else { return nil }
             let connectionID = payload[offset + 17]
-            let classOfDevice = legacy ? 0 : UInt32(payload[offset + 18]) << 16
+            let classOfDevice = classLength == 0 ? (legacy ? 0 : 0xFFFFFF) : UInt32(payload[offset + 18]) << 16
                 | UInt32(payload[offset + 19]) << 8 | UInt32(payload[offset + 20])
             let nameLength = Int(payload[offset + 18 + classLength])
             offset += 19 + classLength
@@ -240,7 +240,7 @@ struct SonyPeripheralActionResult: Equatable, Sendable {
 }
 
 struct SonyMultipoint: Equatable, Sendable {
-    let supportsInventory: Bool
+    let inventoryInquiryType: UInt8?
     let supportsSourceControl: Bool
     let supportsLegacyInventory: Bool
     private(set) var maxPairedDevices: UInt8?
@@ -255,21 +255,26 @@ struct SonyMultipoint: Equatable, Sendable {
     private(set) var lastSourceResult: SonySourceSelectionResult?
     private(set) var lastPeripheralResult: SonyPeripheralActionResult?
 
+    var supportsInventory: Bool { inventoryInquiryType != nil }
+
     init(supportedFunctions: Set<UInt8> = []) {
-        supportsInventory = !supportedFunctions.isDisjoint(with: [0x32, 0x33])
+        inventoryInquiryType = !supportedFunctions.isDisjoint(with: [0x32, 0x33]) ? 0x02
+            : supportedFunctions.contains(0x30) ? 0x00 : nil
         supportsSourceControl = supportedFunctions.contains(0x31)
         supportsLegacyInventory = false
     }
 
     init(legacySupportedFunctions supportedFunctions: Set<UInt8>) {
-        supportsInventory = false
+        inventoryInquiryType = nil
         supportsSourceControl = false
         supportsLegacyInventory = supportedFunctions.contains(0x38)
     }
 
     var queryPayloads: [[UInt8]] {
         (supportsLegacyInventory ? [[0x36, 0x01]] : [])
-            + (supportsInventory ? (maxPairedDevices == nil ? [[0x30, 0x02]] : []) + [[0x32, 0x02], [0x36, 0x02]] : [])
+            + (inventoryInquiryType.map { type in
+                (maxPairedDevices == nil ? [[0x30, type]] : []) + [[0x32, type], [0x36, type]]
+            } ?? [])
             + (supportsSourceControl ? [[0x36, 0x01]] : [])
     }
 
@@ -311,24 +316,23 @@ struct SonyMultipoint: Equatable, Sendable {
         case .disconnect: guard device.isConnected else { return nil }
         case .unpair: break
         }
-        return [0x3C, 0x02, action.rawValue] + Array(address.utf8)
+        return [0x3C, inventoryInquiryType!, action.rawValue] + Array(address.utf8)
     }
 
     @discardableResult
     mutating func update(_ payload: [UInt8]) -> Bool {
         guard payload.count >= 2 else { return false }
         switch (payload[0], payload[1]) {
-        case (0x31, 0x02):
-            guard supportsInventory, payload.count == 5 else { return false }
+        case (0x31, let type) where type == inventoryInquiryType:
+            guard payload.count == 5 else { return false }
             maxPairedDevices = payload[2]
             maxConnectedDevices = payload[3]
             multipleConnectionFileTransfer = payload[4] <= 1 ? payload[4] == 0 : nil
-        case (0x33, 0x02), (0x35, 0x02):
-            guard supportsInventory, payload.count == 4 else { return false }
+        case (0x33, let type) where type == inventoryInquiryType, (0x35, let type) where type == inventoryInquiryType:
+            guard payload.count == 4 else { return false }
             bluetoothMode = payload[2]
             available = payload[3] <= 1 ? payload[3] == 0 : nil
-        case (0x37, 0x02), (0x39, 0x02):
-            guard supportsInventory else { return false }
+        case (0x37, let type) where type == inventoryInquiryType, (0x39, let type) where type == inventoryInquiryType:
             guard let receivedInventory = SonyMultipointInventory(payload: payload) else {
                 inventoryIsStale = true
                 return false
@@ -353,8 +357,8 @@ struct SonyMultipoint: Equatable, Sendable {
             guard supportsSourceControl, payload.count == 20,
                   let address = multipointAddress(payload[3...]) else { return false }
             lastSourceResult = SonySourceSelectionResult(address: address, result: SonySourceControlResult(rawValue: payload[2]))
-        case (0x3D, 0x02):
-            guard supportsInventory, payload.count == 21,
+        case (0x3D, let type) where type == inventoryInquiryType:
+            guard payload.count == 21,
                   let address = multipointAddress(payload[4...]) else { return false }
             lastPeripheralResult = SonyPeripheralActionResult(action: payload[2], result: SonyPeripheralResult(rawValue: payload[3]), address: address)
         default:

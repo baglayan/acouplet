@@ -619,13 +619,20 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         for reply in replies { deliver(reply, to: controller) }
         XCTAssertEqual(controller.systemFeatures.voiceAssistant, initial)
         acknowledgeSimulatedCommands(controller)
+        for reply: [UInt8] in [[0xF3, 5, 0], [0xF7, 5, 1]] {
+            deliver(reply, to: controller)
+            acknowledgeSimulatedCommands(controller)
+        }
         for reply in replies {
             deliver(reply, type: 0x0E, to: controller)
             deliver(Array(reply.dropLast()), to: controller)
         }
         XCTAssertEqual(controller.systemFeatures.voiceAssistant, initial)
         XCTAssertFalse(controller.canSetVoiceAssistant)
-        for reply in replies { deliver(reply, to: controller) }
+        for reply in replies {
+            deliver(reply, to: controller)
+            acknowledgeSimulatedCommands(controller)
+        }
         XCTAssertTrue(controller.canSetVoiceAssistant)
         let confirmed = controller.systemFeatures.voiceAssistant
         for reply: [UInt8] in [[0xF1, 4, 0xFF, 1, 0xFF], [0xF3, 4, 1], [0xF7, 4, 0x31]] {
@@ -791,7 +798,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             ([0xF2, 4], [0xF3, 4, 0], [0xF3, 4, 2]),
             ([0xF6, 4], [0xF7, 4, 0x30], [0xF7, 4, 0xFE]),
         ]
-        for testCase in cases {
+        for (index, testCase) in cases.enumerated() {
             for response in [testCase.valid, testCase.unknown, Array(testCase.valid.dropLast()), []] {
                 let controller = beginAssistantController()
                 defer { controller.simulateControlLoss() }
@@ -799,6 +806,10 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
                 for _ in 0..<4 { await Task.yield() }
                 XCTAssertTrue(controller.isReady)
                 acknowledgeSimulatedCommands(controller)
+                for reply: [UInt8] in [[0xF3, 5, 0], [0xF7, 5, 1]] + cases.prefix(index).map(\.valid) {
+                    deliver(reply, to: controller)
+                    acknowledgeSimulatedCommands(controller)
+                }
                 XCTAssertTrue(payloads(controller).contains(testCase.query))
                 if !response.isEmpty { deliver(response, to: controller) }
                 let session = controller.simulatedControlSession
@@ -829,8 +840,11 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         deliver([0x67, 2, 1, 2, 0, 1, 0, 12], to: controller)
         acknowledgeSimulatedCommands(controller)
         deliver([0xF1, 4, 3, 0x10, 0x11, 1], to: controller)
+        acknowledgeSimulatedCommands(controller)
         deliver([0xF3, 4, 0], to: controller)
+        acknowledgeSimulatedCommands(controller)
         deliver([0xF7, 4, 1, 0x10, 3], to: controller)
+        acknowledgeSimulatedCommands(controller)
         XCTAssertTrue(controller.canSetAutomaticPowerOff)
         XCTAssertNil(controller.systemFeatures.voiceAssistant)
         XCTAssertFalse(controller.canSetVoiceAssistant)
@@ -840,6 +854,60 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         XCTAssertEqual(controller.automaticPowerOff?.current?.rawValue, 0x10)
         deliver([0xF9, 4, 1, 0x11, 3], to: controller)
         XCTAssertEqual(controller.automaticPowerOff?.current?.rawValue, 0x11)
+    }
+
+    func testLegacySidetoneWritesBooleanValuesAndRequiresExactConfirmation() {
+        for slot: UInt8 in 0xD1...0xD3 {
+            for enabled in [false, true] {
+                let controller = readyLegacySidetoneController(slot: slot, enabled: !enabled)
+                defer { controller.simulateControlLoss() }
+                let value: UInt8 = enabled ? 1 : 0
+                controller.setSidetone(enabled)
+                XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xD8, slot, 1, value])
+                XCTAssertEqual(controller.systemFeatures.sidetone?.enabled, !enabled)
+                acknowledgeSimulatedCommands(controller)
+                XCTAssertEqual(controller.pendingChanges[.sidetone], [slot, 1, value])
+                XCTAssertNotNil(controller.simulatedSettingTimeoutWork(.sidetone))
+                deliver([0xD9, slot, 1, value], type: 0x0E, to: controller)
+                for reply: [UInt8] in [[0xD9, slot, 0, value], [0xD9, slot, 1], [0xD9, slot, 1, 2]] {
+                    deliver(reply, to: controller)
+                    XCTAssertEqual(controller.pendingChanges[.sidetone], [slot, 1, value])
+                }
+                if enabled {
+                    deliver([0xD9, slot, 1, value], to: controller)
+                } else {
+                    controller.refresh()
+                    acknowledgeSimulatedCommands(controller)
+                    XCTAssertTrue(payloads(controller).contains([0xD6, slot]))
+                    deliver([0xD7, slot, 1, value], to: controller)
+                }
+                XCTAssertNil(controller.pendingChanges[.sidetone])
+                XCTAssertNil(controller.settingErrors[.sidetone])
+                XCTAssertEqual(controller.systemFeatures.sidetone?.enabled, enabled)
+                XCTAssertTrue(controller.canSetSidetone)
+            }
+        }
+    }
+
+    func testLegacySidetoneConfirmationRequiresWriteCompletionAndANewObservation() {
+        let controller = readyLegacySidetoneController(slot: 0xD2, enabled: false)
+        defer { controller.simulateControlLoss() }
+        controller.defersSimulatedWrites = true
+        controller.setSidetone(true)
+        controller.defersSimulatedWrites = false
+        deliver([0xD9, 0xD2, 1, 1], to: controller)
+        XCTAssertEqual(controller.systemFeatures.sidetone?.enabled, true)
+        XCTAssertEqual(controller.pendingChanges[.sidetone], [0xD2, 1, 1])
+        XCTAssertNil(controller.simulatedSettingTimeoutWork(.sidetone))
+        controller.completeSimulatedWrite()
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(payloads(controller).contains([0xD8, 0xD2, 1, 1]))
+        XCTAssertNotNil(controller.simulatedSettingTimeoutWork(.sidetone))
+        deliver([0xD7, 0xD2, 1, 1], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.sidetone])
+        deliver([0xD9, 0xD2, 1, 1], to: controller)
+        XCTAssertNil(controller.pendingChanges[.sidetone])
+        XCTAssertTrue(controller.canSetSidetone)
     }
 
     func testGeneralSettingMetadataRequiresItsTransmittedQuery() {
@@ -1691,9 +1759,10 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
     private func readyAssistantController() -> SonyHeadphonesController {
         let controller = beginAssistantController()
         acknowledgeSimulatedCommands(controller)
-        for reply: [UInt8] in [[0xF1, 4, 3, 4, 0x30, 0x31, 0x32, 0x33], [0xF3, 4, 0], [0xF7, 4, 0x30],
-                              [0xF3, 5, 0], [0xF7, 5, 1]] {
+        for reply: [UInt8] in [[0xF3, 5, 0], [0xF7, 5, 1], [0xF1, 4, 3, 4, 0x30, 0x31, 0x32, 0x33],
+                              [0xF3, 4, 0], [0xF7, 4, 0x30]] {
             deliver(reply, to: controller)
+            acknowledgeSimulatedCommands(controller)
         }
         XCTAssertTrue(controller.canSetVoiceAssistant)
         return controller
@@ -1709,6 +1778,27 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         acknowledgeSimulatedCommands(controller)
         deliver([0x67, 0x17, 1, 1, 1, 0, 8], to: controller)
         XCTAssertTrue(controller.isReady)
+        return controller
+    }
+
+    private func readyLegacySidetoneController(slot: UInt8, enabled: Bool) -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM4", controlBusy: true)
+        controller.simulateProtocolMessage([1, 0, 2, 0x10], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        let model = Array("WF-1000XM4".utf8)
+        deliver([5, 1, UInt8(model.count)] + model, to: controller)
+        deliver([5, 3, 0x30, 0xFF], to: controller)
+        deliver([7, 0, 1, slot], to: controller)
+        acknowledgeSimulatedCommands(controller)
+        let title = Array("SIDETONE_SETTING".utf8)
+        let summary = Array("SIDETONE_SETTING_SUMMARY".utf8)
+        deliver([0xD1, slot, 2, UInt8(title.count)] + title + [UInt8(summary.count)] + summary + [1], to: controller)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0xD3, slot, 0], to: controller)
+        deliver([0xD7, slot, 1, enabled ? 1 : 0], to: controller)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertTrue(controller.canSetSidetone)
         return controller
     }
 

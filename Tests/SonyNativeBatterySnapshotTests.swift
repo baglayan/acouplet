@@ -3,6 +3,27 @@ import XCTest
 @testable import Acouplet
 
 final class SonyNativeBatterySnapshotTests: XCTestCase {
+    func testBothBatteryProtocolGenerationsPopulateNativeParts() {
+        let date = Date(timeIntervalSince1970: 1_000)
+        for (pairType, caseType): (UInt8, UInt8) in [(0x01, 0x02), (0x09, 0x0A)] {
+            var snapshot = SonyNativeBatterySnapshot(identifier: UUID(), name: "Sony earbuds")
+            var batteries = SonyBatteries()
+            let thresholds: [UInt8] = pairType == 0x09 ? [20, 20] : []
+            XCTAssertTrue(batteries.update([0x23, pairType, 73, 0, 84, 1] + thresholds))
+            snapshot.update(batteries, type: pairType, observedAt: date)
+            XCTAssertTrue(batteries.update([0x23, caseType, 65, 0] + (caseType == 0x0A ? [20] : [])))
+            snapshot.update(batteries, type: caseType, observedAt: date)
+            XCTAssertEqual(snapshot.left?.level, 73)
+            XCTAssertEqual(snapshot.right?.level, 84)
+            XCTAssertEqual(snapshot.caseBattery?.level, 65)
+            XCTAssertEqual(snapshot.freshReadings(at: date).count, 3)
+            XCTAssertTrue(batteries.update([0x25, caseType, 0xFF, 0xFF] + (caseType == 0x0A ? [20] : [])))
+            snapshot.update(batteries, type: caseType, observedAt: date.addingTimeInterval(1))
+            XCTAssertNil(snapshot.caseBattery)
+            XCTAssertEqual(snapshot.left?.level, 73)
+        }
+    }
+
     func testDiagnosticsOmitNativeNameAndIdentifierWhilePreservingBatteryReadings() {
         let date = Date(timeIntervalSince1970: 1_000)
         let identifier = UUID()
@@ -37,6 +58,20 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         XCTAssertTrue(controller.isChargingInCase)
         controller.simulateControlLoss()
         XCTAssertFalse(controller.isChargingInCase)
+    }
+
+    @MainActor
+    func testDiagnosticsDistinguishUnknownCaseReplyFromNoReplyAndResetOnDisconnect() {
+        let controller = batteryController(functions: [0x29, 0x2A])
+        defer { controller.simulateControlLoss() }
+        deliverBattery([0x23, 0x0A, 0, 0, 20], to: controller)
+        XCTAssertNil(controller.batteries.caseBattery)
+        XCTAssertTrue(controller.diagnosticReport.contains("23 0A 00 00 14"))
+        deliverBattery([0x25, 0x0A, 64, 0, 20], to: controller)
+        XCTAssertFalse(controller.diagnosticReport.contains("23 0A 00 00 14"))
+        XCTAssertTrue(controller.diagnosticReport.contains("25 0A 40 00 14"))
+        controller.simulateControlLoss()
+        XCTAssertFalse(controller.diagnosticReport.contains("25 0A 40 00 14"))
     }
 
     @MainActor
@@ -172,7 +207,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
     func testSimulatedHeadphonesNeverSupplyNativeBatteryReadings() {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true, simulatedReady: true)
         XCTAssertNil(controller.nativeBatterySnapshot)
-        controller.simulateProtocolMessage([0x25, 0x09, 73, 0, 76, 1])
+        controller.simulateProtocolMessage([0x25, 0x09, 73, 0, 76, 1, 20, 20])
         XCTAssertEqual(controller.batteries.left?.level, 73)
         XCTAssertNil(controller.nativeBatterySnapshot)
         controller.simulateProtocolMessage([0x25, 0x09, 72, 0, 75, 1, 20, 20])
@@ -189,17 +224,17 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         let firstDate = Date(timeIntervalSince1970: 1_000)
         var batteries = SonyBatteries()
         var snapshot = SonyNativeBatterySnapshot(identifier: UUID(), name: "WF-1000XM5")
-        XCTAssertTrue(batteries.update([0x23, 0x09, 73, 0, 76, 1]))
+        XCTAssertTrue(batteries.update([0x23, 0x09, 73, 0, 76, 1, 20, 20]))
         snapshot.update(batteries, type: 0x09, observedAt: firstDate)
         XCTAssertEqual(snapshot.freshReadings(at: firstDate).count, 2)
         XCTAssertEqual(snapshot.left?.level, 73)
         XCTAssertEqual(snapshot.right?.isCharging, true)
         XCTAssertNil(snapshot.caseBattery)
-        XCTAssertTrue(batteries.update([0x23, 0x0A, 1, 0]))
+        XCTAssertTrue(batteries.update([0x23, 0x0A, 1, 0, 20]))
         snapshot.update(batteries, type: 0x0A, observedAt: firstDate.addingTimeInterval(30))
         XCTAssertEqual(snapshot.caseBattery?.level, 1)
         XCTAssertEqual(snapshot.freshReadings(at: firstDate.addingTimeInterval(46)).keys.sorted(), ["Case"])
-        XCTAssertTrue(batteries.update([0x25, 0x09, 255, 0, 76, 0]))
+        XCTAssertTrue(batteries.update([0x25, 0x09, 255, 0, 76, 0, 20, 20]))
         snapshot.update(batteries, type: 0x09, observedAt: firstDate.addingTimeInterval(60))
         XCTAssertNil(snapshot.left)
         XCTAssertEqual(snapshot.freshReadings(at: firstDate.addingTimeInterval(60)).keys.sorted(), ["Case", "Right"])
@@ -213,9 +248,9 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         let firstDate = Date(timeIntervalSince1970: 1_000)
         var batteries = SonyBatteries()
         var snapshot = SonyNativeBatterySnapshot(identifier: UUID(), name: "WF-1000XM5")
-        XCTAssertTrue(batteries.update([0x23, 0x0A, 100, 0]))
+        XCTAssertTrue(batteries.update([0x23, 0x0A, 100, 0, 20]))
         snapshot.update(batteries, type: 0x0A, observedAt: firstDate)
-        XCTAssertTrue(batteries.update([0x23, 0x09, 73, 0, 76, 0]))
+        XCTAssertTrue(batteries.update([0x23, 0x09, 73, 0, 76, 0, 20, 20]))
         snapshot.update(batteries, type: 0x09, observedAt: firstDate)
         snapshot.update(batteries, type: 0x09, observedAt: firstDate.addingTimeInterval(40))
         XCTAssertEqual(snapshot.freshReadings(at: firstDate.addingTimeInterval(46)).keys.sorted(), ["Left", "Right"])
@@ -355,10 +390,10 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         let controller = batteryController(functions: [0x29, 0x2A], acknowledgeReads: false)
         defer { controller.simulateControlLoss() }
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x22, 0x09])
-        deliverBattery([0x25, 0x09, 73, 0, 76, 1], to: controller)
+        deliverBattery([0x25, 0x09, 73, 0, 76, 1, 20, 20], to: controller)
         let paired = controller.batteries
         let reportedAt = controller.lastSyncDate
-        deliverBattery([0x23, 0x0A, 80, 0], to: controller)
+        deliverBattery([0x23, 0x0A, 80, 0, 20], to: controller)
         XCTAssertEqual(controller.batteries, paired)
         XCTAssertEqual(controller.lastSyncDate, reportedAt)
 
@@ -367,19 +402,19 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - pending.sequence, payload: []))
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x22, 0x0A])
         controller.defersSimulatedWrites = false
-        deliverBattery([0x23, 0x0A, 80, 0], to: controller)
+        deliverBattery([0x23, 0x0A, 80, 0, 20], to: controller)
         XCTAssertNil(controller.batteries.caseBattery)
         XCTAssertEqual(controller.lastSyncDate, reportedAt)
         controller.completeSimulatedWrite()
         acknowledgeBatteryCommands(controller)
-        deliverBattery([0x23, 0x0A, 80, 0], type: 0x0E, to: controller)
+        deliverBattery([0x23, 0x0A, 80, 0, 20], type: 0x0E, to: controller)
         XCTAssertNil(controller.batteries.caseBattery)
         deliverBattery([0x23, 0x0A, 80, 0, 10, 20], to: controller)
         XCTAssertNil(controller.batteries.caseBattery)
         deliverBattery([0x23, 0x0A, 80, 0, 20], to: controller)
         XCTAssertEqual(controller.batteries.caseBattery?.level, 80)
         let caseReportedAt = controller.lastSyncDate
-        deliverBattery([0x23, 0x09, 74, 0, 77, 0], to: controller)
+        deliverBattery([0x23, 0x09, 74, 0, 77, 0, 20, 20], to: controller)
         XCTAssertEqual(controller.batteries.left?.level, 73)
         XCTAssertEqual(controller.batteries.right?.level, 76)
         XCTAssertEqual(controller.batteries.caseBattery?.level, 80)
@@ -394,7 +429,7 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         controller.simulateBatteryReadTimeout([0x22, 0x0A])
         for _ in 0..<5 { await Task.yield() }
         acknowledgeBatteryCommands(controller)
-        deliverBattery([0x23, 0x0A, 65, 0], to: controller)
+        deliverBattery([0x23, 0x0A, 65, 0, 20], to: controller)
         XCTAssertEqual(controller.batteries.caseBattery?.level, 65)
 
         controller.simulateBatteryReadTimeout([0x22, 0x09])
@@ -407,15 +442,15 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         XCTAssertTrue(controller.isReady)
         XCTAssertEqual(controller.simulatedControlSession, session)
         XCTAssertEqual(batteryReadCount(controller, inquiry: 0x09), reads)
-        deliverBattery([0x25, 0x09, 73, 0, 76, 1], to: controller)
+        deliverBattery([0x25, 0x09, 73, 0, 76, 1, 20, 20], to: controller)
         let reportedAt = controller.lastSyncDate
-        deliverBattery([0x23, 0x09, 74, 0, 77, 0], to: controller)
+        deliverBattery([0x23, 0x09, 74, 0, 77, 0, 20, 20], to: controller)
         XCTAssertEqual(controller.batteries.left?.level, 73)
         XCTAssertEqual(controller.lastSyncDate, reportedAt)
         for _ in 0..<5 { controller.simulateAutomaticRefresh() }
         acknowledgeBatteryCommands(controller)
         XCTAssertEqual(batteryReadCount(controller, inquiry: 0x09), reads + 1)
-        deliverBattery([0x23, 0x09, 72, 0, 75, 0], to: controller)
+        deliverBattery([0x23, 0x09, 72, 0, 75, 0, 20, 20], to: controller)
         XCTAssertEqual(controller.batteries.left?.level, 72)
         controller.simulateBatteryReadTimeout([0x22, 0x09])
         for _ in 0..<5 { await Task.yield() }

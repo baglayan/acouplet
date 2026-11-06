@@ -57,7 +57,7 @@ final class SonyAudioFeaturesTests: XCTestCase {
     }
 
     func testOnlyAdvertisedDialectCanBeQueriedParsedOrWritten() {
-        var unsupported = SonyAudioFeatures(supportedFunctions: [0xE0, 0xE1, 0xE3])
+        var unsupported = SonyAudioFeatures(supportedFunctions: [0xE0])
         XCTAssertTrue(unsupported.queryPayloads.isEmpty)
         XCTAssertFalse(unsupported.update([0x13, 0x02, 0x02]))
         XCTAssertFalse(unsupported.update([0xE1, 0x01, 0x02]))
@@ -112,8 +112,8 @@ final class SonyAudioFeaturesTests: XCTestCase {
         XCTAssertNil(audio.dseeType)
     }
 
-    func testConnectionModeQueriesRequireAdvertisedNewerDialect() {
-        var unsupported = SonyAudioFeatures(supportedFunctions: [0xE1, 0xE3])
+    func testConnectionModeQueriesRequireAdvertisedDialect() {
+        var unsupported = SonyAudioFeatures()
         XCTAssertFalse(unsupported.supportsConnectionMode)
         XCTAssertTrue(unsupported.queryPayloads.isEmpty)
         for payload: [UInt8] in [
@@ -125,6 +125,7 @@ final class SonyAudioFeaturesTests: XCTestCase {
         }
         let audio = SonyAudioFeatures(supportedFunctions: [0xE7])
         XCTAssertTrue(audio.supportsConnectionMode)
+        XCTAssertEqual(audio.connectionModeInquiryType, 0x05)
         XCTAssertEqual(audio.queryPayloads, [[0xE0, 0x05], [0xE2, 0x05], [0xE6, 0x05]])
         XCTAssertNil(audio.supportedConnectionModes)
         XCTAssertNil(audio.connectionModeLDACExclusions)
@@ -139,6 +140,63 @@ final class SonyAudioFeaturesTests: XCTestCase {
         ])
     }
 
+    func testConnectionModeSelectsNewestAdvertisedDialectAndOnlyQueriesItsMetadata() {
+        for (functions, inquiry): (Set<UInt8>, UInt8) in [
+            ([0xE1], 0x00), ([0xE3], 0x02), ([0xE1, 0xE3], 0x02),
+            ([0xE1, 0xE7], 0x05), ([0xE3, 0xE7], 0x05), ([0xE1, 0xE3, 0xE7], 0x05),
+        ] {
+            var audio = SonyAudioFeatures(supportedFunctions: functions)
+            XCTAssertTrue(audio.supportsConnectionMode)
+            XCTAssertEqual(audio.connectionModeInquiryType, inquiry)
+            XCTAssertEqual(audio.queryPayloads, (inquiry == 0x05 ? [[0xE0, inquiry]] : []) + [[0xE2, inquiry], [0xE6, inquiry]])
+            XCTAssertEqual(audio.supportedConnectionModes, inquiry == 0x05 ? nil : [.soundQuality, .stableConnection])
+            for other: UInt8 in [0x00, 0x02, 0x05] where other != inquiry {
+                XCTAssertFalse(audio.update([0xE7, other, 0x00]))
+            }
+            XCTAssertNil(audio.connectionMode)
+        }
+    }
+
+    func testClassicConnectionModesUseFixedChoicesAndSeparateLDACAvailability() {
+        for (function, inquiry): (UInt8, UInt8) in [(0xE1, 0x00), (0xE3, 0x02)] {
+            var audio = SonyAudioFeatures(supportedFunctions: [function])
+            XCTAssertEqual(audio.supportedConnectionModes, [.soundQuality, .stableConnection])
+            XCTAssertNil(audio.connectionModeLDACAvailable)
+            let status: [UInt8] = [0xE3, inquiry, 0x00] + (inquiry == 0x02 ? [0x01] : [])
+            XCTAssertTrue(audio.update(status))
+            XCTAssertEqual(audio.connectionModeAvailable, true)
+            XCTAssertEqual(audio.connectionModeLDACAvailable, inquiry == 0x02 ? false : nil)
+            XCTAssertTrue(audio.update([0xE7, inquiry, 0x00]))
+            XCTAssertEqual(audio.connectionMode, .soundQuality)
+            XCTAssertNil(audio.lastConnectionModeSwitchingStream)
+            XCTAssertTrue(audio.update([0xE9, inquiry, 0x01]))
+            XCTAssertEqual(audio.connectionMode, .stableConnection)
+            XCTAssertEqual(audio.lastConnectionModeSwitchingStream, SonyConnectionStream.none)
+            let previous = audio
+            for payload: [UInt8] in [
+                [0xE1, inquiry, 0x02, 0x00, 0x01], [0xE1, inquiry, 0x02, 0x00, 0x01, 0x00],
+                Array(status.dropLast()), status + [0x00],
+                [0xE7, inquiry], [0xE7, inquiry, 0x00, 0x00],
+                [0xE9, inquiry], [0xE9, inquiry, 0x00, 0x01],
+            ] {
+                XCTAssertFalse(audio.update(payload))
+                XCTAssertEqual(audio, previous)
+            }
+            XCTAssertTrue(audio.update([0xE5, inquiry, 0x01] + (inquiry == 0x02 ? [0x00] : [])))
+            XCTAssertEqual(audio.connectionModeAvailable, false)
+            XCTAssertEqual(audio.connectionModeLDACAvailable, inquiry == 0x02 ? true : nil)
+            XCTAssertEqual(audio.connectionMode, .stableConnection)
+            XCTAssertTrue(audio.update([0xE5, inquiry, 0xFF] + (inquiry == 0x02 ? [0xFF] : [])))
+            XCTAssertNil(audio.connectionModeAvailable)
+            XCTAssertNil(audio.connectionModeLDACAvailable)
+            XCTAssertTrue(audio.update([0xE7, inquiry, 0x02]))
+            XCTAssertEqual(audio.connectionMode, .lowLatency)
+            XCTAssertEqual(audio.supportedConnectionModes, [.soundQuality, .stableConnection])
+            XCTAssertTrue(audio.update([0xE9, inquiry, 0xFF]))
+            XCTAssertEqual(audio.connectionMode, .unknown(0xFF))
+        }
+    }
+
     func testConnectionModeCapabilityAvailabilityAndPreferenceAreSeparate() {
         var audio = SonyAudioFeatures(supportedFunctions: [0x12, 0xE7])
         XCTAssertTrue(audio.update([0x13, 0x02, 0x02]))
@@ -149,12 +207,14 @@ final class SonyAudioFeaturesTests: XCTestCase {
         XCTAssertTrue(audio.update([0xE3, 0x05, 0x00, 0x01]))
         XCTAssertEqual(audio.connectionModeAvailable, true)
         XCTAssertEqual(audio.connectionModeAdditionalStatus, 0x01)
+        XCTAssertEqual(audio.connectionModeLDACAvailable, false)
         XCTAssertTrue(audio.update([0xE7, 0x05, 0x02]))
         XCTAssertEqual(audio.connectionMode, .lowLatency)
         XCTAssertNil(audio.lastConnectionModeSwitchingStream)
         XCTAssertEqual(audio.codec, .aac)
         XCTAssertTrue(audio.update([0xE5, 0x05, 0x01, 0x00]))
         XCTAssertEqual(audio.connectionModeAvailable, false)
+        XCTAssertEqual(audio.connectionModeLDACAvailable, true)
         XCTAssertEqual(audio.connectionMode, .lowLatency)
         XCTAssertTrue(audio.update([0xE1, 0x05, 0x02, 0x00, 0x01, 0x00]))
         XCTAssertEqual(audio.supportedConnectionModes, [.soundQuality, .stableConnection])
@@ -298,20 +358,21 @@ final class SonyAudioFeaturesTests: XCTestCase {
         XCTAssertTrue(controller.supportedFunctions.isEmpty)
         deliver([0x07, 0x00, 0x05, 0x6B, 0x00, 0x12, 0x00, 0xE2, 0x00, 0xFF, 0x00, 0xE7, 0x00])
         XCTAssertEqual(controller.supportedFunctions, [0x6B, 0x12, 0xE2, 0xFF, 0xE7])
-        deliver([0xE1, 0x01, 0x02])
         controller.simulateProtocolMessage([0x67, 0x17, 0x01, 0x01, 0x00, 0x00, 0x0A])
-        var queries: [[UInt8]] = []
-        while let frame = controller.simulatedPendingFrame {
-            queries.append(frame.payload)
-            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
-        }
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == [0xE0, 0x01] })
+        let capabilityReadStart = controller.simulatedTransmittedFrames.count
+        deliver([0xE1, 0x01, 0x02])
+        deliver([0xE3, 0x01, 0x00])
+        deliver([0xE7, 0x01, 0x01])
+        deliver([0xE1, 0x05, 0x03, 0x00, 0x01, 0x02, 0x01, 0x00])
+        deliver([0xE3, 0x05, 0x00, 0x00])
+        deliver([0xE7, 0x05, 0x00])
+        let queries = controller.simulatedTransmittedFrames.dropFirst(capabilityReadStart).filter { $0.type == 0x0C }.map(\.payload)
         XCTAssertFalse(queries.contains([0xE0, 0x01]))
         XCTAssertTrue(queries.contains([0xE0, 0x05]))
         XCTAssertTrue(queries.contains([0xE2, 0x05]))
         XCTAssertTrue(queries.contains([0xE6, 0x05]))
-        deliver([0xE1, 0x05, 0x03, 0x00, 0x01, 0x02, 0x01, 0x00])
-        deliver([0xE3, 0x05, 0x00, 0x00])
-        deliver([0xE7, 0x05, 0x00])
         XCTAssertEqual(controller.audioFeatures.connectionMode, .soundQuality)
         XCTAssertEqual(controller.audioFeatures.connectionModeAvailable, true)
         XCTAssertTrue(controller.isReady)

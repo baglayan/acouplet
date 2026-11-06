@@ -81,11 +81,18 @@ final class HeadphoneIntentsTests: XCTestCase {
     func testNoiseActionWaitsForAnExactTransmittedNotification() async throws {
         let controller = makeController()
         defer { controller.simulateControlLoss() }
+        let initial = try XCTUnwrap(controller.noiseControl?.state?.payload)
+        deliver([0x69] + initial.dropFirst(), to: controller)
+        acknowledgeAll(controller)
+        let sequence = try XCTUnwrap(controller.simulatedTransmittedFrames.last { $0.type == 1 }).sequence
         controller.defersSimulatedWrites = true
         let action = await startAction(.anc, controller: controller)
         let payload = try XCTUnwrap(controller.simulatedPendingFrame?.payload)
-        deliver([0x69] + payload.dropFirst(), to: controller)
+        let encoded = SonyFrameCodec.encode(type: 0x0C, sequence: sequence, payload: [0x69] + payload.dropFirst())
+        controller.simulateProtocolData(encoded.prefix(4))
         XCTAssertNotNil(controller.pendingChanges[.noiseControl])
+        controller.completeSimulatedWrite()
+        controller.simulateProtocolData(encoded.dropFirst(4))
         controller.completeSimulatedWrite()
         controller.defersSimulatedWrites = false
         acknowledgeAll(controller)
@@ -101,10 +108,35 @@ final class HeadphoneIntentsTests: XCTestCase {
     }
 
     @MainActor
+    func testNoiseActionRejectsChangedStateBeforeTheDeferredWrite() async throws {
+        let controller = makeController()
+        defer { controller.simulateControlLoss() }
+        controller.defersSimulatedWrites = true
+        let action = await startAction(.anc, controller: controller)
+        let payload = try XCTUnwrap(controller.simulatedPendingFrame?.payload)
+        deliver([0x69] + payload.dropFirst(), to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.noiseControl])
+        controller.completeSimulatedWrite()
+        controller.defersSimulatedWrites = false
+        acknowledgeAll(controller)
+        do {
+            try await action.value
+            XCTFail("An action whose source state changed before transmission must fail.")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Noise controls changed before the command could be sent.")
+        }
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == payload })
+        XCTAssertNil(controller.pendingChanges[.noiseControl])
+        XCTAssertEqual(controller.noiseControlMode, .anc)
+    }
+
+    @MainActor
     func testOldNoisePollCannotConfirmANewAction() async throws {
         let controller = makeController()
         defer { controller.simulateControlLoss() }
         controller.refresh()
+        acknowledgeAll(controller)
+        deliver([0x63, 0x19, 0], to: controller)
         acknowledgeAll(controller)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x66, 0x19] }.count, 1)
         let action = await startAction(.anc, controller: controller)

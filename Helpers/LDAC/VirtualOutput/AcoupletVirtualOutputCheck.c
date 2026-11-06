@@ -1,8 +1,12 @@
 #include <assert.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <unistd.h>
+static int CheckMutexUnlock(pthread_mutex_t *mutex);
+#define pthread_mutex_unlock CheckMutexUnlock
 #define ACOUPLET_PRIORITY_CHECK 1
 #include "AcoupletVirtualOutput.c"
+#undef pthread_mutex_unlock
 
 static dispatch_semaphore_t requested;
 static atomic_uint_fast64_t requestedAction;
@@ -17,6 +21,21 @@ static pid_t owner;
 static atomic_uint timerWakeups;
 static atomic_int deniedClient;
 static atomic_uint authenticationChecks;
+static atomic_bool checkPriorityIdlePublication;
+static dispatch_semaphore_t priorityIdleUnlocked;
+static dispatch_semaphore_t priorityIdleRead;
+
+static int CheckMutexUnlock(pthread_mutex_t *mutex) {
+    Boolean check = mutex == &gPlugIn_StateMutex && atomic_load(&checkPriorityIdlePublication) &&
+        !gPriorityAddress && !gPriorityOwner;
+    if (check) atomic_store(&checkPriorityIdlePublication, false);
+    int status = pthread_mutex_unlock(mutex);
+    if (check) {
+        dispatch_semaphore_signal(priorityIdleUnlocked);
+        assert(dispatch_semaphore_wait(priorityIdleRead, dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC)) == 0);
+    }
+    return status;
+}
 
 static void AcoupletPriorityCheckBootstrap(xpc_object_t request) {
     assert(xpc_get_type(request) == XPC_TYPE_DICTIONARY && xpc_dictionary_get_count(request) == 1);
@@ -189,6 +208,18 @@ static OSStatus PreparePriority(pid_t client, CFStringRef address, Boolean enabl
     return status;
 }
 
+static OSStatus ConditionalPriority(pid_t client, CFStringRef address, Boolean enabled, CFTypeRef ifAvailable) {
+    CFMutableDictionaryRef request = CFDictionaryCreateMutable(NULL, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(request, CFSTR("address"), address);
+    CFDictionarySetValue(request, CFSTR("enabled"), enabled ? kCFBooleanTrue : kCFBooleanFalse);
+    CFDictionarySetValue(request, CFSTR("ifAvailable"), ifAvailable);
+    OSStatus status = Set(kObjectID_Device, client, kAcoupletPriority, kAudioObjectPropertyScopeGlobal,
+        sizeof(request), &request);
+    CFRelease(request);
+    return status;
+}
+
 static void PriorityPhase(CFStringRef phase) {
     CFPropertyListRef state;
     Get(kObjectID_Device, owner, kAcoupletPriority, kAudioObjectPropertyScopeGlobal, sizeof(state), &state);
@@ -270,7 +301,7 @@ static void CheckClientAuthentication(CFStringRef address) {
     atomic_store(&deniedClient, 0);
     CFDictionaryRef state;
     Get(kObjectID_Device, owner, kAcoupletPriority, kAudioObjectPropertyScopeGlobal, sizeof(state), &state);
-    assert(CFDictionaryGetCount(state) == 4 &&
+    assert(CFDictionaryGetCount(state) == 6 &&
         CFEqual(CFDictionaryGetValue(state, CFSTR("address")), CFSTR("AA:BB:CC:DD:EE:FF")) &&
         CFEqual(CFDictionaryGetValue(state, CFSTR("error")), CFSTR("Private target detail")));
     CFRelease(state);
@@ -515,7 +546,127 @@ static void CheckScopedVolume(void) {
     dispatch_sync(gLeaseQueue, ^{});
 }
 
+static void CheckPriorityPublicationDiagnostics(void) {
+    CFStringRef address = CFSTR("AA:BB:CC:DD:EE:FF");
+    assert(PreparePriority(owner, address, false, false) == noErr);
+    UInt64 sends = gPriorityCheckSends;
+    PriorityPublication("unrelated", "11:22:33:44:55:66", 1952538980);
+    assert(!gPriorityTargetSeen && !gPriorityLastTargetType);
+    PriorityPublication("ordinary-audio", "AA:BB:CC:DD:EE:FF", 0x7461636c);
+    assert(!gPriorityTargetSeen && !gPriorityTargetWithdrawn && !gPriorityUID &&
+        gPriorityLastTargetType == 0x7461636c && gPriorityCheckSends == sends);
+    assert(SetPriority(owner, address, true, false) == noErr);
+    dispatch_sync(gLeaseQueue, ^{
+        gPriorityDeadline = mach_absolute_time() - 1;
+        assert(AcoupletPriorityExpire());
+    });
+    CFDictionaryRef state;
+    Get(kObjectID_Device, owner, kAcoupletPriority, kAudioObjectPropertyScopeGlobal, sizeof(state), &state);
+    assert(CFDictionaryGetValue(state, CFSTR("targetPublicationSeen")) == kCFBooleanFalse);
+    assert(CFDictionaryGetValue(state, CFSTR("targetPublicationWithdrawn")) == kCFBooleanFalse);
+    int64_t type = 0;
+    assert(CFNumberGetValue(CFDictionaryGetValue(state, CFSTR("lastTargetDeviceType")), kCFNumberSInt64Type, &type) && type == 0x7461636c);
+    assert(CFEqual(CFDictionaryGetValue(state, CFSTR("error")),
+        CFSTR("No matching priority publication before the deadline.")));
+    CFRelease(state);
+    assert(!gPrioritySent && gPriorityCheckSends == sends);
+    assert(SetPriority(owner, address, false, false) == noErr);
+    assert(PreparePriority(owner, address, false, false) == noErr);
+    assert(!gPriorityTargetSeen && !gPriorityTargetWithdrawn && !gPriorityLastTargetType);
+    PriorityPublication("matching", "AA:BB:CC:DD:EE:FF", 1952538980);
+    assert(gPriorityTargetSeen && !gPriorityTargetWithdrawn && gPriorityCheckSends == sends);
+    PriorityWithdrawal("matching");
+    assert(gPriorityTargetSeen && gPriorityTargetWithdrawn && !gPriorityUID && gPriorityCheckSends == sends);
+    assert(SetPriority(owner, address, true, false) == noErr);
+    dispatch_sync(gLeaseQueue, ^{
+        gPriorityDeadline = mach_absolute_time() - 1;
+        assert(AcoupletPriorityExpire());
+    });
+    assert(gPriorityTargetSeen && gPriorityTargetWithdrawn && !gPrioritySent && gPriorityCheckSends == sends);
+    assert(SetPriority(owner, address, false, false) == noErr);
+}
+
+static void CheckPriorityIdlePublication(void) {
+    CFStringRef address = CFSTR("AA:BB:CC:DD:EE:FF");
+    assert(PreparePriority(owner, address, false, false) == noErr);
+    priorityIdleUnlocked = dispatch_semaphore_create(0);
+    priorityIdleRead = dispatch_semaphore_create(0);
+    atomic_store(&checkPriorityIdlePublication, true);
+    dispatch_async(gLeaseQueue, ^{
+        assert(ConditionalPriority(owner, address, true, kCFBooleanTrue) == noErr);
+    });
+    assert(dispatch_semaphore_wait(priorityIdleUnlocked, dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC)) == 0);
+    CFDictionaryRef state;
+    Get(kObjectID_Device, owner, kAcoupletPriority, kAudioObjectPropertyScopeGlobal, sizeof(state), &state);
+    assert(CFEqual(CFDictionaryGetValue(state, CFSTR("phase")), CFSTR("idle")));
+    assert(!CFDictionaryGetValue(state, CFSTR("address")) && !CFDictionaryGetValue(state, CFSTR("error")) &&
+        CFDictionaryGetValue(state, CFSTR("prioritySent")) == kCFBooleanFalse);
+    CFRelease(state);
+    dispatch_semaphore_signal(priorityIdleRead);
+    dispatch_sync(gLeaseQueue, ^{});
+    dispatch_release(priorityIdleUnlocked);
+    dispatch_release(priorityIdleRead);
+}
+
+static void CheckConditionalPriority(void) {
+    CFStringRef address = CFSTR("AA:BB:CC:DD:EE:FF");
+    for (int publication = 0; publication < 3; ++publication) {
+        assert(PreparePriority(owner, address, false, false) == noErr);
+        UInt64 sends = gPriorityCheckSends;
+        UInt64 generation = gPriorityConnectionGeneration;
+        if (publication == 1) PriorityPublication("ordinary", "AA:BB:CC:DD:EE:FF", 0x7461636c);
+        if (publication == 2) {
+            PriorityPublication("withdrawn", "AA:BB:CC:DD:EE:FF", 1952538980);
+            PriorityWithdrawal("withdrawn");
+        }
+        assert(ConditionalPriority(owner + 1, address, true, kCFBooleanTrue) == kAudioDevicePermissionsError);
+        assert(ConditionalPriority(owner, CFSTR("11:22:33:44:55:66"), true, kCFBooleanTrue) == kAudioHardwareIllegalOperationError);
+        assert(ConditionalPriority(owner, address, true, kCFBooleanFalse) == kAudioHardwareIllegalOperationError);
+        assert(ConditionalPriority(owner, address, true, CFSTR("true")) == kAudioHardwareIllegalOperationError);
+        assert(ConditionalPriority(owner, address, false, kCFBooleanTrue) == kAudioHardwareIllegalOperationError);
+        assert(gPriorityListening && gPriorityConnectionGeneration == generation && gPriorityCheckSends == sends);
+        assert(ConditionalPriority(owner, address, true, kCFBooleanTrue) == noErr);
+        PriorityPhase(CFSTR("idle"));
+        assert(!gPriorityListening && !gPrioritySent && !gPriorityDeadline && !gPriorityAddress && !gPriorityOwner &&
+            !gPriorityEnabling && gPriorityConnectionGeneration > generation && gPriorityCheckSends == sends);
+        PriorityPublication("late", "AA:BB:CC:DD:EE:FF", 1952538980);
+        PriorityNotification();
+        assert(!gPriorityUID && !gPrioritySent && gPriorityCheckSends == sends);
+    }
+    assert(PreparePriority(owner, address, false, false) == noErr);
+    dispatch_sync(gLeaseQueue, ^{ AcoupletPriorityEvent((xpc_object_t)XPC_ERROR_CONNECTION_INVALID); });
+    assert(ConditionalPriority(owner, address, true, kCFBooleanTrue) == kAudioHardwareIllegalOperationError);
+    PriorityPhase(CFSTR("preparation-failed"));
+    assert(SetPriority(owner, address, false, false) == noErr);
+    for (int withdraw = 0; withdraw < 2; ++withdraw) {
+        assert(PreparePriority(owner, address, false, false) == noErr);
+        PriorityPublication("available", "AA:BB:CC:DD:EE:FF", 1952538980);
+        UInt64 sends = gPriorityCheckSends;
+        assert(ConditionalPriority(owner, address, true, kCFBooleanTrue) == noErr);
+        assert(gPrioritySent && gPriorityWaiting == 2 && gPriorityCheckSends == sends + 1);
+        if (withdraw) {
+            PriorityWithdrawal("available");
+            PriorityPhase(CFSTR("cleanup-required"));
+            assert(ConditionalPriority(owner, address, true, kCFBooleanTrue) == kAudioHardwareIllegalOperationError);
+            assert(gPrioritySent && gPriorityCheckSends == sends + 1);
+            assert(SetPriority(owner, address, false, true) == noErr);
+        } else {
+            PriorityNotification();
+            PriorityPhase(CFSTR("configured"));
+            assert(SetPriority(owner, address, false, false) == noErr && gPriorityCheckStatus == 1);
+            PriorityNotification();
+            assert(gPriorityCheckStatus == 0);
+            PriorityNotification();
+        }
+        PriorityPhase(CFSTR("idle"));
+        assert(!gPrioritySent && !gPriorityListening);
+    }
+}
+
 static void CheckPriority(void) {
+    CheckPriorityPublicationDiagnostics();
+    CheckPriorityIdlePublication();
+    CheckConditionalPriority();
     CFStringRef address = CFSTR("aa-bb-cc-dd-ee-ff");
     PriorityPhase(CFSTR("idle"));
     xpc_object_t errors[] = {(xpc_object_t)XPC_ERROR_CONNECTION_INTERRUPTED, (xpc_object_t)XPC_ERROR_CONNECTION_INVALID};
@@ -851,7 +1002,7 @@ static void CheckRevision(void) {
     Get(kObjectID_Device, owner, kAcoupletRevision, kAudioObjectPropertyScopeGlobal, sizeof(revision), &revision);
     SInt32 value = 0;
     assert(revision && CFGetTypeID(revision) == CFNumberGetTypeID());
-    assert(CFNumberGetValue(revision, kCFNumberSInt32Type, &value) && value == kAcoupletDriverRevision && value == 9);
+    assert(CFNumberGetValue(revision, kCFNumberSInt32Type, &value) && value == kAcoupletDriverRevision && value == 10);
     assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, 0, NULL,
         sizeof(revision), &revision) != noErr);
     CFRelease(revision);

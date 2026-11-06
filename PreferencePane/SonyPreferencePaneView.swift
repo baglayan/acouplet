@@ -177,11 +177,19 @@ struct SonyPreferencePaneView: View {
 
     @ViewBuilder
     private func audio(_ device: SonyPreferencePaneDevice) -> some View {
-        if device.equalizer != nil || device.dsee != nil {
+        if device.equalizer != nil || device.dsee != nil || device.upscalingStatus != nil {
             Section {
                 if let equalizer = device.equalizer { navigation(.equalizer, value: equalizer.preset.currentTitle) }
                 if let dsee = device.dsee {
                     choice(device.dseeTitle ?? "DSEE", value: dsee) { client.setDSEE(option: $0) }
+                }
+                if let type = device.upscalingType {
+                    LabeledContent("Upscaling type", value: type)
+                        .accessibilityIdentifier("pane.upscalingType")
+                }
+                if let status = device.upscalingStatus {
+                    LabeledContent("Upscaling status", value: status)
+                        .accessibilityIdentifier("pane.upscalingStatus")
                 }
             }
         }
@@ -293,7 +301,7 @@ struct SonyPreferencePaneView: View {
     }
 
     private func hasAudio(_ device: SonyPreferencePaneDevice) -> Bool {
-        device.equalizer != nil || device.dsee != nil || device.speak != nil || device.codec != nil
+        device.equalizer != nil || device.dsee != nil || device.upscalingStatus != nil || device.speak != nil || device.codec != nil
             || device.connectionQuality != nil || device.multipoint != nil || !device.sources.isEmpty
             || device.listeningLevel != nil || device.systemFeatures.contains { $0.id == "1" }
     }
@@ -585,7 +593,7 @@ private struct SonyPaneEqualizerEditor: View {
         }
         if draft.count == equalizer.bands.count, !draft.isEmpty {
             Section {
-                HStack(alignment: .top, spacing: 8) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 56), spacing: 8, alignment: .top)], spacing: 16) {
                     ForEach(equalizer.bands.indices, id: \.self) { index in
                         VStack(spacing: 8) {
                             Text(draft[index].formatted(.number.sign(strategy: .always())))
@@ -597,6 +605,7 @@ private struct SonyPaneEqualizerEditor: View {
                                 .frame(width: 24, height: 156)
                             Text(equalizer.bands[index].title).font(.caption)
                                 .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         .frame(maxWidth: .infinity)
                     }

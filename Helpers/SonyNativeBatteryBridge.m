@@ -117,8 +117,8 @@ static NSDictionary *single(NSDictionary *baseline, NSString *marker) {
     return value;
 }
 
-static NSDictionary *envelope(NSDictionary *sample, NSString *marker) {
-    NSMutableDictionary *value = [publication(sample, marker) mutableCopy];
+static NSDictionary *envelope(NSDictionary *sample, NSString *marker, NSDictionary *baseline) {
+    NSMutableDictionary *value = [publication(sample, marker, baseline) mutableCopy];
     value[@"Combined Parts"] = @[];
     return value;
 }
@@ -431,7 +431,7 @@ static int child(NSString *identifier, NSString *session) {
     pid_t supervisorPID = getppid();
     NSUInteger guardIndex = 0, pairIndex = 1, trailerIndex = 2;
     NSMutableData *buffer = NSMutableData.data;
-    NSDictionary *command = nil, *sample = nil, *trailerDetails = nil;
+    NSDictionary *command = nil, *sample = nil, *trailerDetails = nil, *baseline = nil;
     double lease = 0, caseLease = 0, lastCaseObservation = -INFINITY;
     int result = 1;
     double inputDeadline = NSProcessInfo.processInfo.systemUptime + 20;
@@ -451,7 +451,6 @@ static int child(NSString *identifier, NSString *session) {
     if (!sample) goto cleanup;
     {
         NSArray *records = inventory(identifier);
-        NSDictionary *baseline = nil;
         for (NSDictionary *record in records) if (nativeSingle(record, identifier)) baseline = record;
         if (records.count != 2 || !baseline || indexOfMarker(records, parentMarker) == NSNotFound) goto cleanup;
         for (NSUInteger index = 0; index < 3; index++) {
@@ -476,7 +475,7 @@ static int child(NSString *identifier, NSString *session) {
         event(@"preflight-passed", @{@"records": records, @"childSourceIDs": @[@(sources[0].identifier), @(sources[1].identifier), @(sources[2].identifier)],
             @"guard": markers[guardIndex], @"pair": markers[pairIndex], @"trailer": markers[trailerIndex]});
         if (expired(sample, lease)
-            || setSource(sources[guardIndex], envelope(sample, markers[guardIndex]))) goto cleanup;
+            || setSource(sources[guardIndex], envelope(sample, markers[guardIndex], baseline))) goto cleanup;
         event(@"prepared", @{@"guard": markers[guardIndex], @"pair": markers[pairIndex], @"trailer": markers[trailerIndex]});
     }
     {
@@ -500,7 +499,7 @@ static int child(NSString *identifier, NSString *session) {
                         || NSDate.date.timeIntervalSince1970 >= [sample[@"caseBattery"][@"observedAt"] doubleValue] + 45)) {
                     NSMutableDictionary *withoutCase = sample.mutableCopy;
                     [withoutCase removeObjectForKey:@"caseBattery"];
-                    if (setSource(sources[pairIndex], publication(withoutCase, markers[pairIndex]))) { result = 1; break; }
+                    if (setSource(sources[pairIndex], publication(withoutCase, markers[pairIndex], baseline))) { result = 1; break; }
                     caseWithdrawn = YES;
                     event(@"case-expired", @{@"sample": sample});
                 }
@@ -541,10 +540,10 @@ static int child(NSString *identifier, NSString *session) {
                     || (!pairUnchanged && setSource(sources[trailerIndex], nextTrailer))) { result = 1; break; }
                 if (!sourcesUnchanged && !guarded(inventory(identifier), identifier, parentMarker, markers[guardIndex], markers[pairIndex], markers[trailerIndex], YES)) { result = 1; break; }
                 if (expired(sample, lease) || expired(next, nextLease)
-                    || (!pairUnchanged && setSource(sources[guardIndex], envelope(next, markers[guardIndex])))) { result = 1; break; }
+                    || (!pairUnchanged && setSource(sources[guardIndex], envelope(next, markers[guardIndex], baseline)))) { result = 1; break; }
                 if (!sourcesUnchanged && !guarded(inventory(identifier), identifier, parentMarker, markers[guardIndex], markers[pairIndex], markers[trailerIndex], YES)) { result = 1; break; }
                 if (expired(sample, lease) || expired(next, nextLease)
-                    || (!sourcesUnchanged && setSource(sources[pairIndex], publication(visibleNext, markers[pairIndex])))
+                    || (!sourcesUnchanged && setSource(sources[pairIndex], publication(visibleNext, markers[pairIndex], baseline)))
                     || expired(next, nextLease)) { result = 1; break; }
                 trailerDetails = nextTrailer;
                 sample = next;
@@ -587,7 +586,7 @@ finished:
 static int supervisor(NSString *executable, NSString *identifier, NSString *session) {
     NSString *marker = [session stringByAppendingString:@"/parent"];
     NSMutableData *input = NSMutableData.data, *childInput = NSMutableData.data;
-    NSDictionary *sample = nil, *incoming = nil;
+    NSDictionary *sample = nil, *incoming = nil, *baseline = nil;
     NSString *childGuard = nil, *childPair = nil, *childTrailer = nil;
     EnvelopeSource source = {0};
     NSTask *task = NSTask.new;
@@ -630,7 +629,8 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
             event(@"prerequisite-unavailable", @{@"reason": @"No independent native Single baseline"});
             return 75;
         }
-        if (allocateSource(&source) || setSource(source, single(records.firstObject, marker))) goto cleanup;
+        baseline = records.firstObject;
+        if (allocateSource(&source) || setSource(source, single(baseline, marker))) goto cleanup;
         creationFinished = YES;
         task.executableURL = [NSURL fileURLWithPath:executable];
         task.arguments = @[@"--child", identifier, session];
@@ -672,7 +672,7 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
         }
         if (!childPrepared || !childGuard || !childPair || !childTrailer
             || !guarded(inventory(identifier), identifier, marker, childGuard, childPair, childTrailer, YES)) goto cleanup;
-        if (expired(sample, lease) || setSource(source, envelope(sample, marker))) goto cleanup;
+        if (expired(sample, lease) || setSource(source, envelope(sample, marker, baseline))) goto cleanup;
         if (expired(sample, lease)
             || !message(toChild.fileHandleForWriting, @{@"command": @"activate", @"sample": sample})) goto cleanup;
         result = 0;
@@ -729,7 +729,7 @@ static int supervisor(NSString *executable, NSString *identifier, NSString *sess
                 }
                 double nextLease = sampleDeadline(incoming);
                 if (expired(sample, lease) || expired(incoming, nextLease)
-                    || (!samePairReadings(sample, incoming) && setSource(source, envelope(incoming, marker)))
+                    || (!samePairReadings(sample, incoming) && setSource(source, envelope(incoming, marker, baseline)))
                     || expired(sample, lease) || expired(incoming, nextLease)
                     || !message(toChild.fileHandleForWriting, @{@"command": @"sample", @"sample": incoming})) { result = 1; break; }
                 pending = incoming;
@@ -881,15 +881,24 @@ cleanup:
 }
 
 static int envelopeSelfTest(void) {
+    NSDictionary *baseline = @{@"Vendor ID": @1356, @"Product ID": @3683, @"Vendor ID Source": @2};
     NSString *identifier = @"00000000-0000-4000-8000-000000000019";
     NSDictionary *reading = @{@"level": @40, @"isCharging": @NO, @"observedAt": @100};
     NSDictionary *sample = @{@"identifier": identifier, @"name": @"WF-1000XM5", @"address": @"02:00:00:00:00:19", @"controlSession": @1, @"left": reading, @"right": reading};
-    NSMutableDictionary *native = [publication(sample, @"unused") mutableCopy];
+    NSMutableDictionary *native = [publication(sample, @"unused", baseline) mutableCopy];
     [native removeObjectForKey:ownerKey];
     [native removeObjectForKey:@"Combined Parts"];
     native[@"Part Identifier"] = @"Single";
     native[@"Power Source ID"] = @1;
     assert(nativeSingle(native, identifier));
+    NSMutableDictionary *otherNative = native.mutableCopy;
+    otherNative[@"Product ID"] = @1234;
+    assert(nativeSingle(otherNative, identifier));
+    NSDictionary *otherPublication = publication(sample, @"other", otherNative);
+    assert([otherPublication[@"Product ID"] isEqual:@1234]);
+    for (NSDictionary *part in otherPublication[@"Combined Parts"]) assert([part[@"Product ID"] isEqual:@1234]);
+    otherNative[@"Product ID"] = @65536;
+    assert(!nativeSingle(otherNative, identifier));
     NSMutableDictionary *renamedNative = native.mutableCopy;
     renamedNative[@"Name"] = @"Renamed Sony earbuds";
     assert(nativeSingle(renamedNative, identifier));
@@ -898,7 +907,7 @@ static int envelopeSelfTest(void) {
     NSMutableDictionary *renamedSample = sample.mutableCopy;
     renamedSample[@"name"] = @"Renamed Sony earbuds";
     assert(valid(renamedSample, identifier, nil, 100));
-    assert([publication(renamedSample, @"renamed")[@"Name"] isEqual:@"Renamed Sony earbuds"]);
+    assert([publication(renamedSample, @"renamed", baseline)[@"Name"] isEqual:@"Renamed Sony earbuds"]);
     assert(!sameReadings(sample, renamedSample));
     assert(!valid(sample, identifier, nil, 120.001));
     assert(validWithMaximumAge(sample, identifier, nil, 120.001, INFINITY));
@@ -958,9 +967,9 @@ static int envelopeSelfTest(void) {
     absenceReport[@"trailer"] = @"session/b";
     absenceReport[@"event"] = @"prepared";
     assert(!componentsAbsentReport(absenceReport, @"session"));
-    NSMutableDictionary *activeParent = [envelope(sample, @"parent") mutableCopy];
-    NSMutableDictionary *activeGuard = [envelope(sample, @"guard") mutableCopy];
-    NSMutableDictionary *activePair = [publication(sample, @"pair") mutableCopy];
+    NSMutableDictionary *activeParent = [envelope(sample, @"parent", baseline) mutableCopy];
+    NSMutableDictionary *activeGuard = [envelope(sample, @"guard", baseline) mutableCopy];
+    NSMutableDictionary *activePair = [publication(sample, @"pair", baseline) mutableCopy];
     activeParent[@"Power Source ID"] = @2;
     activeGuard[@"Power Source ID"] = @3;
     activePair[@"Power Source ID"] = @4;
@@ -1039,8 +1048,8 @@ static int envelopeSelfTest(void) {
     renewedSample[@"left"] = renewedSample[@"right"] = renewedReading;
     assert(valid(renewedSample, identifier, freshSample, renewedAt));
     assert(sameReadings(freshSample, renewedSample));
-    assert([publication(freshSample, @"pair") isEqual:publication(renewedSample, @"pair")]);
-    assert([envelope(freshSample, @"parent") isEqual:envelope(renewedSample, @"parent")]);
+    assert([publication(freshSample, @"pair", baseline) isEqual:publication(renewedSample, @"pair", baseline)]);
+    assert([envelope(freshSample, @"parent", baseline) isEqual:envelope(renewedSample, @"parent", baseline)]);
     assert(!valid(freshSample, identifier, renewedSample, renewedAt));
     assert(!valid(renewedSample, identifier, freshSample, renewedAt + 21));
     NSMutableDictionary *changedSample = renewedSample.mutableCopy;
@@ -1080,8 +1089,8 @@ static int envelopeSelfTest(void) {
     assert(withdrawalResult(resultBeforeCleanup(0, sample, INFINITY), nativeDisconnectedExit) == 1);
     assert(withdrawalResult(resultBeforeCleanup(nativeDisconnectedExit, sample, INFINITY), 0) == 1);
     assert(!single(native, @"parent")[@"Power Source ID"]);
-    assert([envelope(sample, @"parent")[@"Combined Parts"] count] == 0);
-    assert([publication(sample, @"pair")[@"Combined Parts"] count] == 2);
+    assert([envelope(sample, @"parent", baseline)[@"Combined Parts"] count] == 0);
+    assert([publication(sample, @"pair", baseline)[@"Combined Parts"] count] == 2);
     creationFinished = YES;
     EnvelopeSource closed = {0};
     assert(allocateSource(&closed) == kIOReturnNotPermitted && !closed.allocated);
@@ -1109,7 +1118,7 @@ static int envelopeSelfTest(void) {
     NSString *caseMarker = [casePrefix stringByAppendingString:@"fixture"];
     NSDictionary *caseDetails = casePublication(caseSample, caseMarker);
     assert([caseDetails[@"Part Identifier"] isEqual:@"Case"] && [caseDetails[@"Current Capacity"] isEqual:@0]);
-    assert([caseDetails[@"Vendor ID"] isEqual:@1356] && [caseDetails[@"Product ID"] isEqual:@3683]);
+    assert([caseDetails[@"Vendor ID"] isEqual:@1356] && !caseDetails[@"Product ID"]);
     assert(!caseDetails[@"Accessory Identifier"] && !caseDetails[@"Group Identifier"] && !caseDetails[@"Power Source ID"]);
     assert(!caseDetails[@"Combined Parts"]);
     assert(caseInventoryMatches(@[], casePrefix, nil, nil));
@@ -1135,12 +1144,12 @@ static int envelopeSelfTest(void) {
     assert(valid(integrated, identifier, nil, 100));
     assert(valid(integrated, identifier, sample, 100));
     assert(!valid(integrated, identifier, integrated, 100));
-    NSDictionary *three = publication(integrated, @"pair");
+    NSDictionary *three = publication(integrated, @"pair", baseline);
     NSArray *threeParts = three[@"Combined Parts"];
     assert(threeParts.count == 3 && [threeParts[2][@"Part Identifier"] isEqual:@"Case"]);
     assert([threeParts[2][@"Current Capacity"] isEqual:@63] && [threeParts[2][@"Is Charging"] isEqual:@YES]);
-    assert([three[@"Current Capacity"] isEqual:publication(sample, @"pair")[@"Current Capacity"]]);
-    for (NSUInteger index = 0; index < 2; index++) assert([threeParts[index] isEqual:publication(sample, @"pair")[@"Combined Parts"][index]]);
+    assert([three[@"Current Capacity"] isEqual:publication(sample, @"pair", baseline)[@"Current Capacity"]]);
+    for (NSUInteger index = 0; index < 2; index++) assert([threeParts[index] isEqual:publication(sample, @"pair", baseline)[@"Combined Parts"][index]]);
     for (NSDictionary *part in threeParts) {
         assert([part[@"Accessory Identifier"] isEqual:identifier] && [part[@"Group Identifier"] isEqual:identifier]);
         assert([part[@"Vendor ID"] isEqual:@1356] && [part[@"Product ID"] isEqual:@3683]);

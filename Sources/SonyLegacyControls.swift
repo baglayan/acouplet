@@ -1,30 +1,45 @@
 struct SonyLegacyNoiseCapability: Equatable, Sendable {
+    let inquiryType: UInt8
     let noiseType: UInt8
     let noiseSteps: UInt8
     let ambientType: UInt8
     let ambientSteps: [UInt8: UInt8]
 
     init?(payload: [UInt8]) {
-        guard payload.count >= 6, payload.prefix(2) == [0x61, 0x02],
-              payload.count == 6 + Int(payload[5]) * 2 else { return nil }
+        guard payload.count >= 3, payload[0] == 0x61, (1...3).contains(payload[1]) else { return nil }
+        inquiryType = payload[1]
+        if inquiryType == 1 {
+            guard payload.count == 3 else { return nil }
+            noiseType = payload[2]
+            noiseSteps = 0
+            ambientType = 0
+            ambientSteps = [:]
+            return
+        }
+        let countOffset = inquiryType == 2 ? 5 : 3
+        guard payload.count > countOffset, payload.count == countOffset + 1 + Int(payload[countOffset]) * 2 else { return nil }
         var steps: [UInt8: UInt8] = [:]
-        for offset in stride(from: 6, to: payload.count, by: 2) {
+        for offset in stride(from: countOffset + 1, to: payload.count, by: 2) {
             guard steps[payload[offset]] == nil else { return nil }
             steps[payload[offset]] = payload[offset + 1]
         }
-        noiseType = payload[2]
-        noiseSteps = payload[3]
-        ambientType = payload[4]
+        noiseType = inquiryType == 2 ? payload[2] : 0
+        noiseSteps = inquiryType == 2 ? payload[3] : 0
+        ambientType = payload[countOffset - 1]
         ambientSteps = steps
     }
 
     var supportsModes: Bool {
-        (noiseType == 0x00 || noiseType == 0x02) && ambientType <= 0x01
+        if inquiryType == 1 { return noiseType <= 1 }
+        if inquiryType == 3 { return ambientType == 0 && ambientSteps[0] != nil }
+        return (noiseType == 0x00 || noiseType == 0x02) && ambientType <= 0x01
             && ambientSteps[0].map { ambientType == 0 || $0 > 0 } == true
     }
 
     var modes: [NoiseControlMode] {
         guard supportsModes else { return [] }
+        if inquiryType == 1 { return [.off, .anc] }
+        if inquiryType == 3 { return [.off, .ambient] }
         return noiseType == 0x02 ? [.off, .anc, .ambient, .wind] : [.off, .anc, .ambient]
     }
 
@@ -37,6 +52,7 @@ struct SonyLegacyNoiseCapability: Equatable, Sendable {
 }
 
 struct SonyLegacyNoiseState: Equatable, Sendable {
+    let inquiryType: UInt8
     let effect: UInt8
     let noiseType: UInt8
     let noiseValue: UInt8
@@ -45,17 +61,31 @@ struct SonyLegacyNoiseState: Equatable, Sendable {
     let ambientValue: UInt8
 
     init?(payload: [UInt8]) {
-        guard payload.count == 8, [0x67, 0x68, 0x69].contains(payload[0]),
-              payload[1] == 0x02 else { return nil }
-        effect = payload[2]
-        noiseType = payload[3]
-        noiseValue = payload[4]
-        ambientType = payload[5]
-        ambientID = payload[6]
-        ambientValue = payload[7]
+        guard payload.count >= 2, [0x67, 0x68, 0x69].contains(payload[0]),
+              (1...3).contains(payload[1]), payload.count == [1: 4, 2: 8, 3: 6][payload[1]] else { return nil }
+        inquiryType = payload[1]
+        if inquiryType == 1 {
+            noiseType = payload[2]
+            noiseValue = payload[3]
+            effect = payload[3]
+            ambientType = 0
+            ambientID = 0
+            ambientValue = 0
+        } else {
+            effect = payload[2]
+            noiseType = inquiryType == 2 ? payload[3] : 0
+            noiseValue = inquiryType == 2 ? payload[4] : 0
+            ambientType = payload[payload.count - 3]
+            ambientID = payload[payload.count - 2]
+            ambientValue = payload[payload.count - 1]
+        }
     }
 
     var mode: NoiseControlMode? {
+        if inquiryType == 1 {
+            guard noiseType <= 1, noiseValue <= 1 else { return nil }
+            return noiseValue == 1 ? .anc : .off
+        }
         guard [0x00, 0x01, 0x11].contains(effect), ambientType <= 1, ambientID <= 1 else { return nil }
         guard (noiseType == 0 && noiseValue <= 1) || (noiseType == 2 && noiseValue <= 2),
               ambientType != 0 || ambientValue <= 1 else { return nil }
@@ -72,7 +102,82 @@ struct SonyLegacyNoiseState: Equatable, Sendable {
         return ambientValue > 0 ? .ambient : .off
     }
 
-    var focusOnVoice: Bool? { ambientID <= 1 ? ambientID == 1 : nil }
+    var focusOnVoice: Bool? { inquiryType != 1 && ambientID <= 1 ? ambientID == 1 : nil }
+
+    var payload: [UInt8] {
+        if inquiryType == 1 { return [0x67, 1, noiseType, noiseValue] }
+        if inquiryType == 3 { return [0x67, 3, effect, ambientType, ambientID, ambientValue] }
+        return [0x67, 2, effect, noiseType, noiseValue, ambientType, ambientID, ambientValue]
+    }
+}
+
+struct SonyLegacyNoiseControl: Equatable, Sendable {
+    let inquiryType: UInt8
+    private(set) var capability: SonyLegacyNoiseCapability?
+    private(set) var available: Bool?
+    private(set) var state: SonyLegacyNoiseState?
+
+    init(inquiryType: UInt8) {
+        precondition(inquiryType == 1 || inquiryType == 3)
+        self.inquiryType = inquiryType
+    }
+
+    var queryPayloads: [[UInt8]] { [[0x60, inquiryType], [0x62, inquiryType], [0x66, inquiryType]] }
+
+    var canSet: Bool { available == true && state.map { validatedMode($0) != nil } == true }
+
+    var enabled: Bool? { state.flatMap(validatedMode).map { $0 != .off } }
+
+    func validatedMode(_ state: SonyLegacyNoiseState) -> NoiseControlMode? {
+        guard let capability, capability.supportsModes, state.inquiryType == inquiryType,
+              let mode = state.mode else { return nil }
+        if inquiryType == 3 {
+            guard state.ambientType == capability.ambientType, capability.ambientSteps[state.ambientID] != nil else { return nil }
+        }
+        return mode
+    }
+
+    func setPayload(enabled: Bool, focusOnVoice: Bool? = nil) -> [UInt8]? {
+        guard canSet, let state else { return nil }
+        if inquiryType == 1 {
+            guard focusOnVoice == nil else { return nil }
+            return [0x68, 1, 0, enabled ? 1 : 0]
+        }
+        let ambientID: UInt8 = focusOnVoice.map { $0 ? 1 : 0 } ?? state.ambientID
+        guard capability?.ambientSteps[ambientID] != nil else { return nil }
+        return [0x68, 3, enabled ? 1 : 0, 0, ambientID, enabled ? 1 : 0]
+    }
+
+    func acceptsSetPayload(_ payload: [UInt8]) -> Bool {
+        guard let state = SonyLegacyNoiseState(payload: payload), payload[0] == 0x68,
+              let mode = validatedMode(state) else { return false }
+        return setPayload(enabled: mode != .off, focusOnVoice: inquiryType == 3 ? state.focusOnVoice : nil) == payload
+    }
+
+    mutating func invalidateRead(_ query: [UInt8]) {
+        switch query {
+        case [0x60, inquiryType]: capability = nil
+        case [0x62, inquiryType]: available = nil
+        case [0x66, inquiryType]: state = nil
+        default: break
+        }
+    }
+
+    @discardableResult
+    mutating func update(_ payload: [UInt8]) -> Bool {
+        guard payload.count >= 2, payload[1] == inquiryType else { return false }
+        switch payload[0] {
+        case 0x61:
+            capability = SonyLegacyNoiseCapability(payload: payload)
+        case 0x63, 0x65:
+            available = payload.count == 3 && payload[2] <= 1 ? payload[2] == 0 : nil
+        case 0x67, 0x69:
+            state = SonyLegacyNoiseState(payload: payload)
+        default:
+            return false
+        }
+        return true
+    }
 }
 
 struct SonyLegacyDSEE: Equatable, Sendable {
@@ -284,11 +389,27 @@ struct SonyLegacyControls: Equatable, Sendable {
     private(set) var noiseCapability: SonyLegacyNoiseCapability?
     private(set) var noiseAvailable: Bool?
     private(set) var noiseState: SonyLegacyNoiseState?
+    private(set) var standaloneNoiseCancel: SonyLegacyNoiseControl?
+    private(set) var standaloneAmbient: SonyLegacyNoiseControl?
     private(set) var batteries = SonyBatteries()
     private(set) var dsee: SonyLegacyDSEE
     private(set) var connectionQuality: SonyLegacyConnectionQuality
     private(set) var wearingControl: SonyLegacyWearingControl
     private(set) var automaticPowerOff: SonyAutomaticPowerOffState?
+
+    mutating func invalidateNoiseRead(_ query: [UInt8]) {
+        switch query[0] {
+        case 0x60: noiseCapability = nil
+        case 0x62: noiseAvailable = nil
+        case 0x66: noiseState = nil
+        default: break
+        }
+    }
+
+    mutating func invalidateStandaloneNoiseRead(_ query: [UInt8]) {
+        standaloneNoiseCancel?.invalidateRead(query)
+        standaloneAmbient?.invalidateRead(query)
+    }
 
     mutating func invalidateSystemRead(_ query: [UInt8]) {
         connectionQuality.invalidateRead(query)
@@ -300,6 +421,8 @@ struct SonyLegacyControls: Equatable, Sendable {
         guard supportPayload.count >= 3, supportPayload.prefix(2) == [0x07, 0x00],
               supportPayload.count == 3 + Int(supportPayload[2]) else { return nil }
         supportedFunctions = Set(supportPayload.dropFirst(3)).subtracting(model == .whXM4 ? [0xF6] : [])
+        if supportedFunctions.contains(0x61) { standaloneNoiseCancel = SonyLegacyNoiseControl(inquiryType: 1) }
+        if supportedFunctions.contains(0x63) { standaloneAmbient = SonyLegacyNoiseControl(inquiryType: 3) }
         dsee = SonyLegacyDSEE(isSupported: supportedFunctions.contains(0xE2))
         connectionQuality = SonyLegacyConnectionQuality(isSupported: supportedFunctions.contains(0xE1))
         wearingControl = SonyLegacyWearingControl(isSupported: supportedFunctions.contains(0xF3))
@@ -313,7 +436,8 @@ struct SonyLegacyControls: Equatable, Sendable {
     }
 
     var noiseQueries: [[UInt8]] {
-        supportedFunctions.contains(0x62) ? [[0x60, 0x02], [0x62, 0x02], [0x66, 0x02]] : []
+        (supportedFunctions.contains(0x62) ? [[0x60, 0x02], [0x62, 0x02], [0x66, 0x02]] : [])
+            + (standaloneNoiseCancel?.queryPayloads ?? []) + (standaloneAmbient?.queryPayloads ?? [])
     }
 
     var canSetNoiseControl: Bool {
@@ -322,8 +446,9 @@ struct SonyLegacyControls: Equatable, Sendable {
 
     func validatedMode(_ state: SonyLegacyNoiseState) -> NoiseControlMode? {
         guard let capability = noiseCapability, capability.supportsModes, let mode = state.mode,
-              state.noiseType == capability.noiseType, state.ambientType == capability.ambientType,
-              let range = capability.ambientRange(focusOnVoice: state.ambientID == 1),
+              state.inquiryType == 2,
+              state.noiseType == capability.noiseType, state.ambientType == capability.ambientType else { return nil }
+        guard let range = capability.ambientRange(focusOnVoice: state.ambientID == 1),
               state.ambientValue == 0 || range.contains(Int(state.ambientValue)) else { return nil }
         return mode
     }
@@ -331,6 +456,7 @@ struct SonyLegacyControls: Equatable, Sendable {
     func allows(_ payload: [UInt8]) -> Bool {
         if [[0x04, 0x01], [0x04, 0x02], [0x04, 0x03], [0x06, 0x00]].contains(payload) { return true }
         if batteryQueries.contains(payload) || noiseQueries.contains(payload) { return true }
+        if standaloneNoiseCancel?.acceptsSetPayload(payload) == true || standaloneAmbient?.acceptsSetPayload(payload) == true { return true }
         if dsee.queryPayloads.contains(payload) || dsee.acceptsSetPayload(payload) { return true }
         if connectionQuality.queryPayloads.contains(payload) || connectionQuality.acceptsSetPayload(payload) { return true }
         if wearingControl.queryPayloads.contains(payload) || wearingControl.acceptsSetPayload(payload) { return true }
@@ -366,19 +492,20 @@ struct SonyLegacyControls: Equatable, Sendable {
     @discardableResult
     mutating func update(_ payload: [UInt8]) -> Bool {
         guard payload.count >= 2 else { return false }
+        if standaloneNoiseCancel?.update(payload) == true || standaloneAmbient?.update(payload) == true { return true }
         if dsee.update(payload) { return true }
         if connectionQuality.update(payload) { return true }
         if wearingControl.update(payload) { return true }
         if automaticPowerOff?.update(payload) == true { return true }
         switch payload[0] {
         case 0x61:
-            guard supportedFunctions.contains(0x62), let capability = SonyLegacyNoiseCapability(payload: payload) else { return false }
+            guard supportedFunctions.contains(0x62), payload[1] == 2, let capability = SonyLegacyNoiseCapability(payload: payload) else { return false }
             noiseCapability = capability
         case 0x63, 0x65:
-            guard supportedFunctions.contains(0x62), payload.count == 3, payload[1] == 0x02 else { return false }
+            guard supportedFunctions.contains(0x62), payload[1] == 2, payload.count == 3 else { return false }
             noiseAvailable = payload[2] <= 1 ? payload[2] == 0 : nil
         case 0x67, 0x69:
-            guard supportedFunctions.contains(0x62), let state = SonyLegacyNoiseState(payload: payload) else { return false }
+            guard supportedFunctions.contains(0x62), payload[1] == 2, let state = SonyLegacyNoiseState(payload: payload) else { return false }
             noiseState = state
         case 0x11, 0x13:
             guard batteryQueries.contains([0x10, payload[1]]) else { return false }

@@ -89,7 +89,7 @@ static BOOL validCase(NSDictionary *sample, NSString *identifier, NSDictionary *
 
 static NSDictionary *casePublication(NSDictionary *sample, NSString *marker) {
     return @{@"Type": @"Accessory Source", @"Transport Type": @"Bluetooth", @"Name": [sample[@"name"] stringByAppendingString:@" Case"],
-        @"Accessory Category": @"Headset", @"Vendor ID": @1356, @"Product ID": @3683, @"Vendor ID Source": @2,
+        @"Accessory Category": @"Headset", @"Vendor ID": @1356, @"Vendor ID Source": @2,
         @"Part Identifier": @"Case", @"Current Capacity": sample[@"caseBattery"][@"level"], @"Max Capacity": @100,
         @"Is Present": @YES, @"Is Charging": sample[@"caseBattery"][@"isCharging"], @"Is Charged": @NO,
         @"Power Source State": @"Battery Power", ownerKey: marker};
@@ -117,18 +117,20 @@ static BOOL nativeSingle(NSDictionary *record, NSString *identifier) {
         && [record[@"Part Identifier"] isEqual:@"Single"] && !record[ownerKey] && !record[@"Acouplet Research Source Owner"]
         && (!record[@"Combined Parts"] || [record[@"Combined Parts"] isEqual:@[]])
         && number(record[@"Power Source ID"]) && [record[@"Power Source ID"] longLongValue] != 0
-        && [record[@"Vendor ID"] isEqual:@1356] && [record[@"Product ID"] isEqual:@3683]
+        && [record[@"Vendor ID"] isEqual:@1356] && number(record[@"Product ID"])
+        && [record[@"Product ID"] doubleValue] == [record[@"Product ID"] unsignedShortValue]
         && [record[@"Vendor ID Source"] isEqual:@2]
         && [record[@"Type"] isEqual:@"Accessory Source"] && [record[@"Transport Type"] isEqual:@"Bluetooth"]
         && [record[@"Accessory Category"] isEqual:@"Headset"] && [record[@"Max Capacity"] isEqual:@100]
         && [record[@"Is Present"] isEqual:@YES] && level(record[@"Current Capacity"]);
 }
 
-static NSDictionary *publication(NSDictionary *sample, NSString *marker) {
+static NSDictionary *publication(NSDictionary *sample, NSString *marker, NSDictionary *baseline) {
     NSDictionary *left = sample[@"left"], *right = sample[@"right"];
     NSMutableDictionary *record = [@{@"Type": @"Accessory Source", @"Transport Type": @"Bluetooth", @"Name": sample[@"name"],
         @"Accessory Identifier": sample[@"identifier"], @"Group Identifier": sample[@"identifier"], @"Accessory Category": @"Headset",
-        @"Vendor ID": @1356, @"Product ID": @3683, @"Vendor ID Source": @2, @"Part Identifier": @"Combined",
+        @"Vendor ID": baseline[@"Vendor ID"], @"Product ID": baseline[@"Product ID"],
+        @"Vendor ID Source": baseline[@"Vendor ID Source"], @"Part Identifier": @"Combined",
         @"Current Capacity": @(MIN([left[@"level"] intValue], [right[@"level"] intValue])), @"Max Capacity": @100,
         @"Is Present": @YES, @"Is Charging": @([left[@"isCharging"] boolValue] && [right[@"isCharging"] boolValue]),
         @"Is Charged": @NO, @"Power Source State": @"Battery Power", ownerKey: marker} mutableCopy];

@@ -349,7 +349,7 @@ int main(int argc, const char *argv[]) {
         NSString *identifier = @"00000000-0000-4000-8000-000000000019";
         NSDictionary *reading = @{@"level": @40, @"isCharging": @NO, @"observedAt": @(NSDate.date.timeIntervalSince1970)};
         NSDictionary *sample = @{@"identifier": identifier, @"name": @"WF-1000XM5", @"address": @"02:00:00:00:00:19", @"controlSession": @1, @"left": reading, @"right": reading};
-        NSMutableDictionary *baseline = [publication(sample, @"unused") mutableCopy];
+        NSMutableDictionary *baseline = [publication(sample, @"unused", @{@"Vendor ID": @1356, @"Product ID": @3683, @"Vendor ID Source": @2}) mutableCopy];
         [baseline removeObjectForKey:ownerKey];
         [baseline removeObjectForKey:@"Combined Parts"];
         baseline[@"Part Identifier"] = @"Single";

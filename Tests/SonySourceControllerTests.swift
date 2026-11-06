@@ -3,6 +3,39 @@ import XCTest
 
 final class SonySourceControllerTests: XCTestCase {
     @MainActor
+    func testClassicInventorySelectionKeepsReadOwnershipAndConfirmsItsSchema() throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5", simulatedTable2Functions: [0x30, 0x31])
+        defer { controller.simulateControlLoss() }
+        controller.refreshDevices()
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.multipoint.inventoryInquiryType, 0)
+        XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload == [0x36, 0] })
+        let firstAddress = "02:00:00:00:00:01"
+        let secondAddress = "02:00:00:00:00:02"
+        let first = Array(firstAddress.utf8) + [1, 1, 0x41]
+        let second = Array(secondAddress.utf8) + [2, 1, 0x42]
+        deliver([0x31, 0, 8, 2, 0], to: controller)
+        deliver([0x33, 0, 0, 0], to: controller)
+        deliver([0x37, 0, 2] + first + second + [1], to: controller)
+        deliver([0x37, 1, 1], to: controller)
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        controller.selectAudioSource(phone)
+        acknowledgeAll(controller)
+        deliver([0x3D, 1, 0] + Array(secondAddress.utf8), to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.sourceTransition?.phase, .verifying)
+        XCTAssertTrue(controller.simulatedInventoryReadPending)
+        deliver(inventory(command: 0x37, selected: 2), to: controller)
+        XCTAssertEqual(controller.sourceTransition?.phase, .verifying)
+        XCTAssertTrue(controller.simulatedInventoryReadPending)
+        deliver([0x37, 0, 2] + first + second + [2], to: controller)
+        XCTAssertEqual(controller.sourceTransition?.phase, .complete)
+        XCTAssertFalse(controller.simulatedInventoryReadPending)
+        XCTAssertEqual(controller.multipoint.selectedSource?.address, secondAddress)
+    }
+
+    @MainActor
     func testAudioSourceNoticesIgnoreInitialRepeatedAndStaleInventory() {
         let controller = preparedController()
         defer { controller.simulateControlLoss() }

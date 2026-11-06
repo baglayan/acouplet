@@ -399,6 +399,15 @@ final class LDACConnectionPreferenceTests: XCTestCase {
 
 @MainActor
 final class LDACRecoveryTests: XCTestCase {
+    func testOutputSelectionSurvivesOwnerErrorEncoding() throws {
+        let owner = UUID()
+        let error = LDACOwnerError(LDACOutputDeselectedError(), ownerID: owner)
+        let decoded = try JSONDecoder().decode(LDACOwnerError.self, from: JSONEncoder().encode(error))
+        XCTAssertTrue(decoded.outputDeselected)
+        XCTAssertEqual(decoded.ownerID, owner)
+        XCTAssertFalse(LDACOwnerError(message: "transport failed").outputDeselected)
+    }
+
     func testRecoveryStopsAfterTwoAttemptsAndKeepsLDACEnabled() async throws {
         let (ldac, headphones) = try preparedRecovery()
         defer { headphones.simulateControlLoss() }
@@ -416,7 +425,7 @@ final class LDACRecoveryTests: XCTestCase {
         XCTAssertFalse(ldac.simulatedCanResumeRecovery(with: headphones))
 
         for _ in 0..<10 {
-            headphones.simulateProtocolMessage([0x23, 0x09, 78, 0, 82, 0])
+            headphones.simulateProtocolMessage([0x23, 0x09, 78, 0, 82, 0, 20, 20])
             await Task.yield()
             XCTAssertEqual(ldac.state, .waitingForDevice)
             XCTAssertFalse(ldac.simulatedCanResumeRecovery(with: headphones))
@@ -528,6 +537,17 @@ final class LDACRecoveryTests: XCTestCase {
             XCTAssertEqual(ldac.simulatedRequestedAddress, headphones.address)
             XCTAssertFalse(ldac.isSessionRunning)
         }
+    }
+
+    func testOutputDeselectionSuspendsWithoutForgettingLDAC() async throws {
+        let (ldac, headphones) = try preparedRecovery()
+        defer { headphones.simulateControlLoss() }
+        ldac.simulateOutputDeselection()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(ldac.state, .waitingForDevice)
+        XCTAssertEqual(ldac.simulatedRequestedAddress, headphones.address)
+        XCTAssertTrue(ldac.simulatedRestoresAudioOnStop)
+        XCTAssertFalse(ldac.isSessionRunning)
     }
 
     func testExplicitStopCancelsRememberedRecoveryIntent() async throws {

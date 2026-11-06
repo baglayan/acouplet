@@ -5,6 +5,8 @@ repo = Path(__file__).resolve().parent.parent
 python_checks = (
     'Packaging/check-localizations-check.py',
     'Packaging/check-no-sony-artwork.py',
+    'Packaging/check-sony-artwork-catalog.py',
+    'Packaging/check-import-sony-artwork.py',
     'Packaging/check-sparkle.py',
     'Packaging/check-update-feed.py',
     'Packaging/check-prepare-updates.py',
@@ -78,7 +80,8 @@ def main():
             ('Sources/LDACNativeSession.swift', 'Helpers/LDAC/LDACSessionDiagnosticsCheck.swift'),
         ):
             binary = Path(directory) / Path(check).stem
-            run('/usr/bin/xcrun', 'swiftc', '-swift-version', '6', '-parse-as-library', repo / source, repo / check, '-o', binary)
+            arguments = ['-D', 'DEBUG'] if source == 'Sources/LDACNativeSession.swift' else []
+            run('/usr/bin/xcrun', 'swiftc', '-swift-version', '6', '-parse-as-library', *arguments, repo / source, repo / check, '-o', binary)
             run(binary)
         encoder = repo / 'Vendor/libldac'
         for check, arguments in (

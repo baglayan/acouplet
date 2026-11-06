@@ -125,14 +125,7 @@ struct SonyEqualizer: Equatable, Sendable {
 
     var flatSettings: EqualizerSettings? {
         guard isOrdinary, let capabilities, let bandInformation,
-              capabilities.levelSteps > 1, capabilities.levelSteps % 2 == 1 else { return nil }
-        let frequencies = bandInformation.compactMap(\.frequency)
-        let bassCount = bandInformation.filter { $0 == .clearBass }.count
-        let legacy = bassCount == 1 && frequencies == SonyEqualizerBand.legacy.compactMap(\.frequency)
-            && bandInformation.count == 6 && (capabilities.bandCount == 6 || (generation == .v2 && capabilities.bandCount == 5))
-        let tenBand = generation == .v2 && bassCount == 0 && frequencies == SonyEqualizerBand.tenBand.compactMap(\.frequency)
-            && bandInformation.count == 10 && capabilities.bandCount == 10
-        guard legacy || tenBand else { return nil }
+              capabilities.levelSteps > 1, !bandInformation.isEmpty else { return nil }
         return EqualizerSettings(layout: bandInformation, levelSteps: capabilities.levelSteps,
                                  values: Array(repeating: 0, count: bandInformation.count))
     }
@@ -168,7 +161,7 @@ struct SonyEqualizer: Equatable, Sendable {
               settings.layout == flatSettings.layout, settings.levelSteps == flatSettings.levelSteps,
               settings.values.count == flatSettings.layout.count, let range = settings.levelRange,
               settings.values.allSatisfy(range.contains) else { return nil }
-        let center = range.upperBound
+        let center = (Int(settings.levelSteps) - 1) / 2
         return [0x58, inquiryType, generation == .v1 ? 0xFF : EqualizerPreset.manual.rawValue, UInt8(settings.values.count)]
             + settings.values.map { UInt8($0 + center) }
     }
@@ -217,12 +210,11 @@ struct SonyEqualizer: Equatable, Sendable {
             }
         case 0x57, 0x59:
             guard isOrdinary, payload.count >= 4, payload.count == 4 + Int(payload[3]) else { return false }
-            if generation == .v1, payload[3] != 0, let capabilities {
-                guard payload[3] == capabilities.bandCount,
-                      payload.dropFirst(4).allSatisfy({ $0 < capabilities.levelSteps }) else { return false }
-            } else if payload[3] != 0, let flatSettings {
+            if payload[3] != 0, let flatSettings {
                 guard payload[3] == flatSettings.layout.count,
                       payload.dropFirst(4).allSatisfy({ $0 < flatSettings.levelSteps }) else { return false }
+            } else if generation == .v1, payload[3] != 0, let capabilities {
+                guard payload.dropFirst(4).allSatisfy({ $0 < capabilities.levelSteps }) else { return false }
             }
             presetID = generation == .v1 && payload[2] == 0xFF ? nil : payload[2]
             if generation == .v1 || payload[3] != 0 {

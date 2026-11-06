@@ -540,6 +540,7 @@ final class SonyMultipointTransitionTests: XCTestCase {
 
         var malformed = SonySystemFeatures(legacyGeneralSettings: [0xD2])
         XCTAssertFalse(malformed.update(Array(Self.legacyMultipoint.dropLast(2))))
+        XCTAssertFalse(malformed.update(Array(Self.legacyMultipoint.dropLast()) + [0x01]))
         var modern = SonySystemFeatures(supportedFunctions: [0xD2])
         XCTAssertFalse(modern.update(Self.legacyMultipoint))
         XCTAssertNil(modern.multipointSlot)
@@ -558,12 +559,48 @@ final class SonyMultipointTransitionTests: XCTestCase {
         }
 
         let titleAndSummary = Array(canonical.dropLast())
-        for trailer: [UInt8] in [[0], [2], [0xFF], [0, 0], [2, 0], [0xFF, 0], [1, 1], [1, 0, 0]] {
+        for trailer: [UInt8] in [[0], [2], [0xFF], [0, 0], [2, 1], [2, 0, 0], [0xFF, 0], [1, 1], [1, 0, 0]] {
             var model = SonySystemFeatures(legacyGeneralSettings: [0xD2])
             XCTAssertFalse(model.update(titleAndSummary + trailer))
             XCTAssertNil(model.multipointSlot)
             XCTAssertFalse(model.generalSettingsAreIdentified)
             XCTAssertNil(model.multipointSetPayload(enabled: true))
+        }
+    }
+
+    func testLegacyEmptyListCapabilityClearsBooleanControls() {
+        var model = SonySystemFeatures(legacyGeneralSettings: [0xD2])
+        XCTAssertTrue(model.update(Self.legacyMultipoint))
+        XCTAssertTrue(model.update([0xD3, 0xD2, 0x00]))
+        XCTAssertTrue(model.update([0xD7, 0xD2, 0x01, 0x00]))
+        XCTAssertNotNil(model.multipointSetPayload(enabled: true))
+        XCTAssertTrue(model.update(Array(Self.legacyMultipoint.dropLast(2)) + [0x02, 0x00]))
+        XCTAssertTrue(model.generalSettingsAreIdentified)
+        XCTAssertNil(model.multipointSlot)
+        XCTAssertNil(model.multipointSetPayload(enabled: true))
+    }
+
+    func testLegacyBooleanMetadataUsesFullByteStringLengthsAndKnownFormats() {
+        let title = Array("MULTIPOINT_SETTING".utf8)
+        for length in [128, 129, 255] {
+            for format: UInt8 in [1, 2] {
+                var model = SonySystemFeatures(legacyGeneralSettings: [0xD2])
+                let summary = Array(repeating: UInt8(0x73), count: length)
+                XCTAssertTrue(model.update([0xD1, 0xD2, format, UInt8(title.count)] + title + [UInt8(length)] + summary + [1]))
+                XCTAssertTrue(model.generalSettingsAreIdentified)
+                XCTAssertEqual(model.multipointSlot, format == 2 ? 0xD2 : nil)
+                let otherTitle = Array(repeating: UInt8(0x74), count: length)
+                XCTAssertTrue(model.update([0xD1, 0xD2, format, UInt8(length)] + otherTitle + [0, 1]))
+                XCTAssertNil(model.multipointSlot)
+            }
+        }
+        for format: UInt8 in [3, 0xFF] {
+            var model = SonySystemFeatures(legacyGeneralSettings: [0xD2])
+            var payload = Self.legacyMultipoint
+            payload[2] = format
+            XCTAssertFalse(model.update(payload))
+            XCTAssertFalse(model.generalSettingsAreIdentified)
+            XCTAssertNil(model.multipointSlot)
         }
     }
 
