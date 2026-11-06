@@ -149,8 +149,8 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         if !keepsLDACVisible || headphones.isReady || button.image == nil {
             let imageState = (
                 model: model,
-                leftConnected: headphones.audioFeatures.leftConnected,
-                rightConnected: headphones.audioFeatures.rightConnected,
+                leftConnected: headphones.leftConnected,
+                rightConnected: headphones.rightConnected,
                 batteries: headphones.isReady ? headphones.batteries : SonyBatteries(),
                 chargingCase: headphones.isReady && headphones.isChargingInCase
             )
@@ -187,8 +187,8 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         }
         button.setAccessibilityLabel(String(localized: "Acouplet, \(headphones.deviceName), \(headphones.statusText)"))
         button.setAccessibilityValue(model.isEarbuds ? DeviceIcon.connectionValue(
-            left: headphones.audioFeatures.leftConnected,
-            right: headphones.audioFeatures.rightConnected
+            left: headphones.leftConnected,
+            right: headphones.rightConnected
         ) + ". " + batteryDescription : batteryDescription)
         button.toolTip = batteryDescription.isEmpty ? headphones.deviceName : "\(headphones.deviceName) · \(batteryDescription)"
         if hasPendingUpdate { button.toolTip = String(localized: "Update Available…") }

@@ -445,7 +445,7 @@ final class EarbudFinderController: ObservableObject {
 
     private func begin(_ target: FastPairRingTarget) {
         guard canPlay(target) else { return }
-        Self.logger.notice("Locating sound requested; target=\(target.rawValue) left_connected=\(self.headphones?.audioFeatures.leftConnected == true) right_connected=\(self.headphones?.audioFeatures.rightConnected == true)")
+        Self.logger.notice("Locating sound requested; target=\(target.rawValue) left_connected=\(self.headphones?.leftConnected == true) right_connected=\(self.headphones?.rightConnected == true)")
         requiresWearingCheck = headphones?.wearingStatus.isSupported == true
         session = EarbudFindingSession(target: target, timeoutSeconds: 30)
         let effects = session!.begin()
@@ -473,7 +473,7 @@ final class EarbudFinderController: ObservableObject {
         }
         if isBusy, session?.isRetryingStop != true {
             let target = session?.target ?? pendingTarget
-            let connected = target == .left ? headphones.audioFeatures.leftConnected : headphones.audioFeatures.rightConnected
+            let connected = target == .left ? headphones.leftConnected : headphones.rightConnected
             if availabilityMessage != nil || connected != true {
                 stop()
             }
@@ -486,7 +486,7 @@ final class EarbudFinderController: ObservableObject {
     }
 
     private func isConnected(_ target: FastPairRingTarget, headphones: SonyHeadphonesController) -> Bool {
-        target == .left ? headphones.audioFeatures.leftConnected == true : headphones.audioFeatures.rightConnected == true
+        target == .left ? headphones.leftConnected == true : headphones.rightConnected == true
     }
 
     private func wearingStatusChanged(_ status: SonyWearingStatus) {

@@ -2,6 +2,32 @@ import XCTest
 @testable import Acouplet
 
 final class SonyDeviceActionTransitionTests: XCTestCase {
+    func testClassicInventoryActionUsesItsNegotiatedResultAndReadbackSchema() throws {
+        var model = SonyMultipoint(supportedFunctions: [0x30])
+        let first = Array(firstAddress.utf8) + [1, 1, 0x41]
+        let second = Array(secondAddress.utf8) + [0, 1, 0x42]
+        let original = [0x37, 0, 2] + first + second + [1]
+        for payload in [[0x31, 0, 8, 2, 0], [0x33, 0, 0, 0], original] {
+            XCTAssertTrue(model.update(payload))
+        }
+        var transition = try XCTUnwrap(SonyDeviceActionTransition(action: .connect, targetAddress: secondAddress, model: model, session: 7))
+        let request = [0x3C, 0, 1] + Array(secondAddress.utf8)
+        XCTAssertEqual(transition.expectedPayload, request)
+        XCTAssertTrue(transition.commandTransmitted(request, model: model, session: 7))
+        XCTAssertFalse(transition.receive([0x3D, 2, 1, 0x10] + Array(secondAddress.utf8), model: model, session: 7))
+        XCTAssertTrue(transition.receive([0x3D, 0, 1, 0x10] + Array(secondAddress.utf8), model: model, session: 7))
+        XCTAssertEqual(transition.expectedPayload, [0x36, 0])
+        var changedCapabilities = transition
+        XCTAssertFalse(changedCapabilities.validateForTransmission(model: readyModel(), session: 7))
+        XCTAssertEqual(changedCapabilities.phase, .failed)
+        XCTAssertTrue(transition.commandTransmitted([0x36, 0], model: model, session: 7))
+        let readback = [0x37, 0, 2] + first + Array(secondAddress.utf8) + [2, 1, 0x42, 1]
+        XCTAssertFalse(transition.receive(readback, model: model, session: 7))
+        XCTAssertFalse(transition.receive(inventory(secondConnection: 2), model: model, session: 7, readbackOwned: true))
+        XCTAssertTrue(transition.receive(readback, model: model, session: 7, readbackOwned: true))
+        XCTAssertEqual(transition.phase, .complete)
+    }
+
     func testActionsRequireTransmissionMatchingResultsAndOwnedFreshReadback() throws {
         for action in [SonyPeripheralAction.connect, .disconnect] {
             let model = readyModel(secondConnection: action == .connect ? 0 : 2)
@@ -336,7 +362,22 @@ final class SonyDeviceActionControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testCapacityAndExistingReadBlockConnectUntilFreshInventoryAndFreeSlot() throws {
+    func testBackgroundBatteryReadQueuesDeviceActionWithoutDisablingIt() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        controller.simulateBatteryRefresh()
+        let read = try XCTUnwrap(controller.simulatedPendingFrame)
+        XCTAssertNil(controller.deviceActionUnavailableReason(.disconnect, device: phone))
+        controller.changeDeviceConnection(.disconnect, device: phone)
+        XCTAssertEqual(controller.deviceActionTransition?.phase, .queued)
+        XCTAssertEqual(controller.simulatedPendingFrame, read)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.deviceActionTransition?.phase, .awaitingResult)
+    }
+
+    @MainActor
+    func testCapacityBlocksConnectAndPendingReadDefersItUntilFreshInventory() throws {
         let controller = preparedController()
         deliver(inventory(includeSaved: true), to: controller)
         let tablet = try XCTUnwrap(controller.multipoint.devices.last)
@@ -346,11 +387,11 @@ final class SonyDeviceActionControllerTests: XCTestCase {
         controller.refreshDevices()
         acknowledgeAll(controller)
         deliver(inventory(command: 0x39, secondConnection: 0, includeSaved: true), to: controller)
-        controller.changeDeviceConnection(.connect, device: tablet)
-        XCTAssertNil(controller.deviceActionTransition)
-        deliver(inventory(secondConnection: 0, includeSaved: true), to: controller)
         XCTAssertNil(controller.deviceActionUnavailableReason(.connect, device: tablet))
         controller.changeDeviceConnection(.connect, device: tablet)
+        XCTAssertEqual(controller.deviceActionTransition?.phase, .queued)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0x3C })
+        deliver(inventory(secondConnection: 0, includeSaved: true), to: controller)
         acknowledgeAll(controller)
         XCTAssertEqual(controller.deviceActionTransition?.phase, .awaitingResult)
         deliver([0x3D, 2, 1, 0x10] + Array(tablet.address.utf8), to: controller)
@@ -359,6 +400,39 @@ final class SonyDeviceActionControllerTests: XCTestCase {
         XCTAssertEqual(controller.deviceActionTransition?.phase, .complete)
         XCTAssertEqual(controller.multipoint.selectedSource?.connectionID, 1)
         controller.simulateControlLoss()
+    }
+
+    @MainActor
+    func testQueuedActionFailsIfInventoryReadTimesOutWithoutSendingIt() async throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        controller.refreshDevices()
+        acknowledgeAll(controller)
+        controller.changeDeviceConnection(.disconnect, device: phone)
+        XCTAssertEqual(controller.deviceActionTransition?.phase, .queued)
+        controller.simulateInventoryReadTimeout()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(controller.deviceActionTransition?.phase, .failed)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0x3C })
+    }
+
+    @MainActor
+    func testQueuedConnectRechecksCapacityWithoutDroppingControls() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        deliver(inventory(secondConnection: 0, includeSaved: true), to: controller)
+        let tablet = try XCTUnwrap(controller.multipoint.devices.last)
+        controller.refreshDevices()
+        acknowledgeAll(controller)
+        controller.changeDeviceConnection(.connect, device: tablet)
+        XCTAssertEqual(controller.deviceActionTransition?.phase, .queued)
+        deliver(inventory(includeSaved: true), to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.deviceActionTransition?.phase, .failed)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0x3C })
     }
 
     @MainActor

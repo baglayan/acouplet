@@ -148,9 +148,12 @@ static void Candidate(const uint8_t *bytes, NSUInteger length, NSUInteger end,
             }
         }
         NSUInteger size = FixedCommandLength(bytes + offset, length - offset);
+        if (!size && remaining >= 2 &&
+            ((bytes[offset] >> 4) != (bytes[0] >> 4) || bytes[offset + 1] != bytes[1]))
+            size = FixedResponseLength(bytes + offset, remaining, bytes[offset] >> 4, bytes[offset + 1]);
         if (!size || length - offset < size) return;
+        if (!(bytes[offset] & 3)) commands++;
         offset += size;
-        commands++;
     }
 }
 
@@ -191,7 +194,8 @@ static int Parse(const uint8_t *bytes, NSUInteger length, uint8_t transaction, u
         while (offset + 2 <= length) {
             uint8_t category = bytes[offset], size = bytes[offset + 1];
             if (category < 1 || category > 8 || (seen & (1U << category))) break;
-            if ((category == 1 && size != 0) || (category == 7 && size < 2)) break;
+            if (((category == 1 || category == 2) && size != 0) || (category == 3 && size != 3) ||
+                (category == 7 && size < 2)) break;
             seen |= 1U << category;
             offset += 2 + size;
             if (offset > length) break;
@@ -202,6 +206,7 @@ static int Parse(const uint8_t *bytes, NSUInteger length, uint8_t transaction, u
                 if (alternateSolutions) unsupported = YES;
             }
         }
+        if (solutions && offset >= parsed->consumed) unsupported = YES;
     } else return -1;
     if (solutions > 1) return -2;
     if (solutions && unsupported) return -3;
@@ -351,7 +356,7 @@ static NSArray<NSNumber *> *DecodeReply(NSData *reply, uint8_t transaction, uint
             uint8_t size = bytes[offset++];
             if (!category || category > 8 || seen[category] || size > length - offset) return nil;
             seen[category] = YES;
-            if (category == 1 && size != 0) return nil;
+            if (((category == 1 || category == 2) && size != 0) || (category == 3 && size != 3)) return nil;
             if (category == 7) {
                 if (size < 2 || bytes[offset] != 0) return nil;
                 if (bytes[offset + 1] == 0xFF && size < 8) return nil;
@@ -551,20 +556,9 @@ static NSData *AwaitResponse(DirectPlaybackProbe *probe, uint8_t transaction, ui
         }
         if (result != 1) continue;
         NSData *reply = [probe.pending subdataWithRange:NSMakeRange(0, parsed.responseLength)];
-        NSData *commands = [probe.pending subdataWithRange:NSMakeRange(parsed.responseLength,
-            parsed.consumed - parsed.responseLength - (fixed ? 0 : 2))];
-        [probe.pending replaceBytesInRange:NSMakeRange(0, parsed.consumed) withBytes:NULL length:0];
+        if (!fixed) [probe.pending replaceBytesInRange:NSMakeRange(parsed.consumed - 2, 2) withBytes:NULL length:0];
+        [probe.pending replaceBytesInRange:NSMakeRange(0, parsed.responseLength) withBytes:NULL length:0];
         probe.framingUncertain = NO;
-        const uint8_t *bytes = commands.bytes;
-        for (NSUInteger offset = 0; offset < commands.length;) {
-            NSUInteger length = FixedCommandLength(bytes + offset, commands.length - offset);
-            if (!length || length > commands.length - offset ||
-                !HandlePeerCommand(probe, [commands subdataWithRange:NSMakeRange(offset, length)])) {
-                probe.framingUncertain = YES;
-                return nil;
-            }
-            offset += length;
-        }
         if (ServicePendingSignals(probe, 0, 0) < 0) return nil;
         if (probe.peerStopped) return nil;
         probe.lastRejected = parsed.rejected;

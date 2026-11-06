@@ -54,6 +54,10 @@ final class AppEnvironment {
         }
         #endif
         #if !ACOUPLET_PUBLIC_APIS_ONLY
+        settings.$ldacConfiguration
+            .removeDuplicates()
+            .sink { [weak ldac] configuration in ldac?.updateConfiguration(configuration) }
+            .store(in: &cancellables)
         settings.$experimentalLDACEnabled
             .removeDuplicates()
             .sink { [weak ldac] enabled in

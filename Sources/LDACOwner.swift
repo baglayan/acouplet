@@ -19,6 +19,7 @@ private enum LDACOwnerCommand: Codable, Sendable {
     case verify(String)
     case allowHandoff
     case gain(Double)
+    case quality(LDACQuality)
     case release(Bool)
     case restore(LDACRouteRecovery)
 }
@@ -41,6 +42,7 @@ struct LDACOwnerError: LocalizedError, Codable, Sendable {
     let message: String
     let diagnostic: LDACNativeSession.Diagnostic?
     let ownerID: UUID?
+    var outputDeselected: Bool = false
     var errorDescription: String? { message }
 
     init(message: String, diagnostic: LDACNativeSession.Diagnostic? = nil, ownerID: UUID? = nil) {
@@ -54,6 +56,7 @@ struct LDACOwnerError: LocalizedError, Codable, Sendable {
         self.init(message: error.localizedDescription,
                   diagnostic: .init(stage: "native output", detail: LDACNativeOutput.diagnosticDescription(error), isFailure: !(error is CancellationError)),
                   ownerID: ownerID)
+        outputDeselected = error is LDACOutputDeselectedError
     }
 }
 
@@ -339,6 +342,7 @@ final class LDACOwnerSession {
     func verifyConnectionLoss(reason: String) { output.send(.verify(reason)) }
     func allowHandoff() { output.send(.allowHandoff) }
     func updateGain(_ gain: Double) { output.send(.gain(gain)) }
+    func updateQuality(_ quality: LDACQuality) { output.send(.quality(quality)) }
 }
 
 @MainActor
@@ -447,8 +451,10 @@ enum LDACOwnerWorker {
         }
 
         private func reply(_ request: LDACOwnerRequest, failure: Error) {
-            let error = LDACOwnerError(failure)
-            reply(request, error: error.message, diagnostic: error.diagnostic)
+            if let output { send(.recovery(output.routeRecovery)) }
+            let error = LDACOwnerError(failure, ownerID: outputID)
+            if let id = request.id { send(.reply(id, output?.controls, error)) }
+            else { send(.outputFailure(error, false)) }
         }
 
         private func handle(_ request: LDACOwnerRequest) {
@@ -514,6 +520,7 @@ enum LDACOwnerWorker {
                 case let .verify(reason): session?.verifyConnectionLoss(reason: reason)
                 case .allowHandoff: session?.allowHandoff()
                 case let .gain(gain): session?.updateGain(gain)
+                case let .quality(quality): session?.updateQuality(quality)
                 case let .restore(recovery):
                     guard output == nil else { throw LDACOwnerError(message: String(localized: "LDAC did not stop completely.")) }
                     let output = LDACNativeOutput(id: UUID(), address: recovery.address) { _ in }

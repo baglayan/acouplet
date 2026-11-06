@@ -184,7 +184,7 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
         XCTAssertEqual(earbuds.deviceModel, .wfXM5)
         XCTAssertTrue(earbuds.supportedFunctions.contains(0x29))
         XCTAssertFalse(headphones.supportedFunctions.contains(0x29))
-        deliver([0x25, 0x09, 31, 0, 47, 0], to: earbuds)
+        deliver([0x25, 0x09, 31, 0, 47, 0, 20, 20], to: earbuds)
         deliver([0x25, 0x00, 92, 0], to: headphones)
         XCTAssertEqual(earbuds.batteries.left?.level, 31)
         XCTAssertEqual(earbuds.batteries.right?.level, 47)

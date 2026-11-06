@@ -32,7 +32,7 @@ final class SonyProtocolTests: XCTestCase {
         controller.refreshEqualizer()
         XCTAssertEqual(availabilityBeforeChanges, [true])
         XCTAssertFalse(controller.canPowerOff)
-        XCTAssertTrue(controller.refreshMusicVolume())
+        controller.simulateBatteryRefresh()
         XCTAssertEqual(availabilityBeforeChanges, [true])
 
         for _ in 0..<2 {
@@ -94,6 +94,7 @@ final class SonyProtocolTests: XCTestCase {
             defer { controller.simulateControlLoss() }
             XCTAssertTrue(controller.refreshMusicVolume())
             let first = try XCTUnwrap(controller.simulatedPendingFrame)
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xA3, 1, 0, 2, 1]))
             let packet = SonyFrameCodec.encode(type: 1, sequence: 1 - first.sequence, payload: [])
             controller.simulateProtocolData(packet.prefix(split))
             XCTAssertEqual(controller.simulatedPendingFrame, first)
@@ -125,16 +126,93 @@ final class SonyProtocolTests: XCTestCase {
             defer { controller.simulateControlLoss() }
             controller.defersSimulatedWrites = true
             XCTAssertTrue(controller.refreshMusicVolume())
+            controller.refreshEqualizer()
             controller.completeSimulatedWrite()
             let status = try XCTUnwrap(controller.simulatedPendingFrame)
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - status.sequence, payload: []))
-            let volume = try XCTUnwrap(controller.simulatedPendingFrame)
-            XCTAssertEqual(volume.payload, [0xA6, 0x20])
+            let equalizer = try XCTUnwrap(controller.simulatedPendingFrame)
+            XCTAssertEqual(equalizer.payload, [0x56, 0])
             controller.simulateProtocolData(packet.prefix(split))
             controller.completeSimulatedWrite()
             controller.simulateProtocolData(packet.dropFirst(split))
             XCTAssertEqual(controller.playback.musicCallStatus, 1)
-            XCTAssertEqual(controller.simulatedPendingFrame, volume)
+            XCTAssertEqual(controller.simulatedPendingFrame, equalizer)
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - equalizer.sequence, payload: []))
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xA6, 0x20])
+        }
+    }
+
+    func testPlaybackReadSequenceWaitsForReplyAfterAcknowledgment() {
+        let status: [UInt8] = [0xA2, 1]
+        let volume: [UInt8] = [0xA6, 0x20]
+        var sequence = SonyPlaybackReadSequence(queries: [status, volume])
+        for query in [status, volume] {
+            XCTAssertEqual(sequence.currentQuery, query)
+            sequence.transmitted(query)
+            XCTAssertFalse(sequence.acknowledge(query))
+            XCTAssertFalse(sequence.acknowledge(query))
+            XCTAssertEqual(sequence.currentQuery, query)
+            XCTAssertTrue(sequence.receive(query))
+            XCTAssertFalse(sequence.receive(query))
+        }
+        XCTAssertNil(sequence.currentQuery)
+        XCTAssertTrue(sequence.queries.isEmpty)
+    }
+
+    func testPlaybackReadSequenceWaitsForAcknowledgmentAfterReply() {
+        let status: [UInt8] = [0xA2, 1]
+        let volume: [UInt8] = [0xA6, 0x20]
+        var sequence = SonyPlaybackReadSequence(queries: [status, volume])
+        for query in [status, volume] {
+            XCTAssertEqual(sequence.currentQuery, query)
+            sequence.transmitted(query)
+            XCTAssertFalse(sequence.receive(query))
+            XCTAssertFalse(sequence.receive(query))
+            XCTAssertEqual(sequence.currentQuery, query)
+            XCTAssertTrue(sequence.acknowledge(query))
+            XCTAssertFalse(sequence.acknowledge(query))
+        }
+        XCTAssertNil(sequence.currentQuery)
+        XCTAssertTrue(sequence.queries.isEmpty)
+    }
+
+    func testPlaybackReadSequenceIgnoresMismatchedQueries() {
+        let status: [UInt8] = [0xA2, 1]
+        let volume: [UInt8] = [0xA6, 0x20]
+        var sequence = SonyPlaybackReadSequence(queries: [status, volume])
+        sequence.transmitted(status)
+        XCTAssertFalse(sequence.acknowledge(status))
+        let acknowledged = sequence
+        for query in [volume, [0x56, 0]] {
+            sequence.transmitted(query)
+            XCTAssertFalse(sequence.acknowledge(query))
+            XCTAssertFalse(sequence.receive(query))
+            XCTAssertEqual(sequence, acknowledged)
+        }
+        XCTAssertTrue(sequence.receive(status))
+        XCTAssertEqual(sequence.currentQuery, volume)
+        let advanced = sequence
+        sequence.transmitted(status)
+        XCTAssertFalse(sequence.acknowledge(status))
+        XCTAssertFalse(sequence.receive(status))
+        XCTAssertEqual(sequence, advanced)
+        XCTAssertFalse(sequence.receive(volume))
+        XCTAssertTrue(sequence.acknowledge(volume))
+        XCTAssertNil(sequence.currentQuery)
+    }
+
+    func testPlaybackReadSequenceRetransmissionResetsPreviousConfirmation() {
+        let status: [UInt8] = [0xA2, 1]
+        let volume: [UInt8] = [0xA6, 0x20]
+        for replyFirst in [false, true] {
+            var sequence = SonyPlaybackReadSequence(queries: [status, volume])
+            sequence.transmitted(status)
+            XCTAssertFalse(replyFirst ? sequence.receive(status) : sequence.acknowledge(status))
+            sequence.transmitted(status)
+            XCTAssertFalse(replyFirst ? sequence.acknowledge(status) : sequence.receive(status))
+            XCTAssertEqual(sequence.currentQuery, status)
+            XCTAssertTrue(replyFirst ? sequence.receive(status) : sequence.acknowledge(status))
+            XCTAssertEqual(sequence.currentQuery, volume)
         }
     }
 
@@ -200,23 +278,65 @@ final class SonyProtocolTests: XCTestCase {
 
     func testFinishArtworkMatchesOnlySourceDerivedModelAndColorPairs() {
         let nonblack: [SonyDeviceModel: [UInt8: String]] = [
-            .wfXM5: [0x03: "Silver"], .wfXM4: [0x03: "Silver"],
-            .whXM5: [0x03: "Silver"], .whXM4: [0x03: "Silver"], .whXM3: [0x03: "Silver"],
-            .whCH720N: [0x02: "White", 0x05: "Blue", 0x06: "Pink"]
+            .wfXM6: [0x03: "Silver"], .wfXM5: [0x03: "Silver", 0x06: "SmokyPink"],
+            .wfXM4: [0x03: "Silver"], .wfXM3: [0x03: "Silver"],
+            .whXM6: [0x03: "Silver", 0x05: "MidnightBlue", 0x06: "SandPink", 0x08: "OliveGray", 0x0D: "Sandstone"],
+            .whXM5: [0x03: "Silver", 0x05: "MidnightBlue", 0x06: "SmokyPink"],
+            .whXM4: [0x02: "SilentWhite", 0x03: "Silver", 0x05: "MidnightBlue"], .whXM3: [0x03: "Silver"],
+            .whCH720N: [0x02: "White", 0x05: "Blue", 0x06: "Pink"],
+            .whULT900N: [0x02: "OffWhite", 0x09: "ForestGray"], .wh1000XX: [0x02: "Platinum"]
         ]
-        let artworkModels: Set<SonyDeviceModel> = [.wfXM6, .wfXM5, .wfXM4, .wfXM3, .whXM6, .whXM5,
-                                                   .whXM4, .whXM3, .whCH720N, .whULT900N, .wh1000XX]
-        var recognized = 0
-        for model in SonyDeviceModel.allCases {
-            XCTAssertNil(model.artworkSuffix(for: nil))
-            for raw in UInt8.min...UInt8.max {
-                let expected = artworkModels.contains(model) && raw == 0x01 ? "" : nonblack[model]?[raw]
-                let suffix = model.artworkSuffix(for: SonyDeviceColor(rawValue: raw))
-                XCTAssertEqual(suffix, expected, "\(model.name) color \(raw)")
-                if suffix != nil { recognized += 1 }
+        for (model, colors) in nonblack {
+            for (raw, suffix) in colors {
+                let color = SonyDeviceColor(rawValue: raw)
+                XCTAssertEqual(model.artworkSuffix(for: color), suffix, "\(model.name) color \(raw)")
+                XCTAssertEqual(model.productArtwork(for: color) != nil, expectsProductArtwork, "\(model.name) color \(raw)")
             }
         }
-        XCTAssertEqual(recognized, 19)
+        for model in SonyDeviceModel.allCases {
+            XCTAssertNil(model.artworkSuffix(for: SonyDeviceColor(rawValue: 0xFE)), model.name)
+            XCTAssertNil(model.productArtwork(for: SonyDeviceColor(rawValue: 0xFE)), model.name)
+            XCTAssertEqual(model.productArtwork(for: nil), model.productArtwork(for: SonyDeviceColor(rawValue: 0)), model.name)
+        }
+    }
+
+    @MainActor
+    func testCatalogHeroesHaveNoEmptyMarginsAfterDisplayCropping() throws {
+        var checked: Set<String> = []
+        for model in SonyDeviceModel.allCases {
+            for color in model.artworkColors {
+                guard let artwork = model.productArtwork(for: color), artwork.heroBounds != nil,
+                      checked.insert(artwork.hero).inserted else { continue }
+                let image = try XCTUnwrap(artwork.heroImage, artwork.hero)
+                let bitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(image.cgImage(forProposedRect: nil, context: nil, hints: nil)))
+                for y in [0, bitmap.pixelsHigh - 1] {
+                    XCTAssertTrue((0..<bitmap.pixelsWide).contains { (bitmap.colorAt(x: $0, y: y)?.alphaComponent ?? 0) > 0 },
+                                  "Empty horizontal edge: \(artwork.hero)")
+                }
+                for x in [0, bitmap.pixelsWide - 1] {
+                    XCTAssertTrue((0..<bitmap.pixelsHigh).contains { (bitmap.colorAt(x: x, y: $0)?.alphaComponent ?? 0) > 0 },
+                                  "Empty vertical edge: \(artwork.hero)")
+                }
+            }
+        }
+        XCTAssertEqual(checked.isEmpty, !expectsProductArtwork)
+    }
+
+    @MainActor
+    func testPairedPhotosSelectPhysicalLeftFromTheRightHandSourceComponent() throws {
+        if !expectsProductArtwork { return }
+        for model in [SonyDeviceModel.wfXM5, .wf1000X, .wfC500, .wfC510, .wfC700N, .wfC710N, .wfH800, .wfLC900, .wfLS910N, .wfL910] {
+            for color in model.artworkColors {
+                let artwork = try XCTUnwrap(model.productArtwork(for: color))
+                let left = try XCTUnwrap(artwork.leftBounds)
+                let right = try XCTUnwrap(artwork.rightBounds)
+                XCTAssertGreaterThan(left.x + left.width / 2, right.x + right.width / 2, model.name)
+                XCTAssertFalse(CGRect(x: left.x, y: left.y, width: left.width, height: left.height)
+                    .intersects(CGRect(x: right.x, y: right.y, width: right.width, height: right.height)), model.name)
+                XCTAssertNotNil(artwork.earbudImage(for: .left), model.name)
+                XCTAssertNotNil(artwork.earbudImage(for: .right), model.name)
+            }
+        }
     }
 
     @MainActor
@@ -240,6 +360,16 @@ final class SonyProtocolTests: XCTestCase {
         }
         for asset in ["wfXM5OpenCaseProduct", "wfXM5OpenCaseProductSilver", "wfXM5OpenCaseProductSmokyPink", "wfXM6OpenCaseProduct", "wfXM6OpenCaseProductSilver"] {
             XCTAssertEqual(NSImage(named: asset) != nil, expectsProductArtwork, asset)
+        }
+    }
+
+    @MainActor
+    func testMenuBarBatteryWarningsDoNotTreatReportedThresholdAsLowBatteryPolicy() {
+        for threshold: UInt8? in [nil, 0, 20, 30, 100, 101, 255] {
+            XCTAssertEqual(DeviceIcon.batteryColor(for: BatteryReading(level: 20, charging: 0, lowBatteryThreshold: threshold)), .systemRed)
+            for level: UInt8 in [21, 39, 47, 100] {
+                XCTAssertNil(DeviceIcon.batteryColor(for: BatteryReading(level: level, charging: 0, lowBatteryThreshold: threshold)))
+            }
         }
     }
 
@@ -392,14 +522,12 @@ final class SonyProtocolTests: XCTestCase {
                 XCTAssertEqual(SonyDeviceModel(name: model.name + "Z"), .unknown)
             }
         }
-        let artworkModels: Set<SonyDeviceModel> = [.wfXM6, .wfXM5, .wfXM4, .wfXM3, .whXM6, .whXM5,
-                                                   .whXM4, .whXM3, .whCH720N, .whULT900N, .wh1000XX]
-        for model in SonyDeviceModel.allCases where !artworkModels.contains(model) {
-            XCTAssertNil(model.artwork, model.name)
-            #if DEBUG
-            XCTAssertTrue(model.galleryArtworkFinishes.isEmpty, model.name)
-            #endif
+        for model in models {
+            XCTAssertEqual(model.artwork != nil, expectsProductArtwork, model.name)
+            XCTAssertFalse(model.artworkColors.isEmpty, model.name)
         }
+        XCTAssertNil(SonyDeviceModel.unknown.artwork)
+        XCTAssertTrue(SonyDeviceModel.unknown.artworkColors.isEmpty)
         XCTAssertEqual(SonyDeviceModel.wi1000X.systemSymbol, "earbuds.stemless")
         XCTAssertEqual(SonyDeviceModel.srsULT900.systemSymbol, "hifispeaker")
         XCTAssertEqual(SonyDeviceModel.htAN7.systemSymbol, "hifispeaker")
@@ -442,7 +570,8 @@ final class SonyProtocolTests: XCTestCase {
             "ULT FIELD 5": .srsULT50, "ULT FIELD 7": .srsULT70, "ULT TOWER 5": .srsULT500,
             "ULT TOWER 7": .srsULT700, "ULT TOWER 9": .srsULT900, "ULT TOWER 9AC": .srsULT900AC,
             "ULT TOWER 10": .srsULT1000, "ULT TOWER MAX": .srsULT3000,
-            "ULT WEAR": .whULT900N, "1000X THE COLLEXION": .wh1000XX
+            "ULT WEAR": .whULT900N, "1000X THE COLLEXION": .wh1000XX,
+            "WH-CH530 series": .whCH530, "WH-CH730N series": .whCH730N
         ]
         for (name, model) in aliases {
             XCTAssertEqual(SonyDeviceModel(name: name), model)
@@ -451,7 +580,6 @@ final class SonyProtocolTests: XCTestCase {
         }
         for name in ["LinkBuds S2", "LinkBuds Unknown", "ULT TOWER 90", "INZONE H9",
                      "WH-1000XM4CC", "SRS-ULT900AC2", "SRS-NS7R2", "WH-CH5350",
-                     "WH-CH530 series", "LE_WH-CH530 series", "WH-CH730N series", "LE_WH-CH730N series",
                      "WH-1000XM4 WH-1000XM4C", "LinkBuds S WF-L900",
                      "WF-LS900N LinkBuds Fit", "WF-1000XM5 SRS-ULT10"] {
             XCTAssertEqual(SonyDeviceModel(name: name), .unknown, name)
@@ -542,18 +670,18 @@ final class SonyProtocolTests: XCTestCase {
 
     func testEarbudBatteryRepliesNotificationsAndUnavailableEarbud() {
         var batteries = SonyBatteries()
-        XCTAssertTrue(batteries.update([0x23, 0x09, 78, 0, 82, 1]))
+        XCTAssertTrue(batteries.update([0x23, 0x09, 78, 0, 82, 1, 20, 30]))
         XCTAssertEqual(batteries.left?.level, 78)
         XCTAssertEqual(batteries.right?.level, 82)
         XCTAssertEqual(batteries.right?.isCharging, true)
         XCTAssertEqual(batteries.level, 78)
-        XCTAssertTrue(batteries.update([0x25, 0x0A, 64, 0]))
+        XCTAssertTrue(batteries.update([0x25, 0x0A, 64, 0, 30]))
         XCTAssertEqual(batteries.caseBattery?.level, 64)
         XCTAssertEqual(batteries.level, 78)
-        XCTAssertTrue(batteries.update([0x25, 0x09, 255, 0, 62, 0]))
+        XCTAssertTrue(batteries.update([0x25, 0x09, 255, 0, 62, 0, 20, 30]))
         XCTAssertNil(batteries.left)
         XCTAssertEqual(batteries.level, 62)
-        XCTAssertTrue(batteries.update([0x25, 0x09, 0, 0, 32, 0]))
+        XCTAssertTrue(batteries.update([0x25, 0x09, 0, 0, 32, 0, 20, 30]))
         XCTAssertNil(batteries.left)
         XCTAssertEqual(batteries.level, 32)
         XCTAssertFalse(batteries.isCharging)
@@ -633,6 +761,92 @@ final class SonyProtocolTests: XCTestCase {
         XCTAssertNil(BatteryReading(level: 50, charging: 0xFF))
         XCTAssertEqual(BatteryReading(level: 50, charging: 1)?.isCharging, true)
         XCTAssertEqual(BatteryReading(level: 50, charging: 1, generation: .v1)?.isCharging, true)
+    }
+
+    func testBatteryThresholdsFollowEachReportedBatteryAndClearOnOrdinaryUpdates() {
+        for command: UInt8 in [0x23, 0x25] {
+            var batteries = SonyBatteries()
+            XCTAssertTrue(batteries.update([command, 0x08, 31, 0, 40]))
+            XCTAssertEqual(batteries.single?.lowBatteryThreshold, 40)
+            XCTAssertEqual(batteries.single?.isBelowLowBatteryThreshold, true)
+            XCTAssertTrue(batteries.update([command, 0x09, 31, 0, 31, 1, 30, 40]))
+            XCTAssertNil(batteries.single)
+            XCTAssertEqual(batteries.left?.lowBatteryThreshold, 30)
+            XCTAssertEqual(batteries.left?.isBelowLowBatteryThreshold, false)
+            XCTAssertEqual(batteries.right?.lowBatteryThreshold, 40)
+            XCTAssertEqual(batteries.right?.isBelowLowBatteryThreshold, true)
+            XCTAssertTrue(batteries.update([command, 0x0A, 21, 0, 22]))
+            XCTAssertEqual(batteries.caseBattery?.lowBatteryThreshold, 22)
+            XCTAssertEqual(batteries.caseBattery?.isBelowLowBatteryThreshold, true)
+            XCTAssertEqual(batteries.level, 31)
+            XCTAssertTrue(batteries.update([command, 0x01, 31, 0, 31, 1]))
+            XCTAssertNil(batteries.left?.lowBatteryThreshold)
+            XCTAssertNil(batteries.right?.lowBatteryThreshold)
+            XCTAssertNil(batteries.left?.isBelowLowBatteryThreshold)
+            XCTAssertNil(batteries.right?.isBelowLowBatteryThreshold)
+            XCTAssertEqual(batteries.caseBattery?.lowBatteryThreshold, 22)
+            XCTAssertTrue(batteries.update([command, 0x02, 21, 0]))
+            XCTAssertNil(batteries.caseBattery?.lowBatteryThreshold)
+            XCTAssertNil(batteries.caseBattery?.isBelowLowBatteryThreshold)
+            XCTAssertTrue(batteries.update([command, 0x00, 31, 0]))
+            XCTAssertNil(batteries.single?.lowBatteryThreshold)
+            XCTAssertNil(batteries.single?.isBelowLowBatteryThreshold)
+        }
+    }
+
+    func testBatteryThresholdComparisonIsStrictAndIndependentOfChargeState() throws {
+        let cases: [(UInt8, UInt8, Bool)] = [(19, 20, true), (20, 20, false), (21, 20, false),
+                                          (0, 0, false), (99, 100, true), (100, 100, false)]
+        for charging: UInt8 in [0, 1, 2, 3] {
+            for (level, threshold, expected) in cases {
+                let reading = try XCTUnwrap(BatteryReading(level: level, charging: charging, lowBatteryThreshold: threshold))
+                XCTAssertEqual(reading.level, Int(level))
+                XCTAssertEqual(reading.lowBatteryThreshold, threshold)
+                XCTAssertEqual(reading.isBelowLowBatteryThreshold, expected)
+            }
+        }
+        let legacy = try XCTUnwrap(BatteryReading(level: 19, charging: 0xF0, generation: .v1))
+        XCTAssertEqual(legacy.chargingState, .unknown)
+        XCTAssertNil(legacy.lowBatteryThreshold)
+        XCTAssertNil(legacy.isBelowLowBatteryThreshold)
+    }
+
+    func testUnknownBatteryThresholdBytesStayRawWithoutAFalseLowDecision() {
+        for command: UInt8 in [0x23, 0x25] {
+            for threshold: UInt8 in [101, 127, 128, 255] {
+                var batteries = SonyBatteries()
+                XCTAssertTrue(batteries.update([command, 0x08, 50, 2, threshold]))
+                XCTAssertEqual(batteries.single?.level, 50)
+                XCTAssertEqual(batteries.single?.chargingState, .unknown)
+                XCTAssertEqual(batteries.single?.lowBatteryThreshold, threshold)
+                XCTAssertNil(batteries.single?.isBelowLowBatteryThreshold)
+                XCTAssertTrue(batteries.update([command, 0x09, 50, 0, 60, 0, threshold, 20]))
+                XCTAssertEqual(batteries.left?.lowBatteryThreshold, threshold)
+                XCTAssertNil(batteries.left?.isBelowLowBatteryThreshold)
+                XCTAssertEqual(batteries.right?.isBelowLowBatteryThreshold, false)
+                XCTAssertTrue(batteries.update([command, 0x0A, 50, 0, threshold]))
+                XCTAssertEqual(batteries.caseBattery?.lowBatteryThreshold, threshold)
+                XCTAssertNil(batteries.caseBattery?.isBelowLowBatteryThreshold)
+            }
+        }
+    }
+
+    func testBatteryThresholdPacketsRequireEveryFieldWithoutChangingPreviousReadings() {
+        for command: UInt8 in [0x23, 0x25] {
+            let packets: [[UInt8]] = [[command, 0x08, 50, 0, 20], [command, 0x09, 50, 0, 60, 0, 20, 30],
+                                     [command, 0x0A, 50, 0, 20]]
+            for packet in packets {
+                var batteries = SonyBatteries()
+                XCTAssertTrue(batteries.update(packet))
+                let previous = batteries
+                for count in 0..<packet.count {
+                    XCTAssertFalse(batteries.update(Array(packet.prefix(count))))
+                    XCTAssertEqual(batteries, previous)
+                }
+                XCTAssertFalse(batteries.update(packet + [0]))
+                XCTAssertEqual(batteries, previous)
+            }
+        }
     }
 
     @MainActor
@@ -898,65 +1112,63 @@ final class SonyProtocolTests: XCTestCase {
     }
 
     @MainActor
-    func testFinishGalleryUsesBundledPartsWithoutChangingReportedColor() {
+    func testReportedColorGalleryUsesSelectedArtworkAndUnknownColorsUseVectors() {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
-        let finishes: [(SonyDeviceModel, UInt8, String, [String])] = [
-            (.wfXM5, 0x03, "Silver", ["WFXM5FrontSilver", "wfXM5CaseProductSilver"]),
-            (.wfXM4, 0x03, "Silver", ["wfXM4ProductSilver", "wfXM4ProductLeftSilver", "wfXM4ProductRightSilver", "wfXM4CaseProductSilver"]),
-            (.whXM5, 0x03, "Silver", ["XM5HeroSilver"]),
-            (.whXM4, 0x03, "Silver", ["whXM4ProductSilver"]),
-            (.whXM3, 0x03, "Silver", ["whXM3ProductSilver"]),
-            (.whCH720N, 0x02, "White", ["whCH720NProductWhite"]),
-            (.whCH720N, 0x05, "Blue", ["whCH720NProductBlue"]),
-            (.whCH720N, 0x06, "Pink", ["whCH720NProductPink"])
+        let finishes: [(SonyDeviceModel, UInt8, String)] = [
+            (.wfXM5, 0x03, "Silver"), (.wfXM4, 0x03, "Silver"), (.wfXM6, 0x03, "Silver"),
+            (.whXM5, 0x03, "Silver"), (.whXM4, 0x03, "Silver"), (.whXM3, 0x03, "Silver"),
+            (.whCH720N, 0x00, ""), (.whCH720N, 0x02, "White"), (.whCH720N, 0x05, "Blue"), (.whCH720N, 0x06, "Pink")
         ]
-        for (model, color, suffix, assets) in finishes {
+        for (model, color, suffix) in finishes {
             controller.simulateGalleryDevice(model: model, color: color)
             XCTAssertEqual(controller.deviceModel, model)
             XCTAssertEqual(controller.deviceInformation.color?.rawValue, color)
-            XCTAssertEqual(controller.deviceInformation.color?.title, String(localized: String.LocalizationValue(suffix)))
             XCTAssertEqual(controller.productArtworkSuffix, suffix)
-            for asset in assets { XCTAssertEqual(NSImage(named: asset) != nil, expectsProductArtwork, asset) }
+            let artwork = controller.productArtwork
+            XCTAssertEqual(artwork, model.productArtwork(for: SonyDeviceColor(rawValue: color)))
+            XCTAssertEqual(artwork != nil, expectsProductArtwork)
+            for asset in [artwork?.hero, artwork?.left, artwork?.right, artwork?.caseImage, artwork?.openCase].compactMap({ $0 }) {
+                XCTAssertNotNil(NSImage(named: asset), asset)
+            }
             controller.simulateGalleryDevice(model: model)
             XCTAssertNil(controller.deviceInformation.color)
             XCTAssertEqual(controller.productArtworkSuffix, "")
             XCTAssertEqual(controller.usesProductArtwork, expectsProductArtwork)
         }
-        for (model, color) in [(SonyDeviceModel.wfXM6, UInt8(0x03)), (.whXM5, 0x13), (.whCH720N, 0x00), (.wfXM5, 0xFE)] {
+        for (model, color) in [(SonyDeviceModel.whXM5, UInt8(0x13)), (.wfXM5, 0xFE)] {
             controller.simulateGalleryDevice(model: model, color: color)
             XCTAssertEqual(controller.deviceInformation.color?.rawValue, color)
             XCTAssertEqual(controller.productArtworkSuffix, "")
-            XCTAssertEqual(controller.usesProductArtwork, expectsProductArtwork)
+            XCTAssertNil(controller.productArtwork)
+            XCTAssertFalse(controller.usesProductArtwork)
         }
         XCTAssertTrue(controller.simulatedTransmittedFrames.isEmpty)
     }
 
     @MainActor
-    func testNamedVisualFinishGalleryLeavesDeviceColorUnread() {
+    func testNamedVisualFinishGalleryLeavesDeviceColorUnread() throws {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         var count = 0
         for model in SonyDeviceModel.allCases {
+            XCTAssertEqual(model.galleryArtworkFinishes.isEmpty, model == .unknown, model.name)
             for (finish, suffix) in model.galleryArtworkFinishes {
+                let color = try XCTUnwrap(model.galleryArtworkColor(for: finish), "\(model.name) \(finish)")
                 controller.simulateGalleryDevice(model: model, visualFinish: finish)
                 XCTAssertEqual(controller.productArtworkSuffix, suffix)
                 XCTAssertNil(controller.deviceInformation.color)
-                let product = model == .wfXM5 ? "WFXM5Front" : model == .whXM5 ? "XM5Hero" : model.rawValue + "Product"
-                XCTAssertEqual(NSImage(named: product + suffix) != nil, expectsProductArtwork, "\(model.name) \(finish)")
-                if model.isEarbuds {
-                    XCTAssertEqual(NSImage(named: model.rawValue + "CaseProduct" + suffix) != nil, expectsProductArtwork)
-                    if model != .wfXM5 {
-                        for side in ["Left", "Right"] {
-                            XCTAssertEqual(NSImage(named: model.rawValue + "Product" + side + suffix) != nil, expectsProductArtwork)
-                        }
-                    }
+                let artwork = controller.productArtwork
+                XCTAssertEqual(artwork, model.productArtwork(for: color), "\(model.name) \(finish)")
+                XCTAssertEqual(artwork != nil, expectsProductArtwork, "\(model.name) \(finish)")
+                for asset in [artwork?.hero, artwork?.left, artwork?.right, artwork?.caseImage, artwork?.openCase].compactMap({ $0 }) {
+                    XCTAssertNotNil(NSImage(named: asset), asset)
                 }
                 controller.simulateGalleryDevice(model: model)
-                XCTAssertEqual(controller.productArtworkSuffix, "")
+                XCTAssertEqual(controller.productArtwork, model.productArtwork(for: nil))
                 XCTAssertNil(controller.deviceInformation.color)
                 count += 1
             }
         }
-        XCTAssertEqual(count, 34)
+        XCTAssertEqual(count, 265)
         XCTAssertTrue(controller.simulatedTransmittedFrames.isEmpty)
     }
     #endif

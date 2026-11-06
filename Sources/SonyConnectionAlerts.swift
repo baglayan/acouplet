@@ -101,12 +101,16 @@ struct SonyConnectionAlert: Equatable, Sendable {
         }
     }
 
+    var isBluetoothStandbyChange: Bool {
+        format == .flexible && messageID == 0x0A
+    }
+
     var isLegacyConnectionChange: Bool {
         format == .legacyFixed && messageID == 0x01 && actionType == .positiveNegative
     }
 
     var availableActions: [SonyConnectionAlertAction] {
-        guard requestedMode != nil || isMultipointChange || isLegacyConnectionChange else { return [] }
+        guard requestedMode != nil || isMultipointChange || isLegacyConnectionChange || isBluetoothStandbyChange else { return [] }
         return switch actionType {
         case .positiveNegative: [.negative, .positive]
         case .positiveConfirmationWithReply: [.positive]

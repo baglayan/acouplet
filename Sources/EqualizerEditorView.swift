@@ -10,6 +10,7 @@ struct EqualizerEditorView: View {
     @State private var presetChange: PresetChange?
     @State private var confirmationWidth: CGFloat?
     @State private var syncDraft: EqualizerSettings?
+    @State private var availableSize = NSScreen.main?.visibleFrame.size ?? CGSize(width: 720, height: 720)
 
     struct PresetChange: Identifiable {
         let id = UUID()
@@ -43,7 +44,8 @@ struct EqualizerEditorView: View {
             }
             Section("Custom Equalizer") {
                 let displayedDraft = settings.customEqualizerDraft
-                HStack(alignment: .top, spacing: 8) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 56), spacing: 8, alignment: .top),
+                                         count: bandColumns), alignment: .leading, spacing: 16) {
                     ForEach(displayedDraft.layout.indices, id: \.self) { index in
                         equalizerColumn(displayedDraft.layout[index].title, value: Binding(
                             get: { Double(displayedDraft[index]) },
@@ -58,6 +60,7 @@ struct EqualizerEditorView: View {
                     }
                 }
                 .padding(.vertical, 8)
+                .accessibilityIdentifier("equalizer.bands")
                 Button("Reset Flat") {
                     var draft = settings.customEqualizerDraft
                     draft.values = Array(repeating: 0, count: draft.layout.count)
@@ -100,7 +103,7 @@ struct EqualizerEditorView: View {
         .accentColor(settings.tintColor)
         .tint(settings.tintColor)
         .transaction { $0.animation = nil }
-        .frame(width: editorWidth, height: 620)
+        .frame(width: editorWidth, height: editorHeight)
         .windowResizeAnchorIfAvailable(.topLeading)
         .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: editorWidth)
         .toolbar {
@@ -128,11 +131,24 @@ struct EqualizerEditorView: View {
                 settings.deleteEqualizerProfile(id: change.profile.id)
             }
         }.frame(width: 0, height: 0).accessibilityHidden(true))
+        .background(EqualizerScreenSizeReader { availableSize = $0 }
+            .frame(width: 0, height: 0).accessibilityHidden(true))
         .accessibilityIdentifier("equalizer.editor")
     }
 
     private var editorWidth: CGFloat {
-        confirmationWidth ?? (settings.customEqualizerDraft.layout.count > 6 ? 720 : 520)
+        let bandCount = settings.customEqualizerDraft.layout.count
+        let preferred = max(bandCount > 6 ? 720 : 520, CGFloat(bandCount) * 64 + 64)
+        return min(confirmationWidth ?? preferred, availableSize.width)
+    }
+
+    private var bandColumns: Int {
+        max(1, min(settings.customEqualizerDraft.layout.count, Int((editorWidth - 64) / 64)))
+    }
+
+    private var editorHeight: CGFloat {
+        let rows = (settings.customEqualizerDraft.layout.count + bandColumns - 1) / bandColumns
+        return min(620 + CGFloat(rows - 1) * 240, availableSize.height)
     }
 
     private var canRead: Bool {
@@ -227,6 +243,7 @@ struct EqualizerEditorView: View {
     private func equalizerColumn(_ title: String, value: Binding<Double>) -> some View {
         VStack(spacing: 8) {
             Text(title).font(.caption).foregroundStyle(.primary)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             EqualizerFader(value: value, title: title, range: settings.customEqualizerDraft.levelRange,
                            color: settings.controlAccentColor)
                 .frame(width: 28, height: 180)
@@ -234,7 +251,7 @@ struct EqualizerEditorView: View {
                 .monospacedDigit()
                 .foregroundStyle(.primary)
         }
-        .frame(maxWidth: .infinity)
+        .frame(minWidth: 56, maxWidth: .infinity)
     }
 
     private func apply(_ equalizer: EqualizerSettings) {
@@ -259,6 +276,56 @@ struct EqualizerEditorView: View {
         let profile = settings.saveEqualizerProfile(named: name)
         profileName = ""
         apply(profile.settings)
+    }
+}
+
+private struct EqualizerScreenSizeReader: NSViewRepresentable {
+    let onChange: (CGSize) -> Void
+
+    func makeNSView(context: Context) -> ScreenSizeView {
+        let view = ScreenSizeView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: ScreenSizeView, context: Context) {
+        nsView.onChange = onChange
+    }
+
+    final class ScreenSizeView: NSView {
+        var onChange: ((CGSize) -> Void)?
+        private var observation: AnyCancellable?
+        private var lastSize: CGSize?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observation = nil
+            lastSize = nil
+            guard let window else { return }
+            let names = [NSWindow.didChangeScreenNotification, NSWindow.didResizeNotification,
+                         NSApplication.didChangeScreenParametersNotification]
+            observation = Publishers.MergeMany(names.map { NotificationCenter.default.publisher(for: $0) })
+                .filter { [weak window] notification in
+                    notification.name == NSApplication.didChangeScreenParametersNotification
+                        || notification.object as? NSWindow === window
+                }
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.reportSize() }
+            DispatchQueue.main.async { [weak self] in self?.reportSize() }
+        }
+
+        private func reportSize() {
+            guard let window, let screen = window.screen else { return }
+            let bounds = screen.visibleFrame.insetBy(dx: 8, dy: 8)
+            onChange?(window.contentRect(forFrameRect: bounds).size)
+            let shouldCenter = lastSize.map { window.frame.width > $0.width || window.frame.height > $0.height } ?? true
+            lastSize = window.frame.size
+            let origin = shouldCenter
+                ? CGPoint(x: bounds.midX - window.frame.width / 2, y: bounds.midY - window.frame.height / 2)
+                : CGPoint(x: min(max(window.frame.minX, bounds.minX), max(bounds.minX, bounds.maxX - window.frame.width)),
+                          y: min(max(window.frame.minY, bounds.minY), max(bounds.minY, bounds.maxY - window.frame.height)))
+            if window.frame.origin != origin { window.setFrameOrigin(origin) }
+        }
     }
 }
 

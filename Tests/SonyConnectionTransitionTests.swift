@@ -4,6 +4,43 @@ import XCTest
 final class SonyConnectionTransitionTests: XCTestCase {
     let modes: [SonyConnectionMode] = [.soundQuality, .stableConnection, .lowLatency]
 
+    func testClassicModernDialectsUseShortPacketsAndCannotRequestTransportSwitches() throws {
+        for inquiry: UInt8 in [0x00, 0x02] {
+            for (original, target, value): (SonyConnectionMode, SonyConnectionMode, UInt8) in [
+                (.soundQuality, .stableConnection, 0x01), (.stableConnection, .soundQuality, 0x00),
+            ] {
+                var transition = try XCTUnwrap(SonyConnectionTransition(original: original, target: target,
+                    supportedModes: modes, session: 3, connectionModeInquiryType: inquiry))
+                XCTAssertEqual(transition.connectionModeInquiryType, inquiry)
+                XCTAssertEqual(transition.requestPayload, [0xE8, inquiry, value])
+                XCTAssertEqual(transition.readbackPayload, [0xE6, inquiry])
+                XCTAssertFalse(transition.crossesTransport)
+                XCTAssertFalse(transition.commandTransmitted([0xE8, inquiry, value, 0x00], session: 3))
+                XCTAssertTrue(transition.commandTransmitted(transition.requestPayload, session: 3))
+                XCTAssertFalse(transition.receiveLEStandby(true, session: 3))
+                for stream: SonyConnectionStream in [.classicAudio, .leAudio, .unknown(0xFF)] {
+                    XCTAssertFalse(transition.receiveNotification(target, stream: stream, session: 3))
+                }
+                XCTAssertNil(transition.requiredStream)
+                XCTAssertTrue(transition.receiveNotification(target, stream: .none, session: 3))
+                XCTAssertEqual(transition.phase, .confirmed)
+
+                var readback = try XCTUnwrap(SonyConnectionTransition(original: original, target: target,
+                    supportedModes: modes, session: 3, connectionModeInquiryType: inquiry))
+                readback.commandTransmitted(readback.requestPayload, session: 3)
+                XCTAssertFalse(readback.receiveReadback(target, session: 3))
+                XCTAssertTrue(readback.readbackTransmitted(session: 3))
+                XCTAssertTrue(readback.receiveReadback(target, session: 3))
+                XCTAssertEqual(readback.phase, .confirmed)
+            }
+            XCTAssertNil(SonyConnectionTransition(original: .soundQuality, target: .lowLatency,
+                supportedModes: modes, session: 1, connectionModeInquiryType: inquiry))
+            let transition = try XCTUnwrap(SonyConnectionTransition(original: .lowLatency, target: .soundQuality,
+                supportedModes: modes, session: 1, connectionModeInquiryType: inquiry))
+            XCTAssertFalse(transition.crossesTransport)
+        }
+    }
+
     func testLegacyQualityUsesTypedPacketsAndCannotRequestOrInferLEAudio() throws {
         for (original, target, value): (SonyConnectionMode, SonyConnectionMode, UInt8) in [
             (.soundQuality, .stableConnection, 1), (.stableConnection, .soundQuality, 0),

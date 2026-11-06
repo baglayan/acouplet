@@ -250,7 +250,7 @@ struct UITestHostView: View {
                 }
                 .controlSize(.mini)
                 Text(settingsLifecycleSnapshot).accessibilityIdentifier("test.settingsLifecycle")
-                Text(headphones.audioFeatures.codec?.title ?? "Unknown").accessibilityIdentifier("test.settingsCodec")
+                Text(headphones.audioCodec?.title ?? "Unknown").accessibilityIdentifier("test.settingsCodec")
             }
             if CommandLine.arguments.contains("--connection-lifecycle") {
                 HStack {

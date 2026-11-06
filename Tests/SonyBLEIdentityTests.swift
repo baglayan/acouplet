@@ -4,6 +4,49 @@ import XCTest
 final class SonyBLEIdentityTests: XCTestCase {
     private let basicChunk: [UInt8] = [0xB0, 0x32, 0x01, 0x00, 0x06, 0xF0, 0x12, 0xAB, 0xCD, 0x00, 0x08, 0x00]
 
+    func testAppearancesPersistRawColorsIndependentlyOfVerifiedIdentities() throws {
+        let suite = "dev.baglayan.Acouplet.appearance-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = try XCTUnwrap(SonyBLEIdentity.Appearance(classicAddress: "12-34-56-78-9a-bc", model: .whXM3,
+            color: SonyDeviceColor(rawValue: 3)))
+        let second = try XCTUnwrap(SonyBLEIdentity.Appearance(classicAddress: "12:34:56:78:9A:BD", model: .whXM3,
+            color: SonyDeviceColor(rawValue: 0xFE)))
+        SonyBLEIdentity.save(first, in: defaults)
+        SonyBLEIdentity.save(second, in: defaults)
+        XCTAssertEqual(SonyBLEIdentity.savedAppearances(in: defaults), [first.classicAddress: first, second.classicAddress: second])
+        XCTAssertTrue(SonyBLEIdentity.savedDevices(in: defaults).isEmpty)
+        let updated = try XCTUnwrap(SonyBLEIdentity.Appearance(classicAddress: first.classicAddress, model: .whXM3,
+            color: SonyDeviceColor(rawValue: 0)))
+        SonyBLEIdentity.save(updated, in: defaults)
+        XCTAssertEqual(SonyBLEIdentity.savedAppearances(in: defaults)[first.classicAddress]?.color.rawValue, 0)
+        SonyBLEIdentity.removeAppearance(for: "12-34-56-78-9a-bc", in: defaults)
+        XCTAssertEqual(SonyBLEIdentity.savedAppearances(in: defaults), [second.classicAddress: second])
+    }
+
+    func testAppearanceRecordsRejectInvalidModelsColorsAndAddressAssociations() throws {
+        let suite = "dev.baglayan.Acouplet.appearance-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let appearance = try XCTUnwrap(SonyBLEIdentity.Appearance(classicAddress: "12:34:56:78:9A:BC", model: .whXM3,
+            color: SonyDeviceColor(rawValue: 3)))
+        XCTAssertEqual(SonyBLEIdentity.Appearance(propertyList: appearance.propertyList), appearance)
+        for (key, value) in [("classicAddress", "12:34"), ("model", "unknown"), ("model", "invalid"),
+                             ("color", "-1"), ("color", "256"), ("color", "3.5"), ("color", "invalid")] {
+            var malformed = appearance.propertyList
+            malformed[key] = value
+            XCTAssertNil(SonyBLEIdentity.Appearance(propertyList: malformed))
+        }
+        var wrongType: [String: Any] = appearance.propertyList
+        wrongType["color"] = 3
+        XCTAssertNil(SonyBLEIdentity.Appearance(propertyList: wrongType))
+        defaults.set(["12:34:56:78:9A:BD": appearance.propertyList, appearance.classicAddress: ["color": "3"]],
+            forKey: SonyBLEIdentity.savedAppearancesKey)
+        XCTAssertTrue(SonyBLEIdentity.savedAppearances(in: defaults).isEmpty)
+        defaults.set(["12-34-56-78-9a-bc": appearance.propertyList], forKey: SonyBLEIdentity.savedAppearancesKey)
+        XCTAssertEqual(SonyBLEIdentity.savedAppearances(in: defaults), [appearance.classicAddress: appearance])
+    }
+
     func testPairedConnectionTargetRequiresTheSelectedPairedKnownDeviceAndCanonicalIdentifier() throws {
         let identifier = UUID()
         let address = "12:34:56:78:9A:BC"

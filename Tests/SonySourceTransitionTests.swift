@@ -2,6 +2,29 @@ import XCTest
 @testable import Acouplet
 
 final class SonySourceTransitionTests: XCTestCase {
+    func testClassicInventorySelectionRequiresTheNegotiatedOwnedReadback() throws {
+        var model = SonyMultipoint(supportedFunctions: [0x30, 0x31])
+        let first = Array(firstAddress.utf8) + [1, 1, 0x41]
+        let second = Array(secondAddress.utf8) + [2, 1, 0x42]
+        let original = [0x37, 0, 2] + first + second + [1]
+        for payload in [[0x31, 0, 8, 2, 0], [0x33, 0, 0, 0], original, [0x37, 1, 1]] {
+            XCTAssertTrue(model.update(payload))
+        }
+        var transition = try XCTUnwrap(SonySourceTransition(targetAddress: secondAddress, model: model, session: 7))
+        XCTAssertTrue(transition.commandTransmitted([0x3C, 1] + Array(secondAddress.utf8), model: model, session: 7))
+        XCTAssertTrue(transition.receive([0x3D, 1, 0] + Array(secondAddress.utf8), model: model, session: 7))
+        XCTAssertEqual(transition.expectedPayload, [0x36, 0])
+        var changedCapabilities = transition
+        XCTAssertFalse(changedCapabilities.validateForTransmission(model: readyModel(), session: 7))
+        XCTAssertEqual(changedCapabilities.phase, .failed)
+        XCTAssertTrue(transition.commandTransmitted([0x36, 0], model: model, session: 7))
+        let readback = [0x37, 0, 2] + first + second + [2]
+        XCTAssertFalse(transition.receive(readback, model: model, session: 7))
+        XCTAssertFalse(transition.receive(inventory(selected: 2), model: model, session: 7, readbackOwned: true))
+        XCTAssertTrue(transition.receive(readback, model: model, session: 7, readbackOwned: true))
+        XCTAssertEqual(transition.phase, .complete)
+    }
+
     func testSourceSelectionWaitsForTransmissionMatchingResultAndOwnedFreshReadback() throws {
         var model = readyModel()
         let requestID = UUID()

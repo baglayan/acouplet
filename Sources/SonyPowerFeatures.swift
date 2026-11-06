@@ -144,11 +144,58 @@ struct SonyPowerSwitch: Equatable, Sendable {
     }
 }
 
+struct SonyAutoStandby: Equatable, Sendable {
+    private(set) var candidate: UInt8?
+    private(set) var available: Bool?
+    private(set) var enabled: Bool?
+
+    var queryPayloads: [[UInt8]] {
+        (candidate == nil ? [[0x20, 0x00]] : []) + [[0x22, 0x00], [0x26, 0x00]]
+    }
+
+    func setPayload(enabled: Bool) -> [UInt8]? {
+        guard candidate != nil, available == true, self.enabled != nil else { return nil }
+        return [0x28, 0x00, enabled ? 0x00 : 0x01]
+    }
+
+    mutating func invalidateRead(_ query: [UInt8]) {
+        switch query {
+        case [0x20, 0x00]: candidate = nil
+        case [0x22, 0x00]: available = nil
+        case [0x26, 0x00]: enabled = nil
+        default: break
+        }
+    }
+
+    @discardableResult
+    mutating func update(_ payload: [UInt8], frameType: UInt8) -> Bool {
+        guard frameType == 0x0E, payload.count >= 3, payload[1] == 0x00 else { return false }
+        switch payload[0] {
+        case 0x21:
+            guard payload[2] == 0 else { return false }
+            candidate = payload[2]
+        case 0x23, 0x25:
+            guard payload.count == 3 else { return false }
+            available = payload[2] <= 1 ? payload[2] == 0 : nil
+        case 0x27, 0x29:
+            guard payload.count == 3 else { return false }
+            enabled = payload[2] <= 1 ? payload[2] == 0 : nil
+        default:
+            return false
+        }
+        return true
+    }
+}
+
 struct SonyPowerFeatures: Equatable, Sendable {
     private(set) var batteryCare: SonyBatteryCare?
     private(set) var autoPowerSave: SonyAutoPowerSave?
     private(set) var touchPanelBacklight: SonyPowerSwitch?
     private(set) var stamina: SonyPowerSwitch?
+    private(set) var powerSavingMode: SonyPowerSwitch?
+    private(set) var bluetoothStandby: SonyPowerSwitch?
+    private(set) var autoStandby: SonyAutoStandby?
+    private(set) var supportsChargeInUse = false
 
     init(supportedFunctions: Set<UInt8> = [], supportedFunctions2: Set<UInt8> = []) {
         updateSupportedFunctions(supportedFunctions, supportedFunctions2: supportedFunctions2)
@@ -166,6 +213,13 @@ struct SonyPowerFeatures: Equatable, Sendable {
         else if stamina == nil { stamina = SonyPowerSwitch(inquiryType: 0x0E) }
         if !supportedFunctions.contains(0x2F) { touchPanelBacklight = nil }
         else if touchPanelBacklight == nil { touchPanelBacklight = SonyPowerSwitch(inquiryType: 0x0F) }
+        if !supportedFunctions.contains(0x26) { powerSavingMode = nil }
+        else if powerSavingMode == nil { powerSavingMode = SonyPowerSwitch(inquiryType: 0x06) }
+        if !supportedFunctions.contains(0x2D) { bluetoothStandby = nil }
+        else if bluetoothStandby == nil { bluetoothStandby = SonyPowerSwitch(inquiryType: 0x0D) }
+        if !supportedFunctions2.contains(0x20) { autoStandby = nil }
+        else if autoStandby == nil { autoStandby = SonyAutoStandby() }
+        supportsChargeInUse = supportedFunctions2.contains(0x21)
     }
 
     func queryPayloads(frameType: UInt8) -> [[UInt8]] {
@@ -173,6 +227,9 @@ struct SonyPowerFeatures: Equatable, Sendable {
             + (frameType == 0x0C ? autoPowerSave?.queryPayloads ?? [] : [])
             + (frameType == 0x0C ? touchPanelBacklight?.queryPayloads ?? [] : [])
             + (frameType == 0x0C ? stamina?.queryPayloads ?? [] : [])
+            + (frameType == 0x0C ? powerSavingMode?.queryPayloads ?? [] : [])
+            + (frameType == 0x0C ? bluetoothStandby?.queryPayloads ?? [] : [])
+            + (frameType == 0x0E ? autoStandby?.queryPayloads ?? [] : [])
     }
 
     mutating func invalidateRead(_ query: [UInt8], frameType: UInt8) {
@@ -181,7 +238,10 @@ struct SonyPowerFeatures: Equatable, Sendable {
             autoPowerSave?.invalidateRead(query)
             touchPanelBacklight?.invalidateRead(query)
             stamina?.invalidateRead(query)
+            powerSavingMode?.invalidateRead(query)
+            bluetoothStandby?.invalidateRead(query)
         }
+        if frameType == 0x0E { autoStandby?.invalidateRead(query) }
     }
 
     @discardableResult
@@ -189,7 +249,10 @@ struct SonyPowerFeatures: Equatable, Sendable {
         if batteryCare?.update(payload, frameType: frameType) == true { return true }
         if autoPowerSave?.update(payload, frameType: frameType) == true { return true }
         if touchPanelBacklight?.update(payload, frameType: frameType) == true { return true }
-        return stamina?.update(payload, frameType: frameType) == true
+        if stamina?.update(payload, frameType: frameType) == true { return true }
+        if powerSavingMode?.update(payload, frameType: frameType) == true { return true }
+        if bluetoothStandby?.update(payload, frameType: frameType) == true { return true }
+        return autoStandby?.update(payload, frameType: frameType) == true
     }
 }
 

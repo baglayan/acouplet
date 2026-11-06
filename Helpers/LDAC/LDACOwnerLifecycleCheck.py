@@ -205,6 +205,8 @@ final class LDACNativeSession: @unchecked Sendable {
     func verifyConnectionLoss(reason: String) {}
     func allowHandoff() {}
     func updateGain(_ gain: Double) {}
+    @MainActor
+    func updateQuality(_ quality: LDACQuality) { SwiftRecord("quality \(quality.rawValue)") }
 }
 
 __CHILD__
@@ -325,6 +327,7 @@ enum Check {
         session.start()
         while !active { try await Task.sleep(for: .milliseconds(5)) }
         SwiftRecord("app-active")
+        if mode == "normal" { session.updateQuality(.quality) }
         if mode == "parent-hung" {
             _ = Task { try await output.configure(volume: 10, range: 0...30) }
             while true { try await Task.sleep(for: .seconds(1)) }
@@ -483,6 +486,7 @@ with tempfile.TemporaryDirectory(prefix='acouplet-owner-check-') as temporary:
                 assert lines.index('children-reaped') < lines.index('output restoring')
             if mode == 'normal':
                 assert 'second-complete' in lines
+                assert lines.index('quality high') < lines.index('stop-intent true')
                 for line in lines:
                     if line.startswith('claim '):
                         assert not alive(int(line.split()[1]))

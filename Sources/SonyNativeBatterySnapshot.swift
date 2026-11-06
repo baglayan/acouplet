@@ -28,10 +28,10 @@ struct SonyNativeBatterySnapshot: Equatable, Sendable {
 
     mutating func update(_ batteries: SonyBatteries, type: UInt8, observedAt: Date) {
         switch type {
-        case 0x09:
+        case 0x01, 0x09:
             left = batteries.left.flatMap { Reading($0, observedAt: observedAt) }
             right = batteries.right.flatMap { Reading($0, observedAt: observedAt) }
-        case 0x0A:
+        case 0x02, 0x0A:
             caseBattery = batteries.caseBattery.flatMap { Reading($0, observedAt: observedAt) }
         default:
             break

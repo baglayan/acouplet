@@ -236,7 +236,7 @@ final class SonyPreferencePaneServer {
                   pending: controller.pendingChanges[setting] != nil, error: controller.settingErrors[setting])
         }
         result.firmwareVersion = controller.firmwareVersion
-        result.codec = controller.audioFeatures.supportsCodecStatus ? controller.audioFeatures.codec?.title ?? "Unknown" : nil
+        result.codec = controller.supportsCodecStatus ? controller.audioCodec?.title ?? "Unknown" : nil
         let equalizer = controller.equalizer
         if equalizer.isSupported {
             let flat = equalizer.flatSettings
@@ -257,6 +257,10 @@ final class SonyPreferencePaneServer {
                 options: SonyDSEEMode.allCases.compactMap { mode in
                     mode.sonyValue.map { .init(id: String($0), title: mode.title) }
                 }, available: controller.canSetDSEE)
+        }
+        if controller.supportsUpscalingStatus {
+            result.upscalingType = controller.upscalingIndicatorType?.title ?? "Unknown"
+            result.upscalingStatus = controller.upscalingIndicatorStatus?.title ?? "Unknown"
         }
         result.systemFeatures = SonySystemFeature.allCases.filter { $0 != .speakToChat }.compactMap { feature in
             guard let state = controller.systemFeatureState(feature), state.isVisible != false else { return nil }

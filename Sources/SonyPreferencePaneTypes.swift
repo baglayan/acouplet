@@ -123,6 +123,8 @@ struct SonyPreferencePaneDevice: Codable, Equatable, Identifiable, Sendable {
     var equalizer: Equalizer?
     var dsee: Choice?
     var dseeTitle: String?
+    var upscalingType: String?
+    var upscalingStatus: String?
     var systemFeatures: [Toggle] = []
     var touchAssignments: [TouchKey] = []
     var automaticPowerOff: Choice?

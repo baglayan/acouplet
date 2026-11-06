@@ -224,27 +224,6 @@ typedef struct {
     double recoveryTime;
 } RecoveryState;
 
-typedef struct {
-    double windowEnd;
-    uint64_t skippedBytes;
-    BOOL skipped;
-    unsigned int consecutiveWindows;
-} DegradationState;
-
-static BOOL RecordDegradation(DegradationState *state, double now, uint64_t skippedBytes) {
-    while (now >= state->windowEnd) {
-        state->consecutiveWindows = state->skipped ? state->consecutiveWindows + 1 : 0;
-        state->skipped = NO;
-        state->windowEnd += 1;
-        if (state->consecutiveWindows >= 3) return YES;
-    }
-    if (skippedBytes != state->skippedBytes) {
-        state->skipped = YES;
-        state->skippedBytes = skippedBytes;
-    }
-    return state->consecutiveWindows >= 3;
-}
-
 static BOOL RecordBreach(RecoveryState *state, double now) {
     if (state->breached) return NO;
     state->breached = YES;
@@ -266,19 +245,6 @@ static BOOL RecoveryChecks(void) {
     passed &= state.breached && state.recovered && state.recoveryTime == 11 && !RecordRecovery(&state, 11.1, 0.001);
     RecoveryState expired = {0};
     passed &= RecordBreach(&expired, 20) && !RecordRecovery(&expired, 21.001, 0.001) && !expired.recovered;
-    DegradationState degradation = {.windowEnd = 11};
-    passed &= !RecordDegradation(&degradation, 10.1, 1024) && !RecordDegradation(&degradation, 11, 1024);
-    passed &= !RecordDegradation(&degradation, 11.1, 2048) && !RecordDegradation(&degradation, 12, 2048);
-    passed &= !RecordDegradation(&degradation, 12.1, 3072) && RecordDegradation(&degradation, 13, 3072);
-    degradation = (DegradationState){.windowEnd = 21};
-    passed &= !RecordDegradation(&degradation, 20.1, 1024) && !RecordDegradation(&degradation, 21, 1024);
-    passed &= degradation.consecutiveWindows == 1 && !RecordDegradation(&degradation, 22, 1024) && degradation.consecutiveWindows == 0;
-    passed &= !RecordDegradation(&degradation, 22.1, 2048) && !RecordDegradation(&degradation, 23, 2048);
-    passed &= !RecordDegradation(&degradation, 23.1, 3072) && !RecordDegradation(&degradation, 24, 3072);
-    passed &= !RecordDegradation(&degradation, 24.1, 4096) && RecordDegradation(&degradation, 25, 4096);
-    degradation = (DegradationState){.windowEnd = 31};
-    passed &= !RecordDegradation(&degradation, 31, 1024) && degradation.consecutiveWindows == 0 && degradation.skipped;
-    passed &= !RecordDegradation(&degradation, 32, 1024) && degradation.consecutiveWindows == 1;
     return passed;
 }
 
@@ -332,19 +298,6 @@ static BOOL EncoderMatchesProfile(HANDLE_LDAC_BT encoder, LDACProfile profile) {
     return ldacBT_get_sampling_freq(encoder) == profile.sampleRate && (profile.adaptive ?
         AdaptiveQuality(ldacBT_get_eqmid(encoder)) && ldacBT_get_bitrate(encoder) > 0 :
         ldacBT_get_eqmid(encoder) == profile.eqmid && ldacBT_get_bitrate(encoder) == profile.bitrateKbps);
-}
-
-static BOOL ResetEncoder(HANDLE_LDAC_BT encoder, int mtu, LDACProfile profile) {
-    int eqmid = profile.adaptive ? ldacBT_get_eqmid(encoder) : profile.eqmid;
-    if (profile.adaptive && !AdaptiveQuality(eqmid)) return NO;
-    int initial = eqmid == LDACBT_EQMID_Q0 || eqmid == LDACBT_EQMID_Q1 ? LDACBT_EQMID_MQ : eqmid;
-    ldacBT_close_handle(encoder);
-    if (ldacBT_init_handle_encode(encoder, mtu, initial, LDACBT_CHANNEL_MODE_STEREO,
-            LDACBT_SMPL_FMT_F32, profile.sampleRate) != 0) return NO;
-    while (ldacBT_get_eqmid(encoder) != eqmid) {
-        if (ldacBT_alter_eqmid_priority(encoder, LDACBT_EQMID_INC_QUALITY) != 0) return NO;
-    }
-    return EncoderMatchesProfile(encoder, profile);
 }
 
 static int FrameLength(const uint8_t *header, NSUInteger available, LDACProfile profile) {
@@ -606,6 +559,7 @@ static BOOL SelfTest(void) {
 @property NSUInteger received;
 @property UInt16 realCID;
 @property LDACProfile profile;
+@property(copy) NSString *pendingQuality;
 @property int pcmFD;
 @property uint8_t *pcmRing;
 @property NSUInteger pcmHead;
@@ -616,14 +570,13 @@ static BOOL SelfTest(void) {
 @property BOOL pcmActive;
 @property BOOL pcmStarted;
 @property BOOL pcmContinuous;
-@property BOOL pcmCanSkip;
 @property NSUInteger pcmReserveBytes;
 @property BOOL pcmReady;
 @property BOOL pcmComplete;
 @property BOOL pcmEnded;
 @property HANDLE_LDAC_BT encoder;
 @property int encoderMTU;
-@property DegradationState degradation;
+@property double pcmDeadline;
 @property BOOL stdinEnded;
 @property BOOL stopRequested;
 @property BOOL closeRequested;
@@ -637,8 +590,7 @@ static BOOL SelfTest(void) {
 @property(strong) NSOutputStream *output;
 - (void)pollInput;
 - (void)pollPCM;
-- (NSUInteger)discardPCMFrames:(uint64_t)maximumFrames;
-- (BOOL)checkDegradation;
+- (BOOL)checkBacklog;
 @end
 
 @implementation DirectMediaProbe
@@ -647,39 +599,11 @@ static BOOL SelfTest(void) {
     free(_pcmRing);
     if (_pcmFD >= 0) close(_pcmFD);
 }
-- (NSUInteger)discardPCMFrames:(uint64_t)maximumFrames {
-    if (!self.pcmContinuous || !self.pcmCanSkip || self.pcmComplete) return 0;
-    NSUInteger bytes = PCMSkipBytes(self.pcmBytes, self.pcmReserveBytes, maximumFrames);
-    if (!bytes) return 0;
-    if (self.pcmSkippedBytes > UINT64_MAX - bytes || self.pcmDiscardedBytes > UINT64_MAX - bytes) {
-        printf("PCM_FAILED reason=discard-counter-overflow\n");
-        self.failed = YES;
-        return 0;
-    }
-    self.pcmHead = (self.pcmHead + bytes) % self.profile.capacityBytes;
-    self.pcmBytes -= bytes;
-    self.pcmSkippedBytes += bytes;
-    self.pcmDiscardedBytes += bytes;
-    printf("PCM_SKIP frames=%lu totalSkippedFrames=%llu bufferedFrames=%lu\n",
-           bytes / 8, self.pcmSkippedBytes / 8, self.pcmBytes / 8);
-    if (!ResetEncoder(self.encoder, self.encoderMTU, self.profile)) {
-        printf("PCM_FAILED reason=encoder-reset code=%d\n", ldacBT_get_error_code(self.encoder));
-        self.failed = YES;
-    } else {
-        printf("PCM_ENCODER_RESET skippedFrames=%lu totalSkippedFrames=%llu rate=%d bitrateKbps=%d eqmid=%d\n",
-               bytes / 8, self.pcmSkippedBytes / 8, ldacBT_get_sampling_freq(self.encoder),
-               ldacBT_get_bitrate(self.encoder), ldacBT_get_eqmid(self.encoder));
-    }
-    [self checkDegradation];
-    return bytes / 8;
-}
-- (BOOL)checkDegradation {
-    DegradationState state = self.degradation;
-    BOOL stopped = RecordDegradation(&state, MonotonicTime(), self.pcmSkippedBytes);
-    self.degradation = state;
+- (BOOL)checkBacklog {
+    BOOL stopped = MonotonicTime() >= self.pcmDeadline;
     if (stopped && !self.failed) {
-        printf("PCM_FAILED reason=persistent-degradation consecutiveWindows=%u windowSeconds=1 skippedFrames=%llu\n",
-               state.consecutiveWindows, self.pcmSkippedBytes / 8);
+        printf("PCM_FAILED reason=persistent-degradation cause=backlog-limit bufferedFrames=%lu deadlineOverrun=%.6f\n",
+               self.pcmBytes / 8, MonotonicTime() - self.pcmDeadline);
         self.failed = YES;
     }
     return stopped;
@@ -695,11 +619,6 @@ static BOOL SelfTest(void) {
             self.pcmDiscardedBytes += bytes;
         }
         NSUInteger available = self.profile.capacityBytes - self.pcmBytes;
-        if (!available && !self.pcmComplete && self.pcmContinuous && self.pcmCanSkip) {
-            [self discardPCMFrames:UINT64_MAX];
-            if (self.failed) return;
-            available = self.profile.capacityBytes - self.pcmBytes;
-        }
         if (!available && !self.pcmComplete) return;
         NSUInteger tail = (self.pcmHead + self.pcmBytes) % self.profile.capacityBytes;
         NSUInteger maximum = MIN(available, self.profile.capacityBytes - tail);
@@ -791,34 +710,6 @@ static BOOL ContinuousPCMChecks(void) {
     DirectMediaProbe *probe = [DirectMediaProbe new];
     probe.pcmFD = -1;
     probe.profile = profile;
-    probe.encoderMTU = 679;
-    probe.encoder = ldacBT_get_handle();
-    if (!probe.encoder || ldacBT_init_handle_encode(probe.encoder, probe.encoderMTU, profile.eqmid,
-            LDACBT_CHANNEL_MODE_STEREO, LDACBT_SMPL_FMT_F32, profile.sampleRate) != 0) return NO;
-    probe.degradation = (DegradationState){.windowEnd = MonotonicTime() + 1};
-    probe.pcmReserveBytes = profile.prefillBytes;
-    probe.pcmHead = profile.capacityBytes - PCMBlockBytes;
-    probe.pcmBytes = profile.prefillBytes + PCMBlockBytes * 3 + 7;
-    probe.pcmContinuous = YES;
-    passed &= [probe discardPCMFrames:384] == 0 && probe.pcmSkippedBytes == 0;
-    probe.pcmCanSkip = YES;
-    passed &= [probe discardPCMFrames:384] == 384;
-    passed &= probe.pcmHead == PCMBlockBytes * 2 && probe.pcmBytes == profile.prefillBytes + 7;
-    passed &= probe.pcmSkippedBytes == PCMBlockBytes * 3 && probe.pcmDiscardedBytes == probe.pcmSkippedBytes;
-    uint64_t encodedSamples = 768;
-    uint64_t timestamp = encodedSamples + probe.pcmSkippedBytes / 8;
-    passed &= timestamp == 1152 && timestamp > encodedSamples;
-    probe.pcmBytes = profile.capacityBytes;
-    passed &= [probe discardPCMFrames:UINT64_MAX] > 0 && probe.pcmBytes >= profile.prefillBytes && probe.pcmBytes < profile.prefillBytes + PCMBlockBytes;
-    uint64_t skipped = probe.pcmSkippedBytes;
-    probe.pcmBytes += PCMBlockBytes;
-    probe.pcmComplete = YES;
-    passed &= [probe discardPCMFrames:UINT64_MAX] == 0 && probe.pcmSkippedBytes == skipped;
-    probe.pcmComplete = NO;
-    probe.pcmContinuous = NO;
-    passed &= [probe discardPCMFrames:UINT64_MAX] == 0 && probe.pcmSkippedBytes == skipped;
-    RecoveryState state = {0};
-    passed &= RecordBreach(&state, 10) && RecordRecovery(&state, 10.1, 0.001) && state.breached;
     int descriptors[2];
     if (pipe(descriptors) != 0) return NO;
     probe.pcmFD = descriptors[0];
@@ -837,9 +728,12 @@ static BOOL ContinuousPCMChecks(void) {
     uint8_t input[PCMBlockBytes + 7] = {0};
     passed &= write(descriptors[1], input, sizeof(input)) == sizeof(input);
     [probe pollPCM];
-    passed &= !probe.failed && probe.pcmReadBytes == sizeof(input) && probe.pcmBytes < profile.capacityBytes;
-    passed &= probe.pcmHead % PCMBlockBytes == 0 && probe.pcmBytes % PCMBlockBytes == 7;
-    passed &= probe.pcmBytes + probe.pcmSkippedBytes == profile.capacityBytes + sizeof(input);
+    passed &= !probe.failed && probe.pcmReadBytes == 0 && probe.pcmBytes == profile.capacityBytes;
+    probe.pcmHead = PCMBlockBytes * 2;
+    probe.pcmBytes -= PCMBlockBytes * 2;
+    [probe pollPCM];
+    passed &= !probe.failed && probe.pcmReadBytes == sizeof(input) &&
+        probe.pcmBytes == profile.capacityBytes - PCMBlockBytes + 7 && !probe.pcmSkippedBytes;
     probe.pcmComplete = YES;
     close(descriptors[1]);
     [probe pollPCM];
@@ -1031,6 +925,15 @@ static void PollLiveControls(DirectMediaProbe *probe) {
             probe.stopRequested = YES;
             probe.closeRequested |= [command isEqualToString:@"close"];
             printf("STOP_REQUESTED source=stdin close=%d\n", probe.closeRequested);
+        } else if ([command hasPrefix:@"quality "]) {
+            LDACProfile selected;
+            NSString *quality = [command substringFromIndex:8];
+            if (SelectProfile(probe.profile.sampleRate, quality, &selected)) {
+                probe.pendingQuality = quality;
+            } else {
+                printf("COMMAND_REJECTED reason=invalid-quality\n");
+                probe.failed = YES;
+            }
         } else if ([command hasPrefix:@"gain "]) {
             double gain = 0;
             if (ParseGain([command substringFromIndex:5], &gain)) {
@@ -1050,6 +953,23 @@ static void PollLiveControls(DirectMediaProbe *probe) {
     if (probe.stopRequested) probe.pcmComplete = YES;
 }
 
+static void ApplyLiveQuality(DirectMediaProbe *probe, LDACProfile *profile,
+                             LDACAdaptivePolicy *policy, BOOL *adaptiveEnabled) {
+    LDACProfile selected;
+    NSString *quality = probe.pendingQuality;
+    probe.pendingQuality = nil;
+    if (!SelectProfile(profile->sampleRate, quality, &selected) ||
+        ldacBT_set_eqmid(probe.encoder, selected.eqmid) != 0) {
+        printf("ENCODER_FAILED reason=manual-quality code=%d\n", ldacBT_get_error_code(probe.encoder));
+        probe.failed = YES;
+    } else {
+        *adaptiveEnabled = selected.adaptive;
+        profile->adaptive = YES;
+        *policy = LDACAdaptivePolicyInit();
+        printf("QUALITY_APPLIED quality=%s eqmid=%d\n", quality.UTF8String, selected.eqmid);
+    }
+}
+
 static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain, uint32_t seconds) {
     probe.pcmStarted = YES;
     id activity = [NSProcessInfo.processInfo beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"LDAC streaming"];
@@ -1058,6 +978,7 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
     LDACProfile profile = probe.profile;
     LDACFrameFormat transmittedFormat = {profile.frameBytes, profile.bitrateKbps};
     LDACAdaptivePolicy adaptivePolicy = LDACAdaptivePolicyInit();
+    BOOL adaptiveEnabled = profile.adaptive;
     BOOL adaptiveSourceReady = YES;
     uint64_t adaptiveSkippedBytes = probe.pcmSkippedBytes;
     int result = 5;
@@ -1084,7 +1005,6 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
 #endif
     probe.pcmContinuous = continuous;
     probe.pcmReserveBytes = MIN(profile.capacityBytes, MAX(profile.prefillBytes, (probe.pcmBytes / PCMBlockBytes) * PCMBlockBytes));
-    probe.pcmCanSkip = YES;
     BOOL finishing = NO;
     probe.gain = gain;
     probe.targetGain = gain;
@@ -1131,7 +1051,8 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                fd, familyError ? -1 : socketAddress.ss_family, familyError, socketType,
                sendBuffer.value, sendBuffer.error, originalLowWater, lowWater.value, lowWater.error);
         started = MonotonicTime();
-        probe.degradation = (DegradationState){.windowEnd = started + 1};
+        double backlogLimit = (double)(profile.capacityBytes - probe.pcmBytes) / (profile.sampleRate * 8);
+        probe.pcmDeadline = started + backlogLimit;
         double deadline = continuous ? INFINITY : started + seconds + 1;
         double nextProgress = started + 1;
         NSUInteger intervalPackets = 0, intervalWaits = 0;
@@ -1148,7 +1069,7 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
             RecordSenderStage(&timing, SenderControl);
             PollLiveControls(probe);
             RecordSenderStage(&timing, SenderOther);
-            if (continuous && !probe.stopRequested && !finishing) [probe checkDegradation];
+            if (continuous && !probe.stopRequested && !finishing) [probe checkBacklog];
             if (probe.closed || probe.failed || probe.inputEnded) break;
             if (probe.stopRequested) { finishing = YES; targetSamples = sourceSamples; }
 #if ACOUPLET_LDAC_PROBE_ONLY
@@ -1160,23 +1081,11 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                 printf("ENCODER_FAILED reason=sample-counter-overflow\n");
                 break;
             }
-            probe.pcmCanSkip = !finishing && sourceSamples == generatedSamples;
-            double due = PacketDue(started, generatedSamples + probe.pcmSkippedBytes / 8, profile);
-            if (continuous && !finishing && probe.pcmCanSkip) {
-                uint64_t previousSkipped = probe.pcmSkippedBytes;
+            double due = PacketDue(started, generatedSamples, profile);
+            if (continuous && !finishing) {
                 RecordSenderStage(&timing, SenderPCM);
                 [probe pollPCM];
                 RecordSenderStage(&timing, SenderOther);
-                double now = MonotonicTime();
-                due = PacketDue(started, generatedSamples + probe.pcmSkippedBytes / 8, profile);
-                if (probe.pcmSkippedBytes != previousSkipped) RecordBreach(&recovery, now);
-                if (now - due >= 0.1) {
-                    RecordBreach(&recovery, now);
-                    NSUInteger skipped = [probe discardPCMFrames:(uint64_t)fmin((now - due) * profile.sampleRate, profile.sampleRate)];
-                    due = PacketDue(started, generatedSamples + probe.pcmSkippedBytes / 8, profile);
-                    if (skipped) printf("PCM_RECOVERY skippedFrames=%lu nextTimestamp=%llu late=%.6f strictPass=0\n",
-                                        skipped, generatedSamples + probe.pcmSkippedBytes / 8, now - due);
-                }
             }
             if (!finishing) {
                 NSUInteger inputFrames = continuous ? 128 : MIN((uint64_t)128, targetSamples - sourceSamples);
@@ -1265,7 +1174,6 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                 sourceSamples += inputFrames;
             }
             uint64_t packetSamples = (uint64_t)frames * profile.frameSamples;
-            probe.pcmCanSkip = continuous && !finishing && sourceSamples == generatedSamples + packetSamples;
             if (!packetLength) {
                 if (flushing) { flushed = YES; break; }
                 RecordSenderStage(&timing, SenderControl);
@@ -1360,7 +1268,7 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                 [probe pollPCM];
                 RunLoopFor(0);
                 if (probe.closed || probe.failed || probe.inputEnded || owned.socketFD != fd) break;
-                if (continuous && !probe.stopRequested && !finishing && [probe checkDegradation]) break;
+                if (continuous && !probe.stopRequested && !finishing && [probe checkBacklog]) break;
                 double pollAt = MonotonicTime();
                 maximumSchedulerGap = fmax(maximumSchedulerGap, pollAt - lastDrainObservation);
                 double previousPollAt = lastPollAt;
@@ -1423,6 +1331,7 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                 timing = NewSenderTiming();
                 drainedPackets++;
                 drainedSamples = sentSamples;
+                probe.pcmDeadline = PacketDue(started, drainedSamples, profile) + backlogLimit;
                 if (drainedPackets == 1) printf("LIVE_SENT packets=1 rate=%u channels=2 bitrateKbps=%d eqmid=%d\n",
                     profile.sampleRate, packetFormat.bitrateKbps, profile.eqmid);
                 else if (profile.adaptive && packetFormat.frameBytes != transmittedFormat.frameBytes)
@@ -1446,7 +1355,9 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                     intervalService = maximumService = maximumSend = maximumWait = maximumLocalStall = maximumDebt = 0;
                     nextProgress = now + 1;
                 }
-                if (profile.adaptive && !finishing && !probe.stopRequested) {
+                if (probe.pendingQuality && !finishing && !probe.stopRequested)
+                    ApplyLiveQuality(probe, &profile, &adaptivePolicy, &adaptiveEnabled);
+                if (adaptiveEnabled && !finishing && !probe.stopRequested) {
                     int priority = LDACAdaptivePolicyObserve(&adaptivePolicy, ldacBT_get_eqmid(probe.encoder),
                         (double)packetSamples / profile.sampleRate, now - beforeSend, maximumSchedulerGap,
                         lateness, adaptiveSourceReady && adaptiveSkippedBytes == probe.pcmSkippedBytes);

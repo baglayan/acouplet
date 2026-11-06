@@ -16,6 +16,7 @@ struct SonySourceTransition: Equatable, Sendable {
     let session: UInt64
     let targetAddress: String?
     let requestedKeeping: Bool?
+    let inventoryInquiryType: UInt8
     private(set) var phase = Phase.queued
     private(set) var failureMessage: String?
     private let initialPayload: [UInt8]
@@ -28,6 +29,7 @@ struct SonySourceTransition: Equatable, Sendable {
         self.session = session
         self.targetAddress = address
         requestedKeeping = nil
+        inventoryInquiryType = model.inventoryInquiryType!
         initialPayload = model.keeping == true ? [0x38, 0x01, 0x01] : selection
     }
 
@@ -37,6 +39,7 @@ struct SonySourceTransition: Equatable, Sendable {
         self.session = session
         targetAddress = keeping ? model.selectedSource?.address : nil
         requestedKeeping = keeping
+        inventoryInquiryType = model.inventoryInquiryType!
         initialPayload = payload
     }
 
@@ -44,7 +47,7 @@ struct SonySourceTransition: Equatable, Sendable {
         switch phase {
         case .queued: initialPayload
         case .queuedSelection: [0x3C, 0x01] + Array(targetAddress!.utf8)
-        case .queuedReadback: [0x36, 0x02]
+        case .queuedReadback: [0x36, inventoryInquiryType]
         default: nil
         }
     }
@@ -55,7 +58,7 @@ struct SonySourceTransition: Equatable, Sendable {
     mutating func validateForTransmission(model: SonyMultipoint, session: UInt64) -> Bool {
         guard session == self.session, let payload = expectedPayload else { return false }
         if phase == .queuedReadback {
-            guard model.supportsInventory else { return fail(String(localized: "Device information is no longer available.")) }
+            guard model.inventoryInquiryType == inventoryInquiryType else { return fail(String(localized: "Device information is no longer available.")) }
             return true
         }
         if let requestedKeeping {
@@ -122,7 +125,7 @@ struct SonySourceTransition: Equatable, Sendable {
                 phase = .queuedReadback
             }
         case .verifying:
-            guard readbackOwned, payload.count >= 2, payload[0] == 0x37, payload[1] == 0x02 else { return false }
+            guard readbackOwned, payload.count >= 2, payload[0] == 0x37, payload[1] == inventoryInquiryType else { return false }
             var received = model
             guard received.update(payload), !received.inventoryIsStale,
                   received.available == true, received.selectedSource?.address == targetAddress else {

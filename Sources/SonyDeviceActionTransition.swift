@@ -14,6 +14,7 @@ struct SonyDeviceActionTransition: Equatable, Sendable {
     let session: UInt64
     let action: SonyPeripheralAction
     let targetAddress: String
+    let inventoryInquiryType: UInt8
     private(set) var phase = Phase.queued
     private(set) var failureMessage: String?
 
@@ -23,12 +24,13 @@ struct SonyDeviceActionTransition: Equatable, Sendable {
         self.session = session
         self.action = action
         self.targetAddress = String(decoding: payload.dropFirst(3), as: UTF8.self)
+        inventoryInquiryType = payload[1]
     }
 
     var expectedPayload: [UInt8]? {
         switch phase {
-        case .queued: [0x3C, 0x02, action.rawValue] + Array(targetAddress.utf8)
-        case .queuedReadback: [0x36, 0x02]
+        case .queued: [0x3C, inventoryInquiryType, action.rawValue] + Array(targetAddress.utf8)
+        case .queuedReadback: [0x36, inventoryInquiryType]
         default: nil
         }
     }
@@ -39,7 +41,7 @@ struct SonyDeviceActionTransition: Equatable, Sendable {
     mutating func validateForTransmission(model: SonyMultipoint, session: UInt64) -> Bool {
         guard session == self.session, let payload = expectedPayload else { return false }
         if phase == .queuedReadback {
-            guard model.supportsInventory else { return fail(String(localized: "Device information is no longer available.")) }
+            guard model.inventoryInquiryType == inventoryInquiryType else { return fail(String(localized: "Device information is no longer available.")) }
         } else {
             guard model.peripheralActionPayload(action, address: targetAddress) == payload else {
                 return fail(String(localized: "The device connection changed or its controls are no longer available."))
@@ -63,7 +65,7 @@ struct SonyDeviceActionTransition: Equatable, Sendable {
     mutating func receive(_ payload: [UInt8], model: SonyMultipoint, session: UInt64, readbackOwned: Bool = false) -> Bool {
         guard session == self.session, !isFinished else { return false }
         if phase == .awaitingResult || phase == .queuedReadback || phase == .verifying,
-           payload.prefix(2) == [0x3D, 0x02] {
+           payload.prefix(2) == [0x3D, inventoryInquiryType] {
             guard payload.count == 21 else { return false }
             var received = model
             guard received.update(payload), let result = received.lastPeripheralResult,
@@ -87,7 +89,7 @@ struct SonyDeviceActionTransition: Equatable, Sendable {
             }
             return true
         }
-        guard phase == .verifying, readbackOwned, payload.prefix(2) == [0x37, 0x02] else { return false }
+        guard phase == .verifying, readbackOwned, payload.prefix(2) == [0x37, inventoryInquiryType] else { return false }
         var received = model
         guard received.update(payload), received.canManageDevices,
               let device = received.devices.first(where: { $0.address == targetAddress }),
@@ -97,6 +99,11 @@ struct SonyDeviceActionTransition: Equatable, Sendable {
         }
         phase = .complete
         return true
+    }
+
+    mutating func inventoryReadFailed() {
+        guard phase == .queued else { return }
+        fail(String(localized: "The device list was not received. Reconnect the headphones to try again."))
     }
 
     @discardableResult

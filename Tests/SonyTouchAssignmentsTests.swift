@@ -459,7 +459,10 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
         XCTAssertNil(initial.touchAssignments.keys)
         XCTAssertNil(initial.touchAssignments.statuses)
         XCTAssertNil(initial.touchAssignments.selectedPresets)
-        for reply in replies { deliver(reply, to: initial) }
+        for reply in replies {
+            deliver(reply, to: initial)
+            acknowledgeAll(initial)
+        }
         XCTAssertTrue(initial.canSetTouchAssignment(key: 0))
         deliver(syntheticLegacyTouchCapability(keys: [1, 0]), to: initial)
         XCTAssertEqual(initial.touchAssignments.keys?.map(\.key), [0, 1])
@@ -478,6 +481,14 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
                 for _ in 0..<4 { await Task.yield() }
                 XCTAssertTrue(controller.isReady)
                 acknowledgeAll(controller)
+                if testCase.query[0] != 0xF0 {
+                    deliver(syntheticLegacyTouchCapability(), to: controller)
+                    acknowledgeAll(controller)
+                }
+                if testCase.query[0] == 0xF6 {
+                    deliver([0xF3, 6, 2, 0, 0], to: controller)
+                    acknowledgeAll(controller)
+                }
                 XCTAssertTrue(payloads(controller).contains(testCase.query))
                 if !reply.isEmpty { deliver(reply, to: controller) }
                 let session = controller.simulatedControlSession
@@ -654,12 +665,15 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
         deliver(Array(syntheticTouchCustomizationCapability().dropLast()), to: controller)
         XCTAssertNil(controller.touchAssignments.keys)
         deliver(syntheticTouchCustomizationCapability(), to: controller)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF2, 3])
+        acknowledgeAll(controller)
+        deliver([0xF3, 3, 2, 0, 0], to: controller)
+        acknowledgeAll(controller)
+        deliver([0xF7, 3, 2, 0x35, 0x20], to: controller)
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xFA, 3])
         deliver(Array(extended().dropLast()), to: controller)
         XCTAssertNil(controller.touchAssignments.customizedActions)
         deliver(extended(), to: controller)
-        deliver([0xF3, 3, 2, 0, 0], to: controller)
-        deliver([0xF7, 3, 2, 0x35, 0x20], to: controller)
         acknowledgeAll(controller)
         XCTAssertTrue(controller.canSetTouchAction(key: 0, action: 0))
         deliver(extended(function: 4), to: controller)
@@ -677,8 +691,11 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
             deliver(unknownUnrelated, to: sparse)
             acknowledgeAll(sparse)
             deliver([0xF3, 3, 2, 0, 0], to: sparse)
+            acknowledgeAll(sparse)
             deliver([0xF7, 3, 2, 0x35, 0x20], to: sparse)
+            acknowledgeAll(sparse)
             deliver(extended(), to: sparse)
+            acknowledgeAll(sparse)
             XCTAssertTrue(sparse.canSetTouchAction(key: 0, action: 0))
             XCTAssertFalse(sparse.canSetTouchAssignment(key: 0))
             sparse.simulateTouchReadTimeout([0xF0, 3])
@@ -860,8 +877,16 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
             for _ in 0..<4 { await Task.yield() }
             XCTAssertTrue(controller.isReady)
             acknowledgeAll(controller)
-            if query[0] == 0xFA {
+            if query[0] != 0xF0 {
                 deliver(syntheticTouchCustomizationCapability(), to: controller)
+                acknowledgeAll(controller)
+            }
+            if [0xF6, 0xFA].contains(query[0]) {
+                deliver([0xF3, 3, 2, 0, 0], to: controller)
+                acknowledgeAll(controller)
+            }
+            if query[0] == 0xFA {
+                deliver([0xF7, 3, 2, 0x35, 0x20], to: controller)
                 acknowledgeAll(controller)
             }
             XCTAssertTrue(payloads(controller).contains(query))
@@ -943,8 +968,11 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
         let controller = beginLegacyDiscovery()
         acknowledgeAll(controller)
         deliver(syntheticLegacyTouchCapability(keys: singleButton ? [2] : [0, 1], keyType: singleButton ? 1 : 0), to: controller)
+        acknowledgeAll(controller)
         deliver(singleButton ? [0xF3, 6, 1, 0] : [0xF3, 6, 2, 0, 0], to: controller)
+        acknowledgeAll(controller)
         deliver(singleButton ? [0xF7, 6, 1, 0] : [0xF7, 6, 2, 0, 0x20], to: controller)
+        acknowledgeAll(controller)
         XCTAssertTrue(controller.canSetTouchAssignment(key: singleButton ? 2 : 0))
         return controller
     }
@@ -957,7 +985,9 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
         deliver([7, 0, 2, 0x6B, 1, 0xF3, 1], to: controller)
         acknowledgeAll(controller)
         deliver([0x61, 0x17, 1, 0, 1, 20, 1], to: controller)
+        acknowledgeAll(controller)
         deliver([0x63, 0x17, 0], to: controller)
+        acknowledgeAll(controller)
         deliver([0x67, 0x17, 1, 1, 1, 0, 8], to: controller)
         return controller
     }
@@ -966,10 +996,13 @@ final class SonyTouchCustomizationControllerTests: XCTestCase {
         let controller = beginDiscovery()
         acknowledgeAll(controller)
         deliver(syntheticTouchCustomizationCapability(includeVolumePreset: includeVolumePreset), to: controller)
+        acknowledgeAll(controller)
         deliver([0xF3, 3, 2, 0, 0], to: controller)
+        acknowledgeAll(controller)
         deliver([0xF7, 3, 2, 0x35, 0x20], to: controller)
         acknowledgeAll(controller)
         deliver(extended(), to: controller)
+        acknowledgeAll(controller)
         XCTAssertTrue(controller.canSetTouchAction(key: 0, action: 0))
         return controller
     }

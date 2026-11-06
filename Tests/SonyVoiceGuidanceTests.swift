@@ -703,6 +703,7 @@ final class SonyVoiceGuidanceTests: XCTestCase {
         for payload: [UInt8] in [[0x05, 2, 5] + Array("1.0.0".utf8), [0xE1, 5, 3, 0, 1, 2, 1, 0],
                                  [0xE3, 5, 0, 0], [0xE7, 5, mode]] {
             controller.simulateProtocolMessage(payload)
+            acknowledgeSimulatedCommands(controller)
         }
         controller.simulateProtocolMessage([0x07, 0, 1, 0x42, 1], type: 0x0E)
         acknowledgeSimulatedCommands(controller)

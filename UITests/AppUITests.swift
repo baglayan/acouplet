@@ -559,8 +559,22 @@ final class AppUITests: XCTestCase {
         let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == 0"), object: care)
         XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 3), .completed)
         XCTAssertTrue(window.staticTexts["85%"].exists)
+        for identifier in ["power.powerSavingMode", "power.bluetoothStandby", "power.autoStandby"] {
+            let control = window.descendants(matching: .any)[identifier]
+            XCTAssertTrue(control.waitForExistence(timeout: 3))
+            for _ in 0..<6 where !control.isHittable { scroll.scroll(byDeltaX: 0, deltaY: -200) }
+            XCTAssertTrue(control.isEnabled)
+            XCTAssertEqual((control.value as? NSNumber)?.intValue, 0)
+            control.click()
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == 1"), object: control
+            )], timeout: 3), .completed)
+        }
+        for text in ["15 minutes", "While the headphones are in use, charging stops at about 80%"] {
+            XCTAssertTrue(window.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)).firstMatch.exists)
+        }
         let screenshot = XCTAttachment(screenshot: window.screenshot())
-        screenshot.name = "Battery Care and Auto Power Save — simulated device"
+        screenshot.name = "Power and Battery — simulated device"
         screenshot.lifetime = .keepAlways
         add(screenshot)
     }
@@ -1465,6 +1479,36 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testCatalogArtworkHeaders() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for (model, color, state) in [("wfC510", "5", ""), ("whXB900N", "5", ""),
+                                      ("wfXM5", "6", ""), ("wfC510", "254", ""),
+                                      ("wfC510", "5", "--left-disconnected")] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", model, "--gallery-color", color,
+                                   "--dark-appearance", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+            if !state.isEmpty { app.launchArguments.append(state) }
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            let artwork = panel.images["device.artwork.\(model)"]
+            XCTAssertTrue(artwork.exists)
+            captureGalleryScreenshot(panel.screenshot(), named: "Catalog artwork — \(model), color \(color), \(state)")
+            XCTAssertTrue(panel.frame.contains(artwork.frame), "Window \(panel.frame), artwork \(artwork.frame)")
+            if !state.isEmpty {
+                XCTAssertEqual(artwork.value as? String, "Left: Disconnected, Right: Connected")
+            }
+            if model.hasPrefix("wf") {
+                let chargingCase = panel.images["device.artwork.case"]
+                XCTAssertTrue(chargingCase.exists)
+                XCTAssertTrue(panel.frame.contains(chargingCase.frame))
+                XCTAssertFalse(artwork.frame.intersects(chargingCase.frame))
+            }
+            app.terminate()
+        }
+    }
+
+    @MainActor
     func testIndependentEarbudAppearance() {
         let app = XCUIApplication()
         defer { app.terminate() }
@@ -1901,6 +1945,8 @@ final class AppUITests: XCTestCase {
         let editor = app.windows["Equalizer"]
         XCTAssertTrue(editor.waitForExistence(timeout: 3))
         XCTAssertEqual(editor.sliders.count, 10)
+        XCTAssertEqual(editor.frame.width, 720, accuracy: 2)
+        XCTAssertFalse(editor.scrollBars.allElementsBoundByIndex.contains { $0.frame.width > $0.frame.height })
         XCTAssertFalse(editor.sliders["Clear Bass"].exists)
         let labels = ["31 Hz", "63 Hz", "125 Hz", "250 Hz", "500 Hz", "1 kHz", "2 kHz", "4 kHz", "8 kHz", "16 kHz"]
         for (index, label) in labels.enumerated() {
@@ -1915,6 +1961,77 @@ final class AppUITests: XCTestCase {
         XCTAssertTrue(editor.staticTexts["Applied to headphones."].waitForExistence(timeout: 4))
         let shot = XCTAttachment(screenshot: editor.screenshot())
         shot.name = "Ten-band native equalizer"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    @MainActor
+    func testAdvertisedEqualizerLayoutExpandsAndPreservesEvenStepEndpoints() throws {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--wide-equalizer", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["WF-1000XM5"].waitForExistence(timeout: 5))
+        app.menuButtons["More"].click()
+        app.menuItems["Custom Equalizer…"].click()
+        let editor = app.windows["Equalizer"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 3))
+        XCTAssertEqual(editor.sliders.count, 16)
+        XCTAssertGreaterThan(editor.frame.width, 720)
+        let screen = try XCTUnwrap(NSScreen.main)
+        XCTAssertEqual(editor.frame.midX, screen.visibleFrame.midX, accuracy: 2)
+        XCTAssertEqual(editor.frame.midY, NSScreen.screens[0].frame.maxY - screen.visibleFrame.midY, accuracy: 2)
+        XCTAssertFalse(editor.scrollViews["equalizer.bands"].exists)
+        XCTAssertFalse(editor.scrollBars.allElementsBoundByIndex.contains { $0.frame.width > $0.frame.height })
+        for fader in editor.sliders.allElementsBoundByIndex {
+            XCTAssertTrue(fader.isHittable)
+            XCTAssertTrue(editor.frame.contains(fader.frame))
+        }
+        let first = editor.sliders["25 Hz"]
+        let last = editor.sliders["20 kHz"]
+        XCTAssertTrue(first.isHittable)
+        first.adjust(toNormalizedSliderPosition: 0)
+        XCTAssertEqual((first.value as? NSNumber)?.intValue, -5)
+        XCTAssertTrue(last.isHittable)
+        last.adjust(toNormalizedSliderPosition: 1)
+        XCTAssertEqual((last.value as? NSNumber)?.intValue, 6)
+        XCTAssertTrue(editor.staticTexts["Applied to headphones."].waitForExistence(timeout: 4))
+        let shot = XCTAttachment(screenshot: editor.screenshot())
+        shot.name = "Sixteen-band equalizer without horizontal scrolling"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    @MainActor
+    func testEqualizerWrapsBandsWithinAvailableScreenWidth() throws {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--wrapped-equalizer", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["WF-1000XM5"].waitForExistence(timeout: 5))
+        app.menuButtons["More"].click()
+        app.menuItems["Custom Equalizer…"].click()
+        let editor = app.windows["Equalizer"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 3))
+        XCTAssertEqual(editor.sliders.count, 32)
+        let screen = try XCTUnwrap(NSScreen.main)
+        XCTAssertLessThanOrEqual(editor.frame.width, screen.visibleFrame.width)
+        XCTAssertGreaterThanOrEqual(editor.frame.minX, screen.visibleFrame.minX)
+        XCTAssertLessThanOrEqual(editor.frame.maxX, screen.visibleFrame.maxX)
+        XCTAssertEqual(editor.frame.midX, screen.visibleFrame.midX, accuracy: 2)
+        XCTAssertEqual(editor.frame.midY, NSScreen.screens[0].frame.maxY - screen.visibleFrame.midY, accuracy: 2)
+        XCTAssertFalse(editor.scrollViews["equalizer.bands"].exists)
+        XCTAssertFalse(editor.scrollBars.allElementsBoundByIndex.contains { $0.frame.width > $0.frame.height })
+        for fader in editor.sliders.allElementsBoundByIndex {
+            XCTAssertTrue(fader.isHittable)
+            XCTAssertGreaterThanOrEqual(fader.frame.minX, editor.frame.minX)
+            XCTAssertLessThanOrEqual(fader.frame.maxX, editor.frame.maxX)
+        }
+        if screen.visibleFrame.width < 2_112 {
+            XCTAssertGreaterThan(editor.sliders.element(boundBy: 31).frame.minY, editor.sliders.element(boundBy: 0).frame.minY)
+        }
+        let shot = XCTAttachment(screenshot: editor.screenshot())
+        shot.name = "Equalizer bands wrap at the screen boundary"
         shot.lifetime = .keepAlways
         add(shot)
     }

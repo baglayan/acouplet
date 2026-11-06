@@ -15,7 +15,7 @@
 #endif
 
 enum { kAcoupletLease = 'xmls', kAcoupletModel = 'xmnm', kAcoupletPriority = 'xmpr', kAcoupletRevision = 'xmvr' };
-static const SInt32 kAcoupletDriverRevision = 9;
+static const SInt32 kAcoupletDriverRevision = 10;
 static UInt64 gLeaseDeadline;
 static pid_t gLeaseOwner;
 static atomic_bool gAvailable;
@@ -73,6 +73,9 @@ static Boolean gPriorityPublicationLost;
 static Boolean gPriorityPublicationWithdrawn;
 static Boolean gPriorityListening;
 static Boolean gPriorityUIDAfterLoss;
+static Boolean gPriorityTargetSeen;
+static Boolean gPriorityTargetWithdrawn;
+static int64_t gPriorityLastTargetType;
 static dispatch_source_t gOwnerWatcher;
 static pid_t gWatchedOwner;
 static UInt64 gOwnerWatchGeneration;
@@ -187,7 +190,8 @@ static Boolean AcoupletPriorityExpire(void) {
     if (!gPriorityDeadline || mach_absolute_time() < gPriorityDeadline) return false;
     if (gPrioritySent) gPriorityPublicationLost = true;
     AcoupletPriorityClose();
-    AcoupletPriorityUncertain(CFSTR("Bluetooth configuration deadline expired."));
+    AcoupletPriorityUncertain(gPrioritySent ? CFSTR("Bluetooth configuration deadline expired.")
+        : CFSTR("No matching priority publication before the deadline."));
     return true;
 }
 
@@ -202,8 +206,10 @@ static void AcoupletPriorityIdle(void) {
     if (gPriorityAddress) CFRelease(gPriorityAddress);
     gPriorityAddress = NULL;
     gPriorityOwner = 0;
+    gPriorityPhase = CFSTR("idle");
+    gPriorityError = NULL;
     pthread_mutex_unlock(&gPlugIn_StateMutex);
-    AcoupletPriorityPhase(CFSTR("idle"), NULL);
+    AcoupletPriorityChanged();
 }
 
 #ifdef ACOUPLET_PRIORITY_CHECK
@@ -301,6 +307,9 @@ static void AcoupletPriorityEvent(xpc_object_t event) {
     Boolean current = uid && gPriorityUID && !strcmp(uid, gPriorityUID);
     Boolean retired = uid && gPriorityRetiredUID && !strcmp(uid, gPriorityRetiredUID);
     if (identifier == 4 && (current || retired)) {
+        pthread_mutex_lock(&gPlugIn_StateMutex);
+        gPriorityTargetWithdrawn = true;
+        pthread_mutex_unlock(&gPlugIn_StateMutex);
         Boolean confirmed = retired || !gPriorityPublicationLost || gPriorityUIDAfterLoss;
         free(gPriorityUID);
         gPriorityUID = NULL;
@@ -313,11 +322,11 @@ static void AcoupletPriorityEvent(xpc_object_t event) {
             if (gPriorityDisconnected && confirmed) AcoupletPriorityIdle();
             else AcoupletPriorityUncertain(CFSTR("Target publication was withdrawn; cleanup is uncertain."));
         }
+        AcoupletPriorityChanged();
         return;
     }
     xpc_object_t args = xpc_dictionary_get_value(event, "kBTAudioMsgArgs");
-    if (identifier != 2 || !uid || !args || xpc_get_type(args) != XPC_TYPE_DICTIONARY ||
-        xpc_dictionary_get_int64(args, "kBTAudioMsgArgDeviceType") != 1952538980) return;
+    if (identifier != 2 || !uid || !args || xpc_get_type(args) != XPC_TYPE_DICTIONARY) return;
     xpc_object_t properties = xpc_dictionary_get_value(args, "kBTAudioMsgArgDeviceProperties");
     const char *address = properties && xpc_get_type(properties) == XPC_TYPE_DICTIONARY
         ? xpc_dictionary_get_string(properties, "kBTAudioMsgPropertyDeviceAddress") : NULL;
@@ -328,6 +337,11 @@ static void AcoupletPriorityEvent(xpc_object_t event) {
     Boolean matches = normalized && CFEqual(normalized, gPriorityAddress);
     if (normalized) CFRelease(normalized);
     if (!matches) return;
+    int64_t type = xpc_dictionary_get_int64(args, "kBTAudioMsgArgDeviceType");
+    pthread_mutex_lock(&gPlugIn_StateMutex);
+    gPriorityLastTargetType = type;
+    pthread_mutex_unlock(&gPlugIn_StateMutex);
+    if (type != 1952538980) { AcoupletPriorityChanged(); return; }
     if (gPriorityUID) {
         if (strcmp(gPriorityUID, uid)) {
             if (gPrioritySent) {
@@ -345,6 +359,10 @@ static void AcoupletPriorityEvent(xpc_object_t event) {
         AcoupletPriorityUncertain(CFSTR("Unable to retain the target audio publication."));
         return;
     }
+    pthread_mutex_lock(&gPlugIn_StateMutex);
+    gPriorityTargetSeen = true;
+    pthread_mutex_unlock(&gPlugIn_StateMutex);
+    AcoupletPriorityChanged();
     free(gPriorityRetiredUID);
     gPriorityRetiredUID = NULL;
     gPriorityPublicationWithdrawn = false;
@@ -872,6 +890,13 @@ static OSStatus AcoupletGetData(AudioServerPlugInDriverRef driver, AudioObjectID
                     if (gPriorityAddress) CFDictionarySetValue(result, CFSTR("address"), gPriorityAddress);
                     if (gPriorityError) CFDictionarySetValue(result, CFSTR("error"), gPriorityError);
                     CFDictionarySetValue(result, CFSTR("prioritySent"), gPrioritySent ? kCFBooleanTrue : kCFBooleanFalse);
+                    CFDictionarySetValue(result, CFSTR("targetPublicationSeen"), gPriorityTargetSeen ? kCFBooleanTrue : kCFBooleanFalse);
+                    CFDictionarySetValue(result, CFSTR("targetPublicationWithdrawn"), gPriorityTargetWithdrawn ? kCFBooleanTrue : kCFBooleanFalse);
+                    if (gPriorityLastTargetType) {
+                        CFNumberRef type = CFNumberCreate(NULL, kCFNumberSInt64Type, &gPriorityLastTargetType);
+                        CFDictionarySetValue(result, CFSTR("lastTargetDeviceType"), type);
+                        CFRelease(type);
+                    }
                 }
                 pthread_mutex_unlock(&gPlugIn_StateMutex);
                 *(CFPropertyListRef *)data = result;
@@ -993,12 +1018,15 @@ static OSStatus AcoupletSetPriority(pid_t client, CFPropertyListRef value) {
     CFTypeRef enabled = CFDictionaryGetValue(request, CFSTR("enabled"));
     CFTypeRef disconnected = CFDictionaryGetValue(request, CFSTR("disconnected"));
     CFTypeRef prepare = CFDictionaryGetValue(request, CFSTR("prepare"));
+    CFTypeRef ifAvailable = CFDictionaryGetValue(request, CFSTR("ifAvailable"));
     CFStringRef address = AcoupletPriorityNormalize(CFDictionaryGetValue(request, CFSTR("address")));
     if (!address || !enabled || CFGetTypeID(enabled) != CFBooleanGetTypeID() ||
-        CFDictionaryGetCount(request) != (disconnected || prepare ? 3 : 2) ||
+        CFDictionaryGetCount(request) != (disconnected || prepare || ifAvailable ? 3 : 2) ||
         (disconnected && (CFGetTypeID(disconnected) != CFBooleanGetTypeID() || CFBooleanGetValue(enabled))) ||
         (prepare && (CFGetTypeID(prepare) != CFBooleanGetTypeID() || !CFBooleanGetValue(prepare) ||
-            CFBooleanGetValue(enabled) || disconnected))) {
+            CFBooleanGetValue(enabled) || disconnected)) ||
+        (ifAvailable && (CFGetTypeID(ifAvailable) != CFBooleanGetTypeID() || !CFBooleanGetValue(ifAvailable) ||
+            !CFBooleanGetValue(enabled) || disconnected || prepare))) {
         if (address) CFRelease(address);
         return kAudioHardwareIllegalOperationError;
     }
@@ -1027,6 +1055,9 @@ static OSStatus AcoupletSetPriority(pid_t client, CFPropertyListRef value) {
             gPriorityOwner = client;
             gPriorityPhase = observe ? CFSTR("observing") : CFSTR("configuring");
             gPriorityError = NULL;
+            gPriorityTargetSeen = false;
+            gPriorityTargetWithdrawn = false;
+            gPriorityLastTargetType = 0;
         }
         pthread_mutex_unlock(&gPlugIn_StateMutex);
         if (status) return;
@@ -1034,6 +1065,7 @@ static OSStatus AcoupletSetPriority(pid_t client, CFPropertyListRef value) {
             if (!repeat) { AcoupletPriorityChanged(); AcoupletPriorityStart(); }
         } else if (enable) {
             if (!gPriorityEnabling) {
+                if (ifAvailable && !gPriorityUID) { AcoupletPriorityIdle(); return; }
                 gPriorityEnabling = true;
                 gPriorityDeadline = mach_absolute_time() + (UInt64)(gTicksPerSecond * 40);
                 AcoupletPriorityPhase(CFSTR("configuring"), NULL);

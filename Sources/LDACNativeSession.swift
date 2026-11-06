@@ -85,9 +85,12 @@ struct LDACPriorityControl: Sendable {
         let phase: String
         let error: String?
         var prioritySent: Bool? = nil
+        var targetPublicationSeen: Bool? = nil
+        var targetPublicationWithdrawn: Bool? = nil
+        var lastTargetDeviceType: Int64? = nil
 
         var diagnosticDescription: String {
-            "phase=\(phase); priority-sent=\(prioritySent.map { String($0) } ?? "unknown"); error=\(error ?? "none")"
+            "phase=\(phase); priority-sent=\(prioritySent.map { String($0) } ?? "unknown"); seen=\(targetPublicationSeen.map { String($0) } ?? "unknown"); withdrawn=\(targetPublicationWithdrawn.map { String($0) } ?? "unknown"); type=\(lastTargetDeviceType.map { "0x" + String($0, radix: 16) } ?? "unknown"); error=\(error ?? "none")"
         }
     }
 
@@ -182,6 +185,8 @@ final class LDACNativeSession: @unchecked Sendable {
     private var handoffRequested = false
     private var restoreAudio = true
     private var requestedGain: Double?
+    private var requestedQuality: LDACQuality?
+    private var qualityChanged = false
     private var gain: Double
     private var children: [String: LDACNativeChild] = [:]
     private var signalingGate = LDACChannelGate()
@@ -299,6 +304,10 @@ final class LDACNativeSession: @unchecked Sendable {
         lock.unlock()
     }
 
+    func updateQuality(_ quality: LDACQuality) {
+        lock.withLock { requestedQuality = quality }
+    }
+
     func updateGain(_ gain: Double) {
         lock.lock()
         requestedGain = gain
@@ -313,7 +322,9 @@ final class LDACNativeSession: @unchecked Sendable {
         stop()
     }
 
-    func simulateDiagnosticHelperFailure(_ line: String, source: String = "probe", stopping: Bool = false) {
+    func simulateDiagnosticHelperFailure(_ line: String, source: String = "probe", stopping: Bool = false,
+                                         previousStage: String = "startup") {
+        diagnosticStage = previousStage
         if stopping { stop() }
         do { try handle(source, line: line) }
         catch { fail(error.localizedDescription) }
@@ -471,8 +482,9 @@ final class LDACNativeSession: @unchecked Sendable {
         }
         if source == "probe" || source == "media" {
             if line.contains("UNCONFIRMED") || line.contains("INDETERMINATE") || line.hasPrefix("OWNED_CALLBACKS_LOST ") {
+                diagnose(Self.helperFailureSummary(line), stage: source, isFailure: !shouldStop)
                 unverifiedAcquisitions.insert(source)
-                fail("The \(source) helper could not confirm its owned Bluetooth channel state.")
+                fail("The \(source) helper could not confirm its owned Bluetooth channel state.", stage: source)
             }
             if source == "probe" { try signalingGate.owned(line) }
             else { try mediaGate.owned(line) }
@@ -501,6 +513,15 @@ final class LDACNativeSession: @unchecked Sendable {
                 }
             }
         } else if source == "connector" {
+            if ["CONNECT_RETURN ", "CONNECTION_CALLBACK ", "ACL_OBSERVATION_FAILED ", "NATIVE_AUDIO_UNCONFIRMED ",
+                "CONNECT_CANCEL_CLOSE ", "CONNECT_CANCELED ", "CONNECT_CANCELLATION_UNCONFIRMED ",
+                "CONNECT_TERMINAL_UNCONFIRMED ", "CONNECT_LOCK_UNAVAILABLE ", "AFTER "].contains(where: line.hasPrefix) {
+                let summary = Self.helperFailureSummary(line)
+                let failed = ["ACL_OBSERVATION_FAILED ", "NATIVE_AUDIO_UNCONFIRMED ", "CONNECT_CANCELLATION_UNCONFIRMED ",
+                              "CONNECT_TERMINAL_UNCONFIRMED "].contains(where: line.hasPrefix) || summary == "CONNECT_LOCK_UNAVAILABLE canceled=0"
+                let status = LDACChannelGate.captures("(?:^| )status=0x([0-9a-f]{8})(?: |$)", line)?.first.flatMap { UInt32($0, radix: 16) }
+                diagnose(summary, stage: source, isFailure: (failed || status.map { $0 != 0 } == true) && !shouldStop)
+            }
             if line.hasPrefix("ACL_CONNECTED "), !shouldStop {
                 let now = clock_gettime_nsec_np(CLOCK_MONOTONIC)
                 guard let armed = signalingArmed, !connected,
@@ -545,7 +566,7 @@ final class LDACNativeSession: @unchecked Sendable {
             }
             if line.hasPrefix("CONNECT_CANCELLATION_UNCONFIRMED ") || line.hasPrefix("CONNECT_TERMINAL_UNCONFIRMED ") {
                 connectorSettlementUnverified = true
-                fail("The pending Bluetooth connection could not be confirmed stopped.")
+                fail("The pending Bluetooth connection could not be confirmed stopped.", stage: source)
             }
         } else if source == "restore-disconnect" {
             if LDACChannelGate.captures("^BEFORE time=[0-9.]+ address=\(LDACChannelGate.addressPattern(address.replacingOccurrences(of: ":", with: "-"))) paired=[01] connected=(0)$", line) != nil {
@@ -567,6 +588,7 @@ final class LDACNativeSession: @unchecked Sendable {
                     throw LDACSessionError("The signaling helper reported invalid or repeated readiness.")
                 }
                 signalingArmed = armed
+                try checkPriorityPreparation(stage: "priority before disconnect")
                 try launch("disconnect", executable: helpers.connection, arguments: ["--address", address, "--disconnect"])
                 deadline = DispatchTime.now() + 45
             } else if line == "LDAC_UNAVAILABLE rate=\(configuration.sampleRate.rawValue) channels=2" && !shouldStop {
@@ -640,7 +662,7 @@ final class LDACNativeSession: @unchecked Sendable {
             } else if line.hasPrefix("LIVE_FORMAT ") {
                 let rate = configuration.sampleRate.rawValue
                 let frameSamples = rate > 48000 ? 256 : 128
-                guard configuration.quality == .adaptive, active,
+                guard active, configuration.quality == .adaptive || qualityChanged,
                       let values = LDACChannelGate.captures("^LIVE_FORMAT rate=\(rate) channels=2 bitrateKbps=([0-9]+) frameBytes=([0-9]+)$", line),
                       let bitrate = Int(values[0]), let frameBytes = Int(values[1]),
                       (49...330).contains(frameBytes), bitrate == frameBytes * 8 * rate / frameSamples / 1000 else {
@@ -757,6 +779,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 return
             }
             preflightCompleted = true
+            try checkPriorityPreparation(stage: "priority before handoff")
             diagnose("audio permission verified", stage: "handoff")
             emit(.audioCaptureAccess(.ready))
             deadline = DispatchTime.now() + 10
@@ -818,15 +841,20 @@ final class LDACNativeSession: @unchecked Sendable {
                 if let priority {
                     let state = try priority.state()
                     if state.error != nil { throw LDACSessionError(state.diagnosticDescription) }
-                    guard state.phase == "configuring" || state.phase == "configured" else {
+                    guard state.phase == "configuring" || state.phase == "configured" ||
+                            state.phase == "idle" && state.prioritySent == false else {
                         throw LDACSessionError("Bluetooth could not configure LDAC playback priority. Try LDAC again.")
                     }
                     if state.phase == "configured" {
                         priorityPhase = .configured
                         record("PRIORITY_CONFIGURATION_ATTEMPT_COMPLETED controllerAcknowledgment=0")
+                    } else if state.phase == "idle" {
+                        priorityPhase = .removed
+                        record("PRIORITY_CONFIGURATION_SKIPPED unavailable=1 prioritySent=0")
+                        diagnose("Bluetooth playback hint unavailable; skipped without sending.", stage: "priority")
                     }
                 }
-                if priority == nil || priorityPhase == .configured {
+                if priority == nil || priorityPhase == .configured || priorityPhase == .removed {
                     started = true
                     try send("media", "start live \(gain) 0")
                     deadline = DispatchTime.now() + 10
@@ -839,7 +867,13 @@ final class LDACNativeSession: @unchecked Sendable {
         lock.lock()
         let changedGain = requestedGain
         requestedGain = nil
+        let changedQuality = requestedQuality
+        requestedQuality = nil
         lock.unlock()
+        if let changedQuality, active, !shouldStop {
+            qualityChanged = true
+            try send("media", "quality \(changedQuality.rawValue)")
+        }
         if let changedGain {
             gain = changedGain
             if started && !shouldStop { try send("media", "gain \(gain)") }
@@ -957,6 +991,15 @@ final class LDACNativeSession: @unchecked Sendable {
         !restoring && shouldStop && priorityCanClose && ["preflight", "disconnect", "connector", "probe", "media", "capture"].allSatisfy {
             children[$0] == nil || children[$0]?.finished == true
         }
+    }
+
+    private func checkPriorityPreparation(stage: String) throws {
+        guard let priority else { return }
+        let state = try priority.state()
+        guard state.error == nil && state.phase != "preparation-failed" && state.phase != "cleanup-required" else {
+            throw LDACSessionError(state.diagnosticDescription)
+        }
+        diagnose(state.diagnosticDescription, stage: stage)
     }
 
     private var priorityCanClose: Bool {
@@ -1089,13 +1132,13 @@ final class LDACNativeSession: @unchecked Sendable {
             : String(localized: "LDAC could not start. Try again.")
     }
 
-    private func fail(_ message: String, userMessage: String? = nil) {
+    private func fail(_ message: String, userMessage: String? = nil, stage: String? = nil) {
         hardFailure = true
         if attentionFailure == nil {
             attentionFailure = message
             let description = userMessage ?? failureDescription
             publicFailureMessage = description
-            diagnose(message, isFailure: true)
+            diagnose(message, stage: stage, isFailure: true)
             record("FAILED \(message)")
             emit(.failed(description))
         }
@@ -1251,20 +1294,48 @@ final class LDACNativeSession: @unchecked Sendable {
         }
     }
 
-    private static func helperFailureSummary(_ line: String) -> String {
+    static func helperFailureSummary(_ line: String) -> String {
         let kind = line.split(separator: " ", maxSplits: 1).first.map(String.init) ?? "failure"
+        guard ["NO_OPEN", "NO_PLAYBACK", "CONTROL_FAILED", "PCM_FAILED", "ENCODER_FAILED", "AUDIO_PERMISSION_FAILED",
+               "PEER_COMMAND_UNSUPPORTED", "OPEN_INDETERMINATE", "TRANSPORT_CLOSE_UNCONFIRMED", "OWNED_CALLBACKS_LOST",
+               "OPEN_CLEANUP_UNCONFIRMED", "MEDIA_CLOSE_UNCONFIRMED", "OWNED_CLOSE_UNCONFIRMED", "CONNECT_RETURN",
+               "CONNECTION_CALLBACK", "ACL_OBSERVATION_FAILED", "NATIVE_AUDIO_UNCONFIRMED", "CONNECT_CANCEL_CLOSE",
+               "CONNECT_CANCELED", "CONNECT_CANCELLATION_UNCONFIRMED", "CONNECT_TERMINAL_UNCONFIRMED",
+               "CONNECT_LOCK_UNAVAILABLE", "AFTER"].contains(kind) else { return "Unrecognized helper event" }
         var fields = [kind]
-        for key in ["status", "code", "errno", "openError", "closed", "error"] {
-            if let value = LDACChannelGate.captures("(?:^| )\(key)=(-?[0-9]+)(?: |$)", line)?.first {
+        if let value = LDACChannelGate.captures("(?:^| )status=(0x[0-9a-f]{8}|-?[0-9]{1,20})(?: |$)", line)?.first {
+            fields.append("status=\(value)")
+        }
+        for key in ["code", "errno", "openError", "closed", "error", "callback_status"] {
+            if let value = LDACChannelGate.captures("(?:^| )\(key)=(-?[0-9]{1,20})(?: |$)", line)?.first {
                 fields.append("\(key)=\(value)")
             }
         }
-        if let reason = LDACChannelGate.captures("(?:^| )reason=([a-z-]+)(?: |$)", line)?.first,
+        for key in ["nil_channel", "pending", "indeterminate", "closeRequested", "parentEOF", "deadline",
+                    "openPending", "openIndeterminate", "inputEOF", "callback", "connected", "disconnected",
+                    "issued", "settled", "originalDisconnected", "retired", "canceled"] {
+            if let value = LDACChannelGate.captures("(?:^| )\(key)=([01])(?: |$)", line)?.first {
+                fields.append("\(key)=\(value)")
+            }
+        }
+        if LDACChannelGate.captures("(?:^| )cleanup=(unconfirmed)(?: |$)", line) != nil {
+            fields.append("cleanup=unconfirmed")
+        }
+        if let reason = LDACChannelGate.captures("(?:^| )reason=([a-z_-]+)(?: |$)", line)?.first,
            ["nonfinite", "encoder-reset", "encoder-init", "allocation", "ring-overflow", "persistent-degradation",
             "discard-counter-overflow", "packet-boundary", "sample-counter-overflow", "flush-limit",
-            "flush-padding", "adaptive-quality", "invalid-read-pipe", "read", "partial-frame",
+            "flush-padding", "adaptive-quality", "manual-quality", "invalid-read-pipe", "read", "partial-frame",
             "classic-manager-unavailable", "classic-authorization-denied", "classic-initialization-incomplete",
-            "classic-target-unavailable"].contains(reason) {
+            "classic-target-unavailable", "target_not_paired", "classic_manager_interface_unavailable",
+            "classic_manager_not_ready", "classic_peer_interface_unavailable", "unexpected_peer_refresh_abi",
+            "classic_peer_not_owned", "missing_or_invalid_fresh_acl_trigger", "canceled_or_owner_unavailable",
+            "owned_peer_refresh_owner_mismatch", "owned_peer_refresh_invalid_reply", "owned_peer_refresh_not_connected",
+            "owned_peer_refresh_update_failed", "unexpected-peer-refresh-interface", "owned-peer-refresh-owner-mismatch",
+            "owned-peer-refresh-invalid-reply", "owned-peer-refresh-not-connected", "owned-peer-refresh-update-failed",
+            "nil-channel-zero-status", "peer-selector", "query-selector", "reply-shape", "query-result",
+            "state-shape", "state-value", "baseline-connected", "baseline-native-output-present",
+            "original-connection-ended", "epoch-retired", "callback-without-fresh-acl", "output-inspection",
+            "baseline-output-inspection"].contains(reason) {
             fields.append("reason=\(reason)")
         }
         return fields.joined(separator: " ")

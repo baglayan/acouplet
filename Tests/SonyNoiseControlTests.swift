@@ -184,6 +184,180 @@ final class SonyNoiseControlTests: XCTestCase {
         XCTAssertFalse(model.canSet)
     }
 
+    func testModernVariantsUseTheirOwnTupleAndAdvertisedAmbientCapabilities() {
+        let fixtures: [(UInt8, [UInt8], [UInt8], [UInt8], [UInt8]?)] = [
+            (0x01, [0x61, 0x01], [0x67, 0x01, 1, 1, 1], [0x68, 0x01, 1, 1, 1], nil),
+            (0x11, [0x61, 0x11, 2, 0, 1], [0x67, 0x11, 1, 1, 0, 1, 1],
+             [0x68, 0x11, 1, 1, 1, 1, 0], [0x68, 0x11, 1, 1, 0, 1, 1]),
+            (0x12, [0x61, 0x12, 2, 0, 1], [0x67, 0x12, 1, 1, 0, 1, 1],
+             [0x68, 0x12, 1, 1, 2, 1, 0], [0x68, 0x12, 1, 1, 0, 1, 1]),
+            (0x13, [0x61, 0x13, 1, 0, 1, 20, 1], [0x67, 0x13, 1, 1, 0, 0, 9],
+             [0x68, 0x13, 1, 1, 1, 0, 0], [0x68, 0x13, 1, 1, 0, 0, 9]),
+            (0x14, [0x61, 0x14, 1, 0, 1, 20, 1], [0x67, 0x14, 1, 1, 0, 0, 9],
+             [0x68, 0x14, 1, 1, 2, 0, 0], [0x68, 0x14, 1, 1, 0, 0, 9]),
+            (0x16, [0x61, 0x16, 1, 0, 1, 20, 1], [0x67, 0x16, 1, 1, 1, 1, 0, 9],
+             [0x68, 0x16, 1, 1, 0, 2, 0, 9], [0x68, 0x16, 1, 1, 1, 1, 0, 9]),
+            (0x18, [0x61, 0x18, 1, 0, 1, 20, 1], [0x67, 0x18, 1, 1, 1, 0, 9],
+             [0x68, 0x18, 1, 1, 0, 0, 9], [0x68, 0x18, 1, 1, 1, 0, 9]),
+        ]
+        for (inquiry, capability, state, anc, ambient) in fixtures {
+            var model = SonyNoiseControl(inquiryType: inquiry)
+            XCTAssertEqual(model.queryPayloads, [[0x60, inquiry], [0x62, inquiry], [0x66, inquiry]])
+            XCTAssertTrue(model.update(capability))
+            XCTAssertTrue(model.update(state))
+            XCTAssertFalse(model.canSet)
+            XCTAssertTrue(model.update([0x63, inquiry, 0]))
+            XCTAssertTrue(model.canSet, "\(inquiry)")
+            XCTAssertEqual(model.setPayload(), [0x68] + state.dropFirst())
+            XCTAssertEqual(model.setPayload(mode: .anc), anc)
+            XCTAssertEqual(model.setPayload(mode: .ambient), ambient)
+            var off = state
+            off[0] = 0x68
+            off[3] = 0
+            if inquiry == 0x01 { off[4] = 0 }
+            XCTAssertEqual(model.setPayload(mode: .off), off)
+            XCTAssertTrue(model.update([0x65, inquiry, 1]))
+            XCTAssertFalse(model.canSet)
+        }
+        XCTAssertNil(SonyNoiseControl.inquiryType(forFunction: 0x69))
+        XCTAssertEqual(SonyNoiseControl.inquiryType(forFunction: 0x6C), 0x18)
+    }
+
+    func testSingleNoiseCancellationAndVoiceSpotlightStayDistinctFromAmbient() throws {
+        for inquiry: UInt8 in [0x12, 0x14, 0x16] {
+            var model = SonyNoiseControl(inquiryType: inquiry)
+            model.update(inquiry == 0x12 ? [0x61, inquiry, 1, 0] : [0x61, inquiry, 1, 0, 1, 20, 1])
+            model.update([0x63, inquiry, 0])
+            model.update(inquiry == 0x16 ? [0x67, inquiry, 1, 1, 0, 2, 0, 9] : [0x67, inquiry, 1, 1, 2, 0, 0])
+            let wind = try XCTUnwrap(model.setPayload(mode: .wind))
+            XCTAssertEqual(wind[inquiry == 0x16 ? 5 : 4], 1)
+            XCTAssertEqual(model.validatedMode(wind), .wind)
+            XCTAssertTrue(model.supportedModes.contains(.wind))
+        }
+        var model = SonyNoiseControl(inquiryType: 0x18)
+        model.update([0x61, 0x18, 1, 0, 1, 20, 1])
+        model.update([0x63, 0x18, 0])
+        model.update([0x67, 0x18, 1, 1, 2, 0, 9])
+        XCTAssertTrue(model.canSet)
+        XCTAssertTrue(model.state?.isNoiseCancellingSS == true)
+        XCTAssertNil(model.state?.mode)
+        XCTAssertNotNil(model.validatedState([0x69, 0x18, 1, 1, 2, 0, 9]))
+        XCTAssertEqual(model.setPayload(ambientLevel: 12), [0x68, 0x18, 1, 1, 2, 0, 12])
+        XCTAssertEqual(model.setPayload(noiseCancellingSS: true), [0x68, 0x18, 1, 1, 2, 0, 9])
+        XCTAssertEqual(model.setPayload(noiseCancellingSS: false), [0x68, 0x18, 1, 1, 0, 0, 9])
+        XCTAssertEqual(model.setPayload(mode: .off), [0x68, 0x18, 1, 0, 2, 0, 9])
+        XCTAssertNil(readyModel().setPayload(noiseCancellingSS: true))
+    }
+
+    func testModernMalformedTerminalTuplesInvalidateWritesAndForeignInquiriesDoNot() {
+        let fixtures: [(UInt8, [UInt8], [UInt8])] = [
+            (0x01, [0x61, 0x01], [0x67, 0x01, 1, 1, 1]),
+            (0x11, [0x61, 0x11, 1, 0], [0x67, 0x11, 1, 1, 0, 0, 1]),
+            (0x12, [0x61, 0x12, 1, 0], [0x67, 0x12, 1, 1, 2, 0, 0]),
+            (0x13, [0x61, 0x13, 1, 0, 1, 20, 1], [0x67, 0x13, 1, 1, 1, 0, 0]),
+            (0x14, [0x61, 0x14, 1, 0, 1, 20, 1], [0x67, 0x14, 1, 1, 2, 0, 0]),
+            (0x16, [0x61, 0x16, 1, 0, 1, 20, 1], [0x67, 0x16, 1, 1, 0, 2, 0, 9]),
+            (0x18, [0x61, 0x18, 1, 0, 1, 20, 1], [0x67, 0x18, 1, 1, 2, 0, 9]),
+        ]
+        for (inquiry, capability, terminal) in fixtures {
+            var model = SonyNoiseControl(inquiryType: inquiry)
+            model.update(capability)
+            model.update([0x63, inquiry, 0])
+            model.update(terminal)
+            XCTAssertTrue(model.canSet)
+            let prior = model
+            XCTAssertFalse(model.update([0x67, 0x30, 1]))
+            XCTAssertEqual(model, prior)
+            var changing = terminal
+            changing[2] = 0
+            var unknown = terminal
+            unknown[4] = 255
+            for payload in [Array(terminal.dropLast()), terminal + [0], changing, unknown] {
+                XCTAssertTrue(model.update(payload))
+                XCTAssertNil(model.state)
+                XCTAssertFalse(model.canSet)
+                XCTAssertNil(model.setPayload(mode: .off))
+                model.update(terminal)
+                XCTAssertTrue(model.canSet)
+            }
+            model.update([0x61, inquiry, 255])
+            XCTAssertNil(model.capabilities)
+            XCTAssertFalse(model.canSet)
+        }
+    }
+
+    func testCombinedModesUseTotalEffectAndNoiseValueRatherThanAmbientLevel() {
+        for inquiry: UInt8 in [0x11, 0x12, 0x13, 0x14] {
+            XCTAssertEqual(SonyNoiseControl.State(payload: [0x67, inquiry, 1, 1, 0, 0, 0])?.mode, .ambient)
+            XCTAssertEqual(SonyNoiseControl.State(payload: [0x67, inquiry, 1, 0, 0, 0, 0])?.mode, .off)
+        }
+        XCTAssertEqual(SonyNoiseControl.State(payload: [0x67, 0x01, 1, 1, 0])?.mode, .off)
+        XCTAssertEqual(SonyNoiseControl.State(payload: [0x67, 0x01, 1, 0, 1])?.mode, .anc)
+    }
+
+    func testExistingAutoAndAmbientOnlyDialectsKeepTheirWireBehavior() {
+        var automatic = SonyNoiseControl(inquiryType: 0x15)
+        automatic.update([0x61, 0x15, 1, 0, 1, 20, 1])
+        automatic.update([0x63, 0x15, 0])
+        automatic.update([0x67, 0x15, 1, 1, 0, 2, 0, 9])
+        XCTAssertEqual(automatic.setPayload(mode: .wind), [0x68, 0x15, 1, 1, 0, 3, 0, 9])
+        for value: UInt8 in [3, 4, 5] {
+            automatic.update([0x69, 0x15, 1, 1, 0, value, 0, 9])
+            XCTAssertEqual(automatic.state?.mode, .wind)
+            automatic.update([0x69, 0x15, 1, 1, 1, value, 0, 9])
+            XCTAssertEqual(automatic.state?.mode, .ambient)
+        }
+        XCTAssertEqual(automatic.setPayload(mode: .anc), [0x68, 0x15, 1, 1, 0, 2, 0, 9])
+        for inquiry: UInt8 in [0x21, 0x22] {
+            var ambient = SonyNoiseControl(inquiryType: inquiry)
+            ambient.update(inquiry == 0x21 ? [0x61, inquiry, 2, 0, 1] : [0x61, inquiry, 2, 0, 0, 20, 1, 1, 0, 20, 1])
+            ambient.update([0x63, inquiry, 0])
+            ambient.update([0x67, inquiry, 1, 1, 0, 1])
+            XCTAssertEqual(ambient.state?.mode, .ambient)
+            XCTAssertEqual(ambient.supportedModes, [.off, .ambient])
+            XCTAssertNil(ambient.setPayload(mode: .anc))
+            XCTAssertEqual(ambient.setPayload(focusOnVoice: true), [0x68, inquiry, 1, 1, 1, 1])
+            ambient.update([0x69, inquiry, 1, 1, 0, 0])
+            XCTAssertEqual(ambient.state?.mode, .ambient)
+        }
+    }
+
+    func testToggleCycleAndVoiceSpotlightTestHaveSeparateStateAndWireCommands() {
+        var toggle = SonyNoiseToggle()
+        XCTAssertNil(toggle.setPayload(1))
+        XCTAssertTrue(toggle.update([0x61, 0x30, 4]))
+        XCTAssertEqual(toggle.key, 4)
+        XCTAssertEqual(toggle.options, [1, 2, 3, 4])
+        XCTAssertTrue(toggle.update([0x63, 0x30, 0]))
+        XCTAssertTrue(toggle.update([0x67, 0x30, 2]))
+        XCTAssertEqual(toggle.setPayload(3), [0x68, 0x30, 3])
+        XCTAssertNil(toggle.setPayload(0))
+        XCTAssertNil(toggle.setPayload(5))
+        XCTAssertFalse(toggle.update([0x69, 0x18, 1, 1, 2, 0, 9]))
+        XCTAssertEqual(toggle.selected, 2)
+        XCTAssertTrue(toggle.update([0x69, 0x30, 5]))
+        XCTAssertNil(toggle.selected)
+        XCTAssertFalse(toggle.canSet)
+        toggle.update([0x67, 0x30, 1])
+        toggle.update([0x61, 0x30, 6])
+        XCTAssertNil(toggle.key)
+        XCTAssertFalse(toggle.canSet)
+        var test = SonyNoiseTest()
+        XCTAssertEqual(test.queryPayload, [0x62, 0x40])
+        XCTAssertNil(test.setPayload(start: true))
+        XCTAssertTrue(test.update([0x63, 0x40, 1]))
+        XCTAssertEqual(test.active, false)
+        XCTAssertEqual(test.setPayload(start: true), [0x64, 0x40, 0])
+        XCTAssertTrue(test.update([0x65, 0x40, 0]))
+        XCTAssertEqual(test.active, true)
+        XCTAssertEqual(test.setPayload(start: false), [0x64, 0x40, 1])
+        XCTAssertFalse(test.update([0x69, 0x30, 1]))
+        XCTAssertEqual(test.active, true)
+        XCTAssertTrue(test.update([0x65, 0x40, 2]))
+        XCTAssertNil(test.active)
+        XCTAssertNil(test.setPayload(start: false))
+    }
+
     private func readyModel() -> SonyNoiseControl {
         var model = SonyNoiseControl()
         model.update(capability)
@@ -214,6 +388,9 @@ final class SonyNoiseControlControllerTests: XCTestCase {
         let session = controller.simulatedControlSession
         for _ in 0..<5 { controller.simulateAutomaticRefresh() }
         acknowledgeAll(controller)
+        deliver([0x63, 0x19, 0], to: controller)
+        acknowledgeAll(controller)
+        XCTAssertNotNil(controller.simulatedNoiseReadTimeoutID([0x66, 0x19]))
         deliver([0x69, 0x19, 1, 1, 1, 0, 12, 1, 0], to: controller)
         XCTAssertTrue(controller.isReady)
         XCTAssertTrue(controller.canChangeNoiseControl)
@@ -403,19 +580,14 @@ final class SonyNoiseControlControllerTests: XCTestCase {
             let session = controller.simulatedControlSession
             controller.simulateNoiseReadTimeout([0x66, 0x17])
             for _ in 0..<4 { await Task.yield() }
-            if reply.count > 2 {
-                XCTAssertTrue(controller.isReady)
-                XCTAssertEqual(controller.simulatedControlSession, session)
-                XCTAssertFalse(controller.canChangeNoiseControl)
-                XCTAssertNil(controller.simulatedNoiseReadTimeoutID([0x66, 0x17]))
-                deliver([0x67, 0x17, 1, 1, 0, 0, 12], to: controller)
-                XCTAssertFalse(controller.canChangeNoiseControl)
-                deliver([0x69, 0x17, 1, 1, 0, 0, 12], to: controller)
-                XCTAssertTrue(controller.canChangeNoiseControl)
-            } else {
-                XCTAssertFalse(controller.isReady)
-                XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            XCTAssertNil(controller.simulatedNoiseReadTimeoutID([0x66, 0x17]))
+            deliver([0x67, 0x17, 1, 1, 0, 0, 12], to: controller)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            deliver([0x69, 0x17, 1, 1, 0, 0, 12], to: controller)
+            XCTAssertTrue(controller.canChangeNoiseControl)
             controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
             try await Task.sleep(for: .milliseconds(300))
             XCTAssertTrue(controller.canChangeNoiseControl)
@@ -437,13 +609,20 @@ final class SonyNoiseControlControllerTests: XCTestCase {
                 acknowledgeAll(controller)
                 deliver([7, 0, 1, inquiry == 0x17 ? 0x6B : 0x6D, 0], to: controller)
                 acknowledgeAll(controller)
+                if malformed[0] == 0x63 {
+                    deliver([0x61, inquiry, 1, 0, 1, 20, 1], to: controller)
+                    acknowledgeAll(controller)
+                }
                 let query: [UInt8] = [malformed[0] - 1, inquiry]
                 let deadline = try XCTUnwrap(controller.simulatedNoiseReadTimeoutID(query))
                 deliver(malformed, to: controller)
                 XCTAssertEqual(controller.simulatedNoiseReadTimeoutID(query), deadline)
                 XCTAssertFalse(controller.isReady)
                 XCTAssertTrue(controller.simulatedHandshakeTimeoutPending)
-                deliver([0x61, inquiry, 1, 0, 1, 20, 1], to: controller)
+                if malformed[0] == 0x61 {
+                    deliver([0x61, inquiry, 1, 0, 1, 20, 1], to: controller)
+                    acknowledgeAll(controller)
+                }
                 deliver([0x63, inquiry, 0], to: controller)
                 XCTAssertNil(controller.simulatedNoiseReadTimeoutID(query))
                 acknowledgeAll(controller)
@@ -530,7 +709,7 @@ final class SonyNoiseControlControllerTests: XCTestCase {
             XCTAssertNil(controller.noiseControlMode)
             XCTAssertNil(controller.noiseControlDisplayState)
             XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
-            deliver([0x23, 0x09, 80, 0, 82, 0], to: controller)
+            deliver([0x23, 0x09, 80, 0, 82, 0, 20, 20], to: controller)
             XCTAssertEqual(controller.batteries.left?.level, 80)
             XCTAssertEqual(controller.batteries.right?.level, 82)
             XCTAssertTrue(controller.canPowerOff)
@@ -705,7 +884,7 @@ final class SonyNoiseControlControllerTests: XCTestCase {
         XCTAssertFalse(controller.isReady)
     }
 
-    func testUnansweredOrdinaryPollCannotPermanentlyBlockRecoveryAfterAWrite() async {
+    func testUnansweredOrdinaryPollKeepsTheSessionWithoutConfirmingAWrite() async {
         for inquiry: UInt8 in [0x17, 0x19] {
             let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
             defer { controller.simulateControlLoss() }
@@ -721,16 +900,21 @@ final class SonyNoiseControlControllerTests: XCTestCase {
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0x68 }.count, 1)
             controller.simulateNoiseReadTimeout([0x66, inquiry])
             for _ in 0..<4 { await Task.yield() }
-            XCTAssertFalse(controller.isReady)
-            XCTAssertGreaterThan(controller.simulatedControlSession, session)
-            XCTAssertEqual(controller.linkState, .failed("Noise control status was not received. Reconnect the headphones to try again."))
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertFalse(controller.canChangeNoiseControl)
+            XCTAssertNil(controller.noiseControlMode)
             controller.simulateProtocolMessage([0x67, inquiry, 1, 1, 0, 0, 12] + (inquiry == 0x19 ? [0, 0] : []), session: session)
-            XCTAssertFalse(controller.isReady)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertNotNil(controller.pendingChanges[.noiseControl])
+            controller.simulateSettingTimeout(.noiseControl)
+            for _ in 0..<4 { await Task.yield() }
             XCTAssertNil(controller.pendingChanges[.noiseControl])
+            XCTAssertFalse(controller.canChangeNoiseControl)
         }
     }
 
-    func testUnansweredAvailabilityReadEndsOnlyItsExpiredSession() async {
+    func testUnansweredAvailabilityReadIsUnavailableUntilAFreshSession() async {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         defer { controller.simulateControlLoss() }
         controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
@@ -738,7 +922,9 @@ final class SonyNoiseControlControllerTests: XCTestCase {
         acknowledgeAll(controller)
         controller.simulateNoiseReadTimeout([0x62, 0x17])
         for _ in 0..<4 { await Task.yield() }
-        XCTAssertFalse(controller.isReady)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.canChangeNoiseControl)
+        XCTAssertNil(controller.noiseControl?.available)
         controller.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
         controller.simulateNoiseReadTimeout([0x62, 0x17])
         for _ in 0..<4 { await Task.yield() }

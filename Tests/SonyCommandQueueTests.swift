@@ -2,6 +2,25 @@ import XCTest
 @testable import Acouplet
 
 final class SonyCommandQueueTests: XCTestCase {
+    func testPriorityWaitsForCurrentAcknowledgmentAndPreservesAlternatingSequences() throws {
+        var queue = SonyCommandQueue()
+        let current = try XCTUnwrap(queue.enqueue(payload: [0x56, 0]))
+        _ = queue.enqueue(payload: [0xA6, 0x20])
+        _ = queue.enqueue(payload: [0x36, 2], type: 0x0E)
+        _ = queue.enqueue(payload: [0xA8, 0x20, 20], prioritizing: true)
+        XCTAssertEqual(queue.pending, current)
+        XCTAssertFalse(queue.handleAcknowledgment(sequence: current.sequence).accepted)
+        var previous = current
+        for payload: [UInt8] in [[0xA8, 0x20, 20], [0xA6, 0x20], [0x36, 2]] {
+            let next = try XCTUnwrap(queue.handleAcknowledgment(sequence: 1 - previous.sequence).nextFrame)
+            XCTAssertEqual(next.payload, payload)
+            XCTAssertEqual(next.sequence, 1 - previous.sequence)
+            previous = next
+        }
+        XCTAssertNil(queue.handleAcknowledgment(sequence: 1 - previous.sequence).nextFrame)
+        XCTAssertEqual(queue.enqueue(payload: [0xA2, 1])?.sequence, 1 - previous.sequence)
+    }
+
     @MainActor
     func testSimulatedCancellationCannotGiveFragmentedACKToNextPlaybackRead() throws {
         for split in 1..<9 {
@@ -22,6 +41,7 @@ final class SonyCommandQueueTests: XCTestCase {
             XCTAssertEqual(status.payload, [0xA2, 1])
             controller.simulateProtocolData(acknowledgment.dropFirst(split))
             XCTAssertEqual(controller.simulatedPendingFrame, status)
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xA3, 1, 0, 2, 1]))
             controller.simulateProtocolData(acknowledgment.prefix(split))
             controller.simulateProtocolData(acknowledgment.dropFirst(split))
             XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xA6, 0x20])
@@ -36,6 +56,7 @@ final class SonyCommandQueueTests: XCTestCase {
             defer { controller.simulateControlLoss() }
             XCTAssertTrue(controller.refreshMusicVolume())
             let first = try XCTUnwrap(controller.simulatedPendingFrame)
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0xA3, 1, 0, 2, 1]))
             let acknowledgment = SonyFrameCodec.encode(type: 0x01, sequence: 1 - first.sequence, payload: [])
             let nextAcknowledgment = SonyFrameCodec.encode(type: 0x01, sequence: first.sequence, payload: [])
             controller.simulateProtocolData(acknowledgment + nextAcknowledgment.prefix(split))
@@ -580,6 +601,7 @@ final class SonyCommandQueueTests: XCTestCase {
                     acknowledgeSimulatedCommands(controller)
                     for payload: [UInt8] in [[0xA1, 1, 31, 1, 0], [0xA3, 1, 0, 2], [0xA7, 1, 0x20, 12]] {
                         controller.simulateProtocolMessage(payload)
+                        acknowledgeSimulatedCommands(controller)
                     }
                 }
                 let started = DispatchTime.now()
@@ -625,24 +647,33 @@ final class SonyCommandQueueTests: XCTestCase {
             defer { controller.simulateControlLoss() }
             controller.setNoiseControl(.anc)
             let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+            let confirmation = try XCTUnwrap(controller.simulatedSettingTimeoutWork(.noiseControl))
             let session = controller.simulatedControlSession
             controller.setDSEE(.off)
             var notification = [UInt8(0x69)] + frame.payload.dropFirst()
             if legacy { notification[2] = 1 }
             controller.simulateProtocolMessage(notification)
             XCTAssertEqual(controller.noiseControlMode, .anc)
-            XCTAssertNil(controller.pendingChanges[.noiseControl])
-            XCTAssertNil(controller.simulatedSettingTimeoutWork(.noiseControl))
-            XCTAssertFalse(controller.canRetryBasicCommand(frame))
+            if legacy {
+                XCTAssertNil(controller.pendingChanges[.noiseControl])
+                XCTAssertNil(controller.simulatedSettingTimeoutWork(.noiseControl))
+            } else {
+                XCTAssertEqual(controller.pendingChanges[.noiseControl], Array(frame.payload.dropFirst()))
+                XCTAssertTrue(controller.simulatedSettingTimeoutWork(.noiseControl) === confirmation)
+            }
+            XCTAssertEqual(controller.canRetryBasicCommand(frame), !legacy)
             controller.simulateAcknowledgmentTimeout()
             for _ in 0..<4 { await Task.yield() }
             XCTAssertTrue(controller.isReady)
             XCTAssertEqual(controller.simulatedControlSession, session)
             XCTAssertEqual(controller.simulatedPendingFrame, frame)
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, 2)
-            XCTAssertNil(controller.simulatedSettingTimeoutWork(.noiseControl))
+            if legacy { XCTAssertNil(controller.simulatedSettingTimeoutWork(.noiseControl)) }
+            else { XCTAssertTrue(controller.simulatedSettingTimeoutWork(.noiseControl) === confirmation) }
             let acknowledgment = SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: [])
             controller.simulateProtocolData(acknowledgment)
+            XCTAssertNil(controller.pendingChanges[.noiseControl])
+            XCTAssertNil(controller.simulatedSettingTimeoutWork(.noiseControl))
             let next = try XCTUnwrap(controller.simulatedPendingFrame)
             XCTAssertEqual(next.payload.first, 0xE8)
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == next }.count, 1)
@@ -813,7 +844,11 @@ final class SonyCommandQueueTests: XCTestCase {
         }
         controller.refresh()
         while let frame = controller.simulatedPendingFrame, frame.payload != query || frame.type != type {
-            replyToOrdinaryNoiseMetadata(frame, controller: controller)
+            switch (frame.type, frame.payload) {
+            case (0x0C, [0xA2, 1]): controller.simulateProtocolMessage([0xA3, 1, 0, 2, 0])
+            case (0x0C, [0x62, 0x19]): controller.simulateProtocolMessage([0x63, 0x19, 0])
+            default: replyToOrdinaryNoiseMetadata(frame, controller: controller)
+            }
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
         }
         XCTAssertTrue(controller.isReady)

@@ -3,6 +3,7 @@ import Foundation
 enum SonyBLEIdentity {
     static let savedDeviceKey = "headphones.verifiedIdentity"
     static let savedDevicesKey = "headphones.verifiedIdentities"
+    static let savedAppearancesKey = "headphones.deviceAppearances"
 
     static func normalizedAddress(_ value: String) -> String? {
         let address = value.replacingOccurrences(of: "-", with: ":").uppercased()
@@ -32,6 +33,55 @@ enum SonyBLEIdentity {
         var devices = savedDevices(in: defaults)
         devices[device.classicAddress] = device
         defaults.set(devices.mapValues(\.propertyList), forKey: savedDevicesKey)
+    }
+
+    static func savedAppearances(in defaults: UserDefaults) -> [String: Appearance] {
+        var appearances: [String: Appearance] = [:]
+        for (address, value) in defaults.dictionary(forKey: savedAppearancesKey) ?? [:] {
+            guard let record = value as? [String: Any], let appearance = Appearance(propertyList: record),
+                  normalizedAddress(address) == appearance.classicAddress else { continue }
+            appearances[appearance.classicAddress] = appearance
+        }
+        return appearances
+    }
+
+    static func save(_ appearance: Appearance, in defaults: UserDefaults) {
+        var appearances = savedAppearances(in: defaults)
+        appearances[appearance.classicAddress] = appearance
+        defaults.set(appearances.mapValues(\.propertyList), forKey: savedAppearancesKey)
+    }
+
+    static func removeAppearance(for address: String, in defaults: UserDefaults) {
+        guard let address = normalizedAddress(address) else { return }
+        var appearances = savedAppearances(in: defaults)
+        appearances[address] = nil
+        defaults.set(appearances.mapValues(\.propertyList), forKey: savedAppearancesKey)
+    }
+
+    struct Appearance: Equatable, Sendable {
+        let classicAddress: String
+        let model: SonyDeviceModel
+        let color: SonyDeviceColor
+
+        init?(classicAddress: String, model: SonyDeviceModel, color: SonyDeviceColor) {
+            guard let address = normalizedAddress(classicAddress), model != .unknown else { return nil }
+            self.classicAddress = address
+            self.model = model
+            self.color = color
+        }
+
+        init?(propertyList: [String: Any]) {
+            guard let address = propertyList["classicAddress"] as? String,
+                  let rawModel = propertyList["model"] as? String,
+                  let model = SonyDeviceModel(rawValue: rawModel),
+                  let rawColor = propertyList["color"] as? String,
+                  let color = UInt8(rawColor) else { return nil }
+            self.init(classicAddress: address, model: model, color: SonyDeviceColor(rawValue: color))
+        }
+
+        var propertyList: [String: String] {
+            ["classicAddress": classicAddress, "model": model.rawValue, "color": String(color.rawValue)]
+        }
     }
 
     struct VerifiedDevice: Equatable, Sendable {

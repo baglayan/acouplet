@@ -13,17 +13,22 @@ final class SonyConnectionControllerTests: XCTestCase {
             acknowledgeAll(controller)
             deliver([0x07, 0, 1, function, 0], to: controller)
             acknowledgeAll(controller)
-            deliver([0x67, inquiry, 1, 0, 0, 10], to: controller)
+            deliver(inquiry == 0x21 ? [0x61, inquiry, 1, 0] : [0x61, inquiry, 1, 0, 1, 20, 1], to: controller)
+            acknowledgeAll(controller)
+            deliver([0x63, inquiry, 0], to: controller)
+            acknowledgeAll(controller)
+            let level: UInt8 = inquiry == 0x21 ? 1 : 10
+            deliver([0x67, inquiry, 1, 0, 0, level], to: controller)
             acknowledgeAll(controller)
             XCTAssertTrue(controller.isReady)
             XCTAssertEqual(controller.availableNoiseModes, [.off, .ambient])
             controller.toggleNoiseControl()
             let ambient = try XCTUnwrap(controller.pendingChanges[.noiseControl])
-            XCTAssertEqual(ambient, [inquiry, 1, 1, 0, 10])
+            XCTAssertEqual(ambient, [inquiry, 1, 1, 0, level])
             controller.toggleNoiseControl()
             acknowledgeAll(controller)
             deliver([0x69] + ambient, to: controller)
-            XCTAssertEqual(controller.pendingChanges[.noiseControl], [inquiry, 1, 0, 0, 10])
+            XCTAssertEqual(controller.pendingChanges[.noiseControl], [inquiry, 1, 0, 0, level])
         }
     }
 
@@ -613,6 +618,9 @@ final class SonyConnectionControllerTests: XCTestCase {
                 XCTAssertEqual(status.sequence, cancelled.sequence)
                 XCTAssertFalse(channel.writes.compactMap(SonyFrameCodec.decode).contains { $0.payload == cancelled.payload })
                 controller.classicChannelData(channel, data: oldACK.dropFirst(split))
+                await waitForClassicWritesToDrain(controller)
+                XCTAssertEqual(controller.simulatedPendingFrame, status)
+                controller.classicChannelData(channel, data: SonyFrameCodec.encode(type: 0x0C, sequence: 1, payload: [0xA3, 1, 0, 2, 0]))
                 await waitForClassicWritesToDrain(controller)
                 XCTAssertEqual(controller.simulatedPendingFrame, status)
                 let valid = SonyFrameCodec.encode(type: 0x01, sequence: 1 - status.sequence, payload: [])
@@ -1702,7 +1710,7 @@ final class SonyConnectionControllerTests: XCTestCase {
         defer { controller.simulateControlLoss() }
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE0, 1])
         XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xE0, 1] })
-        deliverLegacyQuality(to: controller)
+        deliverLegacyQuality(to: controller, acknowledgeQueries: false)
         XCTAssertNil(controller.legacyControls?.connectionQuality.settingType)
         XCTAssertNil(controller.legacyControls?.connectionQuality.available)
         XCTAssertNil(controller.connectionMode)
@@ -1737,9 +1745,11 @@ final class SonyConnectionControllerTests: XCTestCase {
             let controller = beginLegacyQualityController()
             defer { controller.simulateControlLoss() }
             acknowledgeAll(controller)
-            for known: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] where known[0] != reply[0] {
+            for known: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] where known[0] < reply[0] {
                 deliver(known, to: controller)
+                acknowledgeAll(controller)
             }
+            XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == query })
             deliver(reply, to: controller)
             XCTAssertFalse(controller.canChangeConnectionMode)
             XCTAssertNotEqual(controller.connectionMode, .lowLatency)
@@ -1940,7 +1950,9 @@ final class SonyConnectionControllerTests: XCTestCase {
             controller.completeSimulatedWrite()
             acknowledgeAll(controller)
             deliver([0xE1, 1, 0], to: controller)
+            acknowledgeAll(controller)
             deliver([0xE3, 1, 0], to: controller)
+            acknowledgeAll(controller)
             deliver([0xE7, 1, 0, actual], to: controller)
             if actual == 1 {
                 XCTAssertEqual(controller.connectionTransition?.phase, .confirmed)
@@ -2300,6 +2312,72 @@ final class SonyConnectionControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testClassicModernConnectionModesUseAdvertisedInquiryAndOwnedReadbacks() throws {
+        for (function, inquiry): (UInt8, UInt8) in [(0xE1, 0x00), (0xE3, 0x02)] {
+            let controller = preparedController(connectionFunction: function)
+            defer { controller.simulateControlLoss() }
+            XCTAssertTrue(controller.isReady)
+            XCTAssertTrue(controller.canChangeConnectionMode)
+            XCTAssertEqual(controller.audioFeatures.connectionModeInquiryType, inquiry)
+            XCTAssertEqual(controller.supportedConnectionModes, [.soundQuality, .stableConnection])
+            let queries = controller.simulatedTransmittedFrames.map(\.payload)
+            XCTAssertTrue(queries.contains([0xE2, inquiry]))
+            XCTAssertTrue(queries.contains([0xE6, inquiry]))
+            XCTAssertFalse(queries.contains([0xE0, inquiry]))
+            XCTAssertFalse(queries.contains([0xE6, 0x05]))
+            pollWithoutModeReadback(controller)
+            controller.setConnectionMode(.stableConnection)
+            XCTAssertEqual(controller.connectionTransition?.requestPayload, [0xE8, inquiry, 0x01])
+            XCTAssertEqual(controller.connectionTransition?.readbackPayload, [0xE6, inquiry])
+            acknowledge(controller)
+            XCTAssertEqual(controller.connectionTransition?.phase, .awaitingResponse)
+            deliver([0xE7, inquiry, 0x01], to: controller)
+            XCTAssertEqual(controller.connectionTransition?.phase, .awaitingResponse)
+            deliver([0x99, 0x00, 0x77, 0x01], to: controller)
+            let alert = try XCTUnwrap(controller.connectionTransition?.alert)
+            controller.respondToConnectionAlert(alert, action: .positive)
+            acknowledge(controller)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE6, inquiry])
+            let readbacks = controller.simulatedModeReadbackCount
+            XCTAssertEqual(readbacks, 1)
+            deliver([0xE7, inquiry, 0x01, 0x00], to: controller)
+            deliver([0xE7, 0x05, 0x01], to: controller)
+            XCTAssertEqual(controller.simulatedModeReadbackCount, readbacks)
+            XCTAssertEqual(controller.connectionTransition?.phase, .awaitingResponse)
+            deliver([0xE7, inquiry, 0x01], to: controller)
+            XCTAssertEqual(controller.simulatedModeReadbackCount, 0)
+            XCTAssertEqual(controller.connectionTransition?.phase, .confirmed)
+            XCTAssertNil(controller.connectionTransition?.requiredStream)
+            XCTAssertEqual(controller.audioFeatures.codec, .aac)
+            acknowledgeAll(controller, mode: 1)
+        }
+    }
+
+    @MainActor
+    func testClassicModernNotificationsCannotConfirmBeforeTransmissionOrCarryAStream() {
+        for (function, inquiry): (UInt8, UInt8) in [(0xE1, 0x00), (0xE3, 0x02)] {
+            let controller = preparedController(connectionFunction: function)
+            defer { controller.simulateControlLoss() }
+            controller.defersSimulatedWrites = true
+            controller.setConnectionMode(.stableConnection)
+            XCTAssertEqual(controller.connectionTransition?.phase, .queued)
+            deliver([0xE9, inquiry, 0x01], to: controller)
+            XCTAssertEqual(controller.connectionTransition?.phase, .queued)
+            controller.completeSimulatedWrite()
+            XCTAssertEqual(controller.connectionTransition?.phase, .awaitingResponse)
+            controller.defersSimulatedWrites = false
+            acknowledgeAll(controller)
+            deliver([0xE9, inquiry, 0x01, 0x01], to: controller)
+            deliver([0xE9, 0x05, 0x01, 0x01], to: controller)
+            XCTAssertEqual(controller.connectionTransition?.phase, .awaitingResponse)
+            deliver([0xE9, inquiry, 0x01], to: controller)
+            XCTAssertEqual(controller.connectionTransition?.phase, .confirmed)
+            XCTAssertNil(controller.connectionTransition?.requiredStream)
+            XCTAssertFalse(controller.connectionTransition?.crossesTransport == true)
+        }
+    }
+
+    @MainActor
     func testAlertSetupMustBeTransmittedAndAcknowledgedBeforeModeWrites() {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
@@ -2309,7 +2387,7 @@ final class SonyConnectionControllerTests: XCTestCase {
         XCTAssertFalse(controller.isReady)
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x94, 0x00, 0x00])
         deliver([0x67, 0x17, 0x01, 0x01, 0x00, 0x00, 0x0A], to: controller)
-        deliverModeState(to: controller)
+        deliverModeState(to: controller, acknowledgeQueries: false)
         XCTAssertFalse(controller.isReady)
         XCTAssertFalse(controller.canChangeConnectionMode)
         controller.setConnectionMode(.stableConnection)
@@ -2320,6 +2398,8 @@ final class SonyConnectionControllerTests: XCTestCase {
         XCTAssertFalse(controller.canChangeConnectionMode)
         acknowledgeAll(controller)
         deliver([0x67, 0x17, 1, 1, 0, 0, 10], to: controller)
+        acknowledgeAll(controller)
+        deliverModeState(to: controller)
         XCTAssertTrue(controller.isReady)
         XCTAssertTrue(controller.canChangeConnectionMode)
         XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xE8, 0x05, 0x01, 0x00] })
@@ -3252,6 +3332,8 @@ final class SonyConnectionControllerTests: XCTestCase {
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == [0x62, 0x17] })
         XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == [0x66, 0x17] })
         deliver([0x63, 0x17, 0], to: controller)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x66, 0x17])
+        acknowledge(controller)
         deliver([0x67, 0x17, 1, 1, 0, 0, 10], to: controller)
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x04, 2])
         deliver([0x05, 2, 5] + Array("1.0.0".utf8), to: controller)
@@ -3303,6 +3385,10 @@ final class SonyConnectionControllerTests: XCTestCase {
         acknowledgeAll(controller)
         deliver([0x67, 0x17, 0x01, 0x01, 0, 0, 10], to: controller)
         acknowledgeAll(controller, mode: 2)
+        for payload: [UInt8] in [[0xE1, 5, 3, 0, 1, 2, 1, 0], [0xE3, 5, 0, 0]] {
+            deliver(payload, to: controller)
+            acknowledgeAll(controller, mode: 2)
+        }
         deliver([0x13, 2, 2], to: controller)
         XCTAssertTrue(controller.isReady)
         XCTAssertEqual(controller.connectionTransition?.phase, .confirmed)
@@ -3359,13 +3445,16 @@ final class SonyConnectionControllerTests: XCTestCase {
     }
 
     @MainActor
-    private func deliverLegacyQuality(to controller: SonyHeadphonesController) {
-        for payload: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] { deliver(payload, to: controller) }
+    private func deliverLegacyQuality(to controller: SonyHeadphonesController, acknowledgeQueries: Bool = true) {
+        for payload: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
+            deliver(payload, to: controller)
+            if acknowledgeQueries { acknowledgeAll(controller) }
+        }
     }
 
     @MainActor
     private func preparedController(identityDefaults: UserDefaults? = nil, supportsStandby: Bool = true,
-                                    pinnedAddress: String? = nil) -> SonyHeadphonesController {
+                                    pinnedAddress: String? = nil, connectionFunction: UInt8 = 0xE7) -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true, identityDefaults: identityDefaults, pinnedAddress: pinnedAddress)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
         deliver([0x01, 0x00, 0x03, 0x00, 0x30, 0x18, 0x00, 0x00], to: controller, begin: true)
@@ -3373,7 +3462,7 @@ final class SonyConnectionControllerTests: XCTestCase {
         let name = Array("WF-1000XM5".utf8)
         deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
         deliver([0x05, 3, 0, 1], to: controller)
-        let functions: [UInt8] = [0x6B, 0x11, 0x12, 0x14, 0x40, 0x44, 0x50, 0x90, 0xE7].filter { $0 != 0x40 || supportsStandby }
+        let functions: [UInt8] = [0x6B, 0x11, 0x12, 0x14, 0x40, 0x44, 0x50, 0x90, connectionFunction].filter { $0 != 0x40 || supportsStandby }
         deliver([0x07, 0, UInt8(functions.count)] + functions.flatMap { [$0, 0] }, to: controller)
         deliver([0x51, 0, 6, 21, 2, 0x16, 0, 0xA0, 0], to: controller)
         deliver([0x53, 0, 0], to: controller)
@@ -3394,10 +3483,16 @@ final class SonyConnectionControllerTests: XCTestCase {
     }
 
     @MainActor
-    private func deliverModeState(to controller: SonyHeadphonesController) {
-        deliver([0xE1, 5, 3, 0, 1, 2, 1, 0], to: controller)
-        deliver([0xE3, 5, 0, 0], to: controller)
-        deliver([0xE7, 5, 0], to: controller)
+    private func deliverModeState(to controller: SonyHeadphonesController, acknowledgeQueries: Bool = true) {
+        let inquiry = controller.audioFeatures.connectionModeInquiryType!
+        if inquiry == 0x05 {
+            deliver([0xE1, inquiry, 3, 0, 1, 2, 1, 0], to: controller)
+            if acknowledgeQueries { acknowledgeAll(controller) }
+        }
+        deliver([0xE3, inquiry, 0] + (inquiry == 0x00 ? [] : [0]), to: controller)
+        if acknowledgeQueries { acknowledgeAll(controller) }
+        deliver([0xE7, inquiry, 0], to: controller)
+        if acknowledgeQueries { acknowledgeAll(controller) }
     }
 
     @MainActor
@@ -3417,7 +3512,10 @@ final class SonyConnectionControllerTests: XCTestCase {
         var count = 0
         var readbacks = 0
         while let frame = controller.simulatedPendingFrame, count < 80 {
-            if frame.payload == [0xE6, 0x05] { readbacks += 1 }
+            if let inquiry = controller.audioFeatures.connectionModeInquiryType,
+               frame.payload == [0xE6, inquiry] { readbacks += 1 }
+            if let inquiry = controller.audioFeatures.connectionModeInquiryType,
+               frame.payload == [0xE2, inquiry] { deliver([0xE3, inquiry, 0] + (inquiry == 0 ? [] : [0]), to: controller) }
             acknowledge(controller)
             count += 1
         }
@@ -3430,7 +3528,8 @@ final class SonyConnectionControllerTests: XCTestCase {
         var count = 0
         while let frame = controller.simulatedPendingFrame, count < 80 {
             replyToOrdinaryNoiseMetadata(frame, controller: controller)
-            if frame.payload == [0xE6, 0x05] { deliver([0xE7, 0x05, mode], to: controller) }
+            if let inquiry = controller.audioFeatures.connectionModeInquiryType,
+               frame.payload == [0xE6, inquiry] { deliver([0xE7, inquiry, mode], to: controller) }
             acknowledge(controller)
             count += 1
         }

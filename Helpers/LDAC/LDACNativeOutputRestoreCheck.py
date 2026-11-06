@@ -443,6 +443,29 @@ enum Check {
     @MainActor
     static func main() async {
         typealias Output = LDACNativeOutput
+        for (seen, withdrawn, type) in [(false, false, Int64(0x7461636c)), (true, true, Int64(0x74616164))] {
+            Output.reset()
+            Output.priorityReply = ["phase": "observing", "address": Output.targetUID, "prioritySent": false,
+                "targetPublicationSeen": seen, "targetPublicationWithdrawn": withdrawn, "lastTargetDeviceType": type]
+            let output = Output()
+            let control = try! output.priorityControl()
+            let state = try! control.state()
+            precondition(state.targetPublicationSeen == seen && state.targetPublicationWithdrawn == withdrawn &&
+                state.lastTargetDeviceType == type && state.prioritySent == false)
+            precondition(state.diagnosticDescription.contains("type=0x\(String(type, radix: 16))"))
+            try! control.request(true, false)
+            precondition(Output.priorityWrites.last?["ifAvailable"] as? Bool == true &&
+                Output.priorityWrites.last?["enabled"] as? Bool == true && Output.priorityWrites.last?.count == 3)
+            Output.priorityReply = ["phase": "idle", "prioritySent": false]
+            let skipped = try! control.state()
+            precondition(skipped.phase == "idle" && skipped.prioritySent == false && skipped.error == nil)
+            try! control.request(false, false)
+            precondition(Output.priorityWrites.last?["ifAvailable"] == nil && Output.priorityWrites.last?.count == 2)
+            try! control.request(false, true)
+            precondition(Output.priorityWrites.last?["ifAvailable"] == nil &&
+                Output.priorityWrites.last?["disconnected"] as? Bool == true && Output.priorityWrites.last?.count == 3)
+            _ = await output.restoreAndRelease()
+        }
         let priorityFailures: [(String, Bool?)] = [("preparation-failed", false), ("cleanup-required", true), ("cleanup-required", nil)]
         for (phase, sent) in priorityFailures {
             Output.reset()
@@ -458,7 +481,7 @@ enum Check {
                 let forwarded = LDACOwnerError(error)
                 let encoded = try! JSONEncoder().encode(forwarded)
                 let decoded = try! JSONDecoder().decode(LDACOwnerError.self, from: encoded)
-                precondition(decoded.diagnostic?.detail == "phase=\(phase); priority-sent=\(sent.map { String($0) } ?? "unknown"); error=Audio-host connection was interrupted.")
+                precondition(decoded.diagnostic?.detail == "phase=\(phase); priority-sent=\(sent.map { String($0) } ?? "unknown"); seen=unknown; withdrawn=unknown; type=unknown; error=Audio-host connection was interrupted.")
                 precondition(decoded.diagnostic?.isFailure == true)
             }
             output.isSelected = false
@@ -583,7 +606,7 @@ enum Check {
         try! Output.writeHAL(5, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(1), requiringLease: true)
         try! Output.writeHAL(5, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(1))
 
-        for shared in [false, true] {
+        for (shared, laterSystemOutput) in [(true, UInt32(5)), (false, 6), (false, 7), (false, 8)] {
             Output.reset()
             Output.current = [Output.defaultSelectors[0]: 6, Output.defaultSelectors[1]: shared ? 6 : 7]
             Output.available = [Output.uid: 5, Output.targetUID: 6, "speakers": 7, "user-output": 8]
@@ -595,14 +618,14 @@ enum Check {
                 precondition(Output.current[Output.defaultSelectors[0]] == 5)
                 precondition(Output.current[Output.defaultSelectors[1]] == (shared ? 5 : 7))
                 precondition(Output.writes.count == (shared ? 2 : 1))
-                if !shared { Output.current[Output.defaultSelectors[1]] = 8 }
+                Output.current[Output.defaultSelectors[1]] = laterSystemOutput
                 try output.validateForRecovery()
                 Output.writes = []
                 Output.muteWrites = []
                 let result = await output.restoreAndRelease()
                 precondition(result == nil && output.leaseReleased)
                 precondition(Output.current[Output.defaultSelectors[0]] == 6)
-                precondition(Output.current[Output.defaultSelectors[1]] == (shared ? 6 : 8))
+                precondition(Output.current[Output.defaultSelectors[1]] == (shared ? 6 : laterSystemOutput))
                 precondition(Output.writes.count == (shared ? 2 : 1))
                 precondition(Output.muteWrites.allSatisfy { $0.0 == 6 })
             } catch { preconditionFailure("System output isolation: \(error)") }
@@ -764,7 +787,12 @@ enum Check {
             ["phase": "cleanup-required", "address": 42],
             ["phase": "invalid", "address": Output.previousAddress],
             ["phase": "cleanup-required", "address": Output.previousAddress, "error": 42],
-            ["phase": "cleanup-required", "address": Output.previousAddress, "prioritySent": 1]
+            ["phase": "cleanup-required", "address": Output.previousAddress, "prioritySent": 1],
+            ["phase": "cleanup-required", "address": Output.previousAddress, "targetPublicationSeen": 1],
+            ["phase": "cleanup-required", "address": Output.previousAddress, "targetPublicationWithdrawn": "true"],
+            ["phase": "cleanup-required", "address": Output.previousAddress, "lastTargetDeviceType": true],
+            ["phase": "cleanup-required", "address": Output.previousAddress, "lastTargetDeviceType": "1952538980"],
+            ["phase": "cleanup-required", "address": Output.previousAddress, "lastTargetDeviceType": 1.5]
         ]
         for invalid in invalidReplies {
             Output.reset()

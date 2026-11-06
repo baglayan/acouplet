@@ -94,7 +94,7 @@ final class SonyMultipointTests: XCTestCase {
     }
 
     func testOnlyNegotiatedInventoryAndSourceFunctionsProduceReadQueries() {
-        for functions: Set<UInt8> in [[], [0x30], [0x34], [0x42, 0x47]] {
+        for functions: Set<UInt8> in [[], [0x34], [0x42, 0x47]] {
             var multipoint = SonyMultipoint(supportedFunctions: functions)
             XCTAssertTrue(multipoint.queryPayloads.isEmpty)
             XCTAssertFalse(multipoint.update(capturedInventory))
@@ -117,6 +117,66 @@ final class SonyMultipointTests: XCTestCase {
         XCTAssertTrue(sourceOnly.update([0x37, 1, 1]))
         XCTAssertFalse(sourceOnly.update(capturedInventory))
         XCTAssertNil(sourceOnly.keepingSetPayload(true))
+    }
+
+    func testClassicInventoryWithoutClassOfDeviceSupportsQueriesSourcesAndPeripheralActions() {
+        var multipoint = SonyMultipoint(supportedFunctions: [0x30, 0x31])
+        XCTAssertEqual(multipoint.inventoryInquiryType, 0)
+        XCTAssertEqual(multipoint.queryPayloads, [[0x30, 0], [0x32, 0], [0x36, 0], [0x36, 1]])
+        XCTAssertTrue(multipoint.update([0x31, 0, 8, 2, 0]))
+        XCTAssertTrue(multipoint.update([0x33, 0, 0, 0]))
+        var inventory = legacyListPacket([(firstAddress, 1, "Test Laptop"), (secondAddress, 0, "Test Phone Ü")])
+        inventory[1] = 0
+        XCTAssertTrue(multipoint.update(inventory))
+        XCTAssertTrue(multipoint.update([0x37, 1, 1]))
+        XCTAssertEqual(multipoint.queryPayloads, [[0x32, 0], [0x36, 0], [0x36, 1]])
+        XCTAssertEqual(multipoint.devices.map(\.classOfDevice), [0xFFFFFF, 0xFFFFFF])
+        XCTAssertEqual(multipoint.devices.map(\.name), ["Test Laptop", "Test Phone Ü"])
+        XCTAssertEqual(multipoint.selectedSource?.address, firstAddress)
+        XCTAssertEqual(multipoint.sourceSwitchPayload(address: firstAddress), [0x3C, 1] + Array(firstAddress.utf8))
+        XCTAssertEqual(multipoint.keepingSetPayload(true), [0x38, 1, 0])
+        XCTAssertEqual(multipoint.peripheralActionPayload(.connect, address: secondAddress), [0x3C, 0, 1] + Array(secondAddress.utf8))
+        XCTAssertEqual(multipoint.peripheralActionPayload(.disconnect, address: firstAddress), [0x3C, 0, 0] + Array(firstAddress.utf8))
+        XCTAssertEqual(multipoint.peripheralActionPayload(.unpair, address: secondAddress), [0x3C, 0, 2] + Array(secondAddress.utf8))
+        XCTAssertTrue(multipoint.update([0x3D, 0, 1, 0x10] + Array(secondAddress.utf8)))
+        XCTAssertEqual(multipoint.lastPeripheralResult?.result, .connectionSuccess)
+        inventory[0] = 0x39
+        inventory[20] = 0
+        inventory[inventory.count - 1] = 0
+        XCTAssertTrue(multipoint.update(inventory))
+        XCTAssertNil(multipoint.selectedSource)
+        XCTAssertTrue(multipoint.update([0x35, 0, 1, 1]))
+        XCTAssertEqual(multipoint.pairingMode, true)
+        XCTAssertFalse(multipoint.canManageDevices)
+    }
+
+    func testClassicInventoryRejectsTruncationAndOtherSchemasWithoutLosingTheLastSnapshot() {
+        var inventory = legacyListPacket([(firstAddress, 1, "Test Laptop")])
+        inventory[1] = 0
+        for length in 2..<inventory.count {
+            var multipoint = SonyMultipoint(supportedFunctions: [0x30])
+            XCTAssertTrue(multipoint.update(inventory))
+            let prior = multipoint.inventory
+            XCTAssertFalse(multipoint.update(Array(inventory.prefix(length))))
+            XCTAssertEqual(multipoint.inventory, prior)
+            XCTAssertTrue(multipoint.inventoryIsStale)
+            XCTAssertTrue(multipoint.update(inventory))
+            XCTAssertFalse(multipoint.inventoryIsStale)
+        }
+        var multipoint = SonyMultipoint(supportedFunctions: [0x30])
+        XCTAssertTrue(multipoint.update(inventory))
+        let prior = multipoint
+        for payload: [UInt8] in [capturedInventory, [0x31, 2, 8, 2, 0], [0x33, 2, 0, 0], [0x37, 1, 0],
+                                 [0x3D, 2, 0, 0] + Array(firstAddress.utf8)] {
+            XCTAssertFalse(multipoint.update(payload))
+            XCTAssertEqual(multipoint, prior)
+        }
+        for functions: Set<UInt8> in [[0x30, 0x32], [0x30, 0x33], [0x30, 0x32, 0x33]] {
+            var preferred = SonyMultipoint(supportedFunctions: functions)
+            XCTAssertEqual(preferred.inventoryInquiryType, 2)
+            XCTAssertFalse(preferred.update(inventory))
+            XCTAssertTrue(preferred.update(capturedInventory))
+        }
     }
 
     func testCapturedSnapshotRetainsIDsBigEndianClassNamesAndIndependentKeeping() throws {
@@ -387,6 +447,13 @@ final class SonyMultipointTests: XCTestCase {
         XCTAssertTrue(multipoint.inventoryIsStale)
         XCTAssertEqual(multipoint.inventory, inventory)
         XCTAssertTrue(multipoint.update(notification))
+        XCTAssertFalse(multipoint.inventoryIsStale)
+        notification = legacyListPacket([(secondAddress, 1, "Test Phone")])
+        notification[0] = 0x39
+        XCTAssertTrue(multipoint.update(notification))
+        XCTAssertEqual(multipoint.devices.map(\.address), [secondAddress])
+        XCTAssertTrue(multipoint.update([0x39, 0x01, 0, 0]))
+        XCTAssertTrue(multipoint.devices.isEmpty)
         XCTAssertFalse(multipoint.inventoryIsStale)
     }
 

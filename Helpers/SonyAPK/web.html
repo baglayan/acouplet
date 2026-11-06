@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Acouplet feature comparison</title>
+<style>
+:root { color-scheme: light dark; font: 13px/1.5 system-ui, sans-serif; background: #fff; color: #222; -webkit-font-smoothing: antialiased; }
+body { max-width: 1240px; margin: 0 auto; padding: 28px 24px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+h1 { margin: 0; font-size: 21px; font-weight: 600; }
+p { margin: 8px 0; }
+header p { margin: 2px 0 0; }
+button, input, select { box-sizing: border-box; font: inherit; color: inherit; border: 1px solid #aaa; border-radius: 4px; background: #fff; padding: 6px 10px; }
+button { cursor: pointer; white-space: nowrap; }
+button:hover { background: #f5f5f5; }
+button:disabled { cursor: default; opacity: .6; }
+:focus-visible { outline: 2px solid #2468b4; outline-offset: 2px; }
+input { width: 280px; }
+select { max-width: 240px; }
+.muted { color: #666; }
+#status { margin: 18px 0 0; }
+.error { border: 1px solid #d6aaaa; border-radius: 4px; padding: 8px 10px; color: #a12828; white-space: pre-wrap; overflow-wrap: anywhere; }
+.progress { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 18px 0 20px; font-variant-numeric: tabular-nums; }
+progress { width: 220px; height: 9px; accent-color: #39764e; }
+.tabs { display: flex; gap: 18px; border-bottom: 1px solid #ccc; margin-bottom: 14px; overflow-x: auto; }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 1px; color: #666; }
+.tabs button[aria-pressed="true"] { border-bottom-color: #333; color: #222; font-weight: 600; }
+.tabs span { margin-left: 4px; font-variant-numeric: tabular-nums; }
+.filters { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; margin-bottom: 12px; }
+.filters label { display: flex; align-items: center; gap: 7px; }
+#shown { margin-left: auto; font-size: 12px; }
+.table-wrap { overflow-x: auto; border: 1px solid #d6d6d6; border-radius: 4px; }
+table { width: 100%; min-width: 740px; border-collapse: collapse; }
+th, td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid #e1e1e1; }
+thead th { background: #f5f5f5; font-weight: 600; white-space: nowrap; }
+thead th:first-child { width: 42%; }
+tbody th { font-weight: 400; }
+tbody tr.feature:hover { background: #fafafa; }
+.feature-button { display: flex; align-items: baseline; gap: 7px; width: 100%; padding: 0; border: 0; border-radius: 0; background: none; text-align: left; white-space: normal; }
+.feature-button:hover { background: none; text-decoration: underline; }
+.arrow { flex: 0 0 9px; color: #777; font-size: 10px; }
+.result, .tests { white-space: nowrap; }
+.tests { font-variant-numeric: tabular-nums; }
+.pass, .available { color: #28623d; }
+.partial { color: #91620f; }
+.fail { color: #a12828; }
+.untested, .missing { color: #777; }
+.details td { padding: 12px 28px; background: #f8f8f8; }
+dl { display: flex; flex-wrap: wrap; gap: 12px 32px; margin: 0 0 12px; }
+dt { color: #666; font-size: 12px; }
+dd { margin: 2px 0 0; }
+.detail-title { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.details ul { margin: 0 0 16px; padding-left: 18px; }
+.implementation code { display: block; margin-top: 3px; font-size: 11px; overflow-wrap: anywhere; }
+.technical { margin: 4px 0; font-size: 12px; overflow-wrap: anywhere; }
+.technical code { font-size: 11px; }
+#empty { padding: 28px 12px; text-align: center; color: #666; }
+footer { display: flex; flex-wrap: wrap; gap: 12px 24px; margin-top: 14px; font-size: 12px; color: #666; }
+footer details { max-width: 100%; }
+footer summary { cursor: pointer; }
+footer p { overflow-wrap: anywhere; }
+[hidden] { display: none !important; }
+@media (prefers-color-scheme: dark) {
+  :root { background: #1d1d1f; color: #e8e8e8; }
+  button, input, select { background: #28282a; border-color: #666; }
+  button:hover { background: #333; }
+  .muted, dt, footer, #empty, .tabs button, .untested, .missing { color: #aaa; }
+  .tabs, .table-wrap { border-color: #494949; }
+  .tabs button[aria-pressed="true"] { border-bottom-color: #ddd; color: #eee; }
+  th, td { border-color: #3b3b3d; }
+  thead th { background: #28282a; }
+  tbody tr.feature:hover, .details td { background: #242426; }
+  .feature-button, .feature-button:hover { background: none; }
+  .pass, .available { color: #98cba7; }
+  .partial { color: #dcb777; }
+  .fail, .error { color: #f4a6a6; }
+  .error { border-color: #785050; }
+}
+@media (max-width: 650px) {
+  body { padding: 20px 14px; }
+  h1 { font-size: 19px; }
+  .filters label:first-child { width: 100%; }
+  input { flex: 1; width: 0; }
+  #shown { width: 100%; margin-left: 0; }
+  .tabs { gap: 14px; }
+}
+</style>
+</head>
+<body>
+<header><div><h1>Acouplet feature comparison</h1><p class="muted">Sony Sound Connect 13.3.0</p></div><button id="run" type="button" disabled>Run tests</button></header>
+<p id="status" class="muted" role="status" aria-live="polite">Connecting to the local test runner…</p>
+<p id="error" class="error" role="alert" hidden></p>
+<div class="progress"><span>Available in Acouplet</span><progress id="progress" max="100" aria-label="Features available in Acouplet"></progress><strong id="percent">—</strong><span id="implemented" class="muted">Scanning implementation…</span><span id="partial-total" class="muted" hidden></span></div>
+<nav class="tabs" aria-label="Filter by Acouplet support">
+  <button type="button" data-result="all" aria-pressed="true">All<span id="all-count">—</span></button>
+  <button type="button" data-result="available" aria-pressed="false" disabled>Available<span id="available-count">—</span></button>
+  <button type="button" data-result="partial" aria-pressed="false" disabled>Partial<span id="partial-count">—</span></button>
+  <button type="button" data-result="missing" aria-pressed="false" disabled>Missing<span id="missing-count">—</span></button>
+</nav>
+<div class="filters">
+  <label>Search<input id="search" type="search" placeholder="Find a feature"></label>
+  <label>Category<select id="category"><option value="">All categories</option></select></label>
+  <label>Protocol<select id="protocol"><option value="">All protocols</option></select></label>
+  <span id="shown" class="muted" role="status">Waiting for results</span>
+</div>
+<div class="table-wrap"><table><thead><tr><th scope="col">Feature</th><th scope="col">Category</th><th scope="col">Protocol</th><th scope="col">Acouplet</th><th scope="col">APK checks</th></tr></thead><tbody id="features"></tbody><tbody id="empty" hidden><tr><td colspan="5">No features match these filters.</td></tr></tbody></table></div>
+<footer><span>Updates every 2 seconds.</span><details><summary>Run details</summary><p id="receipt"></p><p id="output"></p></details></footer>
+<script>
+const byId = id => document.getElementById(id);
+const labels = { pass: 'Tests pass', fail: 'Failing', untested: 'Not tested' };
+const implementationLabels = { available: 'Available', partial: 'Partial', missing: 'Missing' };
+const stageLabels = { exercised: 'Registered tests pass', verified: 'Passed', partial: 'Some tests pass', unverified: 'Not tested', failing: 'Failing', not_required: 'Not required' };
+let submitting = false;
+let connected = false;
+let implementationReady = false;
+let lastData = null;
+let selectedResult = 'all';
+let featureRows = [];
+const expanded = new Set();
+function node(tag, value, className) {
+  const item = document.createElement(tag);
+  if (value !== undefined) item.textContent = value;
+  if (className) item.className = className;
+  return item;
+}
+function time(value) { return new Date(value).toLocaleString(); }
+function showError(message) {
+  byId('error').textContent = message || '';
+  byId('error').hidden = !message;
+}
+function filter() {
+  const query = byId('search').value.trim().toLowerCase();
+  const category = byId('category').value;
+  const protocol = byId('protocol').value;
+  let shown = 0;
+  for (const { feature, row, details } of featureRows) {
+    row.hidden = (implementationReady && selectedResult !== 'all' && feature.implementation_result !== selectedResult)
+      || (category && feature.category_label !== category)
+      || (protocol && feature.protocol !== protocol)
+      || !`${feature.display_name} ${feature.category_label} ${feature.protocol} ${feature.name} ${feature.id}`.toLowerCase().includes(query);
+    details.hidden = row.hidden || !expanded.has(feature.id);
+    if (!row.hidden) shown++;
+  }
+  byId('shown').textContent = `${shown} of ${featureRows.length} features`;
+  byId('empty').hidden = shown !== 0;
+}
+function options(id, values, all) {
+  const select = byId(id);
+  const selected = select.value;
+  const items = [node('option', all)];
+  items[0].value = '';
+  for (const value of [...new Set(values)].sort()) {
+    const item = node('option', value);
+    item.value = value;
+    items.push(item);
+  }
+  select.replaceChildren(...items);
+  select.value = selected;
+}
+function renderFeatures(features) {
+  const focused = document.activeElement.dataset.feature;
+  const rows = document.createDocumentFragment();
+  featureRows = [];
+  for (const feature of features) {
+    const row = node('tr', undefined, 'feature');
+    const heading = node('th');
+    heading.scope = 'row';
+    const button = node('button', undefined, 'feature-button');
+    button.type = 'button';
+    button.dataset.feature = feature.id;
+    button.setAttribute('aria-expanded', String(expanded.has(feature.id)));
+    button.setAttribute('aria-controls', `details-${feature.id}`);
+    const arrow = node('span', expanded.has(feature.id) ? '▼' : '▶', 'arrow');
+    arrow.setAttribute('aria-hidden', 'true');
+    button.append(arrow, node('span', feature.display_name));
+    heading.append(button);
+    row.append(heading, node('td', feature.category_label), node('td', feature.protocol),
+      node('td', implementationReady ? implementationLabels[feature.implementation_result] : 'Scanning…', `result ${implementationReady ? feature.implementation_result : 'muted'}`),
+      node('td', labels[feature.test_result], `result ${feature.test_result}`));
+    const details = node('tr', undefined, 'details');
+    details.id = `details-${feature.id}`;
+    const cell = node('td');
+    cell.colSpan = 5;
+    cell.append(node('h2', 'Acouplet implementation', 'detail-title'));
+    if (implementationReady) {
+      const implementation = node('dl', undefined, 'implementation');
+      for (const detail of feature.implementation_details) {
+        const part = node('div');
+        const value = node('dd', detail.status === 'wont_implement' ? 'Won’t be implemented'
+          : detail.present === undefined ? undefined : detail.present ? 'Present' : 'Missing');
+        if (detail.path) value.append(node('code', detail.path));
+        if (detail.symbol) value.append(node('code', detail.symbol));
+        part.append(node('dt', detail.label || detail.part), value);
+        implementation.append(part);
+      }
+      cell.append(implementation);
+      if (feature.limitations.length) {
+        cell.append(node('h2', 'Limitations', 'detail-title'));
+        const limitations = node('ul');
+        for (const limitation of feature.limitations) limitations.append(node('li', limitation));
+        cell.append(limitations);
+      }
+    } else cell.append(node('p', 'Scanning implementation…', 'muted'));
+    cell.append(node('h2', feature.test_count ? `APK checks · ${feature.passed_tests} of ${feature.test_count} passed` : 'APK checks', 'detail-title'));
+    const stages = node('dl');
+    for (const [key, label] of [['serializer', 'Send commands'], ['parser', 'Read replies'], ['capability', 'Capability info'], ['controller', 'App behavior'], ['ui', 'Interface']]) {
+      const stage = node('div');
+      const state = feature.stages[key];
+      stage.append(node('dt', label), node('dd', state === undefined ? 'Not required' : stageLabels[state] || state));
+      stages.append(stage);
+    }
+    cell.append(stages);
+    if (feature.failed_cases.length) cell.append(node('p', `Failed tests: ${feature.failed_cases.join(', ')}`, 'technical fail'));
+    const name = node('p', 'APK name: ', 'technical muted');
+    name.append(node('code', feature.name));
+    const identity = node('p', 'ID: ', 'technical muted');
+    identity.append(node('code', feature.id));
+    cell.append(name, identity);
+    details.append(cell);
+    button.addEventListener('click', () => {
+      if (expanded.has(feature.id)) expanded.delete(feature.id);
+      else expanded.add(feature.id);
+      const open = expanded.has(feature.id);
+      button.setAttribute('aria-expanded', String(open));
+      arrow.textContent = open ? '▼' : '▶';
+      details.hidden = !open;
+    });
+    rows.append(row, details);
+    featureRows.push({ feature, row, details });
+  }
+  byId('features').replaceChildren(rows);
+  options('category', features.map(feature => feature.category_label), 'All categories');
+  options('protocol', features.map(feature => feature.protocol), 'All protocols');
+  filter();
+  if (focused) {
+    const row = featureRows.find(item => item.feature.id === focused);
+    if (row && !row.row.hidden) row.row.querySelector('button').focus({ preventScroll: true });
+  }
+}
+function render(data) {
+  byId('run').disabled = data.running || submitting;
+  byId('run').textContent = data.running ? 'Running tests…' : 'Run tests';
+  byId('status').textContent = data.running
+    ? `${data.phase}${data.started_at ? ' · Started ' + time(data.started_at) : ''}`
+    : `${data.phase}${data.finished_at ? ' · Last run ' + time(data.finished_at) : ''}`;
+  showError(data.error);
+  const summary = data.summary;
+  implementationReady = data.implementation_ready === true;
+  if (implementationReady) {
+    byId('progress').value = summary.implementation_percent;
+    byId('progress').setAttribute('aria-valuetext', `${summary.available} of ${summary.total} features available`);
+    byId('percent').textContent = `${Number(summary.implementation_percent.toFixed(1))}%`;
+    byId('implemented').textContent = `${summary.available} of ${summary.total} features`;
+    byId('partial-total').textContent = `${summary.partial} partial`;
+  } else {
+    byId('progress').removeAttribute('value');
+    byId('progress').setAttribute('aria-valuetext', 'Scanning implementation');
+    byId('percent').textContent = '—';
+    byId('implemented').textContent = 'Scanning implementation…';
+  }
+  byId('partial-total').hidden = !implementationReady;
+  byId('all-count').textContent = `(${summary.total})`;
+  for (const result of ['available', 'partial', 'missing']) {
+    byId(`${result}-count`).textContent = implementationReady ? `(${summary[result]})` : '—';
+    document.querySelector(`[data-result="${result}"]`).disabled = !implementationReady;
+  }
+  byId('receipt').textContent = data.receipt_valid ? 'Test evidence validated.' : 'No validated results for the current code.';
+  byId('output').textContent = `Results: ${data.output_path}`;
+  if (!lastData || data.implementation_ready !== lastData.implementation_ready || JSON.stringify(data.features) !== JSON.stringify(lastData.features)) renderFeatures(data.features);
+}
+async function refresh() {
+  try {
+    const response = await fetch('/api/status', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Status request failed (${response.status})`);
+    const data = await response.json();
+    if (!connected || JSON.stringify(data) !== JSON.stringify(lastData)) render(data);
+    lastData = data;
+    connected = true;
+  } catch (error) {
+    connected = false;
+    byId('status').textContent = 'Local test runner unavailable';
+    byId('run').disabled = true;
+    showError(`${error.message}. Check the local server. Displayed results may be out of date.`);
+  }
+}
+async function poll() {
+  await refresh();
+  setTimeout(poll, 2000);
+}
+byId('run').addEventListener('click', async () => {
+  submitting = true;
+  byId('run').disabled = true;
+  try {
+    const response = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (!response.ok) throw new Error(`Could not start tests (${response.status})`);
+    await refresh();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    submitting = false;
+    byId('run').disabled = !connected || lastData.running;
+  }
+});
+for (const button of document.querySelectorAll('[data-result]')) button.addEventListener('click', () => {
+  selectedResult = button.dataset.result;
+  for (const tab of document.querySelectorAll('[data-result]')) tab.setAttribute('aria-pressed', String(tab === button));
+  filter();
+});
+byId('search').addEventListener('input', filter);
+byId('category').addEventListener('change', filter);
+byId('protocol').addEventListener('change', filter);
+poll();
+</script>
+</body>
+</html>
