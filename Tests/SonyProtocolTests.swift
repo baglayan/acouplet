@@ -482,7 +482,6 @@ final class SonyProtocolTests: XCTestCase {
             XCTAssertEqual(model.caseSymbol != nil, model.isEarbuds)
             XCTAssertEqual(model.leftSymbol != nil, model.isEarbuds)
             XCTAssertEqual(model.rightSymbol != nil, model.isEarbuds)
-            XCTAssertEqual(model.systemSymbol, model.isEarbuds ? "earbuds.stemless" : "headphones")
         }
         XCTAssertEqual(SonyDeviceModel(name: "WH-ULT900N"), .whULT900N)
         XCTAssertEqual(SonyDeviceModel(name: "WH-1000XX"), .wh1000XX)
@@ -528,10 +527,31 @@ final class SonyProtocolTests: XCTestCase {
         }
         XCTAssertNil(SonyDeviceModel.unknown.artwork)
         XCTAssertTrue(SonyDeviceModel.unknown.artworkColors.isEmpty)
-        XCTAssertEqual(SonyDeviceModel.wi1000X.systemSymbol, "earbuds.stemless")
         XCTAssertEqual(SonyDeviceModel.srsULT900.systemSymbol, "hifispeaker")
         XCTAssertEqual(SonyDeviceModel.htAN7.systemSymbol, "hifispeaker")
         XCTAssertEqual(SonyDeviceModel.unknown.systemSymbol, "speaker.wave.2")
+    }
+
+    func testEveryDeviceSystemSymbolIsAvailable() {
+        for model in SonyDeviceModel.allCases {
+            XCTAssertNotNil(NSImage(systemSymbolName: model.systemSymbol, accessibilityDescription: nil), model.name)
+        }
+    }
+
+    @MainActor
+    func testSingleEarbudFallbacksRenderBothSides() throws {
+        var images: [Data] = []
+        for side in [EarbudSide.left, .right] {
+            let image = DeviceIcon.fallbackEarbudImage(side: side)
+            let bitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(image.cgImage(forProposedRect: nil, context: nil, hints: nil)))
+            XCTAssertGreaterThan(bitmap.pixelsWide, 0)
+            XCTAssertGreaterThan(bitmap.pixelsHigh, 0)
+            XCTAssertTrue((0..<bitmap.pixelsWide).contains { x in
+                (0..<bitmap.pixelsHigh).contains { y in (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0 }
+            })
+            images.append(try XCTUnwrap(bitmap.representation(using: .png, properties: [:])))
+        }
+        XCTAssertNotEqual(images[0], images[1])
     }
 
     func testAllRecognizedModelsHaveBundledCustomMiniIcons() throws {

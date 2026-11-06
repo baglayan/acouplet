@@ -491,7 +491,9 @@ enum SonyDeviceModel: String, CaseIterable, Sendable {
 
     var systemSymbol: String {
         switch formFactor {
-        case .earbuds, .neckbandEarbuds: "earbuds.stemless"
+        case .earbuds, .neckbandEarbuds:
+            if #available(macOS 26, *) { "earbuds.stemless" }
+            else { "earbuds" }
         case .onEarHeadphones, .overEarHeadphones: "headphones"
         case .neckbandSpeaker, .portableSpeaker, .towerSpeaker: "hifispeaker"
         case .unknown: "speaker.wave.2"
