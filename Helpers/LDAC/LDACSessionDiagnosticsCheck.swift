@@ -4,6 +4,16 @@ import Foundation
 @main
 enum LDACSessionDiagnosticsCheck {
     static let helperEvents: [(source: String, line: String, summary: String, failure: Bool)] = [
+        ("probe", "RAW_CHANNEL_OPEN_OBSERVER role=signaling available=1 limit=8",
+         "RAW_CHANNEL_OPEN_OBSERVER role=signaling available=1 limit=8", false),
+        ("probe", "RAW_CHANNEL_OPEN role=signaling event=1 time_ns=123456 info_type=dictionary result_present=1 result_type=number result_value=454 psm_present=1 psm_type=number psm_value=25 cid_present=1 cid_type=number cid_value=2827 mtu_present=1 mtu_type=number mtu_value=0 socket_present=1 socket_type=number socket_value=-1",
+         "RAW_CHANNEL_OPEN role=signaling event=1 time_ns=123456 info=dictionary result=454 psm=25 cid=2827 mtu=0 socket=-1", false),
+        ("media", "RAW_CHANNEL_OPEN role=media event=1 time_ns=123456 info_type=dictionary result_type=number result_value=0 socket_present=0 socket_type=missing socket_value=none",
+         "RAW_CHANNEL_OPEN role=media event=1 time_ns=123456 info=dictionary result=0 socket=missing", false),
+        ("probe", "RAW_CHANNEL_OPEN incoming_present=1 incoming_type=number incoming_value=0",
+         "RAW_CHANNEL_OPEN incoming=0", false),
+        ("probe", "RAW_CHANNEL_OPEN incoming_present=1 incoming_type=number incoming_value=1",
+         "RAW_CHANNEL_OPEN incoming=1", false),
         ("probe", "OPEN_INDETERMINATE nil_channel=1 callback_status=0",
          "OPEN_INDETERMINATE callback_status=0 nil_channel=1", true),
         ("probe", "TRANSPORT_CLOSE_UNCONFIRMED CID=0041 closeRequested=1",
@@ -63,6 +73,13 @@ enum LDACSessionDiagnosticsCheck {
         precondition(LDACNativeSession.helperFailureSummary("PCM_FAILED reason=read errno=32 address=AA-BB-CC-DD-EE-FF") == "PCM_FAILED errno=32 reason=read")
         for event in helperEvents {
             precondition(LDACNativeSession.helperFailureSummary(event.line + " address=AA-BB-CC-DD-EE-FF name=Private-headphones /Users/alex/private channel=0x12345678") == event.summary)
+        }
+        precondition(LDACNativeSession.helperFailureSummary("RAW_CHANNEL_OPEN role=private info_type=private result_type=string result_value=Private-headphones socket_type=data socket_value=/Users/alex/private") == "RAW_CHANNEL_OPEN result=string socket=data")
+        for value in ["454-private", "1;name=private", String(repeating: "9", count: 100), "1e9999"] {
+            precondition(LDACNativeSession.helperFailureSummary("RAW_CHANNEL_OPEN result_type=number result_value=\(value)") == "RAW_CHANNEL_OPEN result=malformed")
+        }
+        for value in ["0", "-1", "454", "18446744073709551615", "1.5", "1.7976931348623157e+308", "nan", "inf", "-inf"] {
+            precondition(LDACNativeSession.helperFailureSummary("RAW_CHANNEL_OPEN result_type=number result_value=\(value)") == "RAW_CHANNEL_OPEN result=\(value)")
         }
         for reason in ["peer-selector", "query-selector", "reply-shape", "query-result", "state-shape", "state-value",
                        "baseline-connected", "baseline-native-output-present", "original-connection-ended", "epoch-retired",

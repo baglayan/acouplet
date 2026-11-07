@@ -2,6 +2,7 @@
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <IOBluetooth/IOBluetooth.h>
 #include "LDACParentLifetime.h"
+#include "LDACChannelOpenObservation.h"
 #include <inttypes.h>
 #import <objc/runtime.h>
 #include <poll.h>
@@ -132,7 +133,7 @@ static void Candidate(const uint8_t *bytes, NSUInteger length, NSUInteger end,
                       BOOL rejected, Parsed *parsed, NSUInteger *solutions, BOOL *unsupported) {
     NSUInteger offset = end, commands = 0;
     while (offset < length) {
-        if (length - offset >= 2 && bytes[offset] == 0xF1 && bytes[offset + 1] == 0x3F) {
+        if (length - offset >= 2 && (bytes[offset] & 15) == 1 && bytes[offset + 1] == 0x3F) {
             *parsed = (Parsed){end, offset + 2, commands, rejected};
             (*solutions)++;
             return;
@@ -181,7 +182,10 @@ static int Parse(const uint8_t *bytes, NSUInteger length, uint8_t transaction, u
         for (NSUInteger offset = 2; offset + 2 <= length; offset += 2) {
             uint8_t seid = bytes[offset] >> 2, info = bytes[offset + 1];
             if ((bytes[offset] & 1) || seid < 1 || seid > 62 || (seen & (1ULL << seid)) ||
-                (info & 7) || (info >> 4) > 2) break;
+                (info & 7) || (info >> 4) > 2) {
+                if (offset == 2) Candidate(bytes, length, offset, NO, parsed, &solutions, &unsupported);
+                break;
+            }
             seen |= 1ULL << seid;
             Candidate(bytes, length, offset + 2, NO, parsed, &solutions, &unsupported);
         }
@@ -337,7 +341,7 @@ static NSArray<NSNumber *> *DecodeReply(NSData *reply, uint8_t transaction, uint
     if (length < 2 || bytes[0] != ((transaction << 4) | 2) || bytes[1] != signal) return nil;
     NSMutableArray<NSNumber *> *sinks = [NSMutableArray array];
     if (signal == 1) {
-        if (length < 4 || (length - 2) % 2 || length > 126) return nil;
+        if ((length - 2) % 2 || length > 126) return nil;
         BOOL seen[63] = {NO};
         for (NSUInteger i = 2; i < length; i += 2) {
             uint8_t endpoint = bytes[i] >> 2;
@@ -678,6 +682,7 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
             uint8_t encoded = seid << 2;
             uint8_t label = transaction;
             NSData *reply = Query(probe, &transaction, 2, [NSData dataWithBytes:&encoded length:1]);
+            if (!reply && probe.lastRejected) continue;
             if (!reply || !DecodeReply(reply, label, 2, seid, YES)) {
                 capabilitiesComplete = NO;
                 break;
@@ -811,7 +816,7 @@ static BOOL SelfTest(void) {
         DecodeReply(capabilities, 2, 2, 1, NO) == nil &&
         DecodeReply([endpoints subdataWithRange:NSMakeRange(0, endpoints.length - 1)], 1, 1, 0, NO) == nil &&
         DecodeReply([capabilities subdataWithRange:NSMakeRange(0, capabilities.length - 1)], 2, 12, 1, NO) == nil &&
-        DecodeReply([endpoints subdataWithRange:NSMakeRange(0, 2)], 1, 1, 0, NO) == nil;
+        [DecodeReply([endpoints subdataWithRange:NSMakeRange(0, 2)], 1, 1, 0, NO) isEqualToArray:@[]];
     DirectPlaybackProbe *probe = [DirectPlaybackProbe new];
     probe.sampleRate = 48000;
     probe.quality = @"low";
@@ -1073,6 +1078,8 @@ int main(int argc, const char *argv[]) {
             if (probe.stopRequested && !probe.failed && !probe.stdinEnded) result = 0;
         } else {
             probe.openRequested = YES;
+            printf("RAW_CHANNEL_OPEN_OBSERVER role=signaling available=%d limit=%d\n",
+                   LDACObserveChannelOpens(peer, "signaling"), LDACChannelOpenObservationLimit);
             printf("OPEN_BEGIN PSM=0019\n");
             [peer openL2CAPChannel:0x19];
             deadline = MonotonicTime() + 5;

@@ -262,7 +262,7 @@ static void *ParentProtocol(void *opaque) {
     close(state->readFD);
     return NULL;
 }
-static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL cancelConfiguration, BOOL reordered) {
+static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL cancelConfiguration, BOOL reordered, BOOL relabeledMarker) {
     ResetParent();
     DirectPlaybackProbe *probe = Probe();
     probe.sampleRate = rate;
@@ -270,13 +270,16 @@ static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL
     TestOutput *output = (id)probe.output;
     __block BOOL closed = NO;
     __block NSUInteger queries = 0;
+    __block uint8_t lastLabel = 0;
     output.onWrite = ^(NSData *packet) {
         const uint8_t *bytes = packet.bytes;
         if (bytes[0] & 15) return;
         if (bytes[0] == 0xF0 && bytes[1] == 0x3F) {
-            Chunks(input, Hex(@"f1 3f"), 0, NO);
+            uint8_t marker[] = {(uint8_t)(((relabeledMarker ? lastLabel : 15) << 4) | 1), 0x3F};
+            Chunks(input, [NSData dataWithBytes:marker length:sizeof(marker)], 0, YES);
             return;
         }
+        lastLabel = bytes[0] >> 4;
         queries++;
         if (cancelConfiguration && bytes[1] == 3) { ParentLine("stop\n"); return; }
         uint8_t header[] = {(uint8_t)(bytes[0] | 2), bytes[1]};
@@ -322,6 +325,58 @@ static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL
     output.onWrite = nil;
 }
 
+static void EndpointSelectionCase(NSArray<NSData *> *responses, NSUInteger expectedQueries, uint8_t expectedSink) {
+    ResetParent();
+    DirectPlaybackProbe *probe = Probe();
+    TestInput *input = (id)probe.input;
+    TestOutput *output = (id)probe.output;
+    __block NSUInteger queries = 0;
+    __block NSUInteger configurations = 0;
+    output.onWrite = ^(NSData *packet) {
+        const uint8_t *bytes = packet.bytes;
+        if (bytes[0] & 15) return;
+        if (bytes[0] == 0xF0 && bytes[1] == 0x3F) {
+            Chunks(input, Hex(@"f1 3f"), 0, YES);
+            return;
+        }
+        uint8_t header[] = {(uint8_t)(bytes[0] | 2), bytes[1]};
+        NSMutableData *response = [NSMutableData dataWithBytes:header length:2];
+        if (bytes[1] == 1) {
+            for (NSUInteger index = 0; index < responses.count; index++) {
+                uint8_t endpoint[] = {(uint8_t)((index + 1) << 2), 0x08};
+                [response appendBytes:endpoint length:sizeof(endpoint)];
+            }
+        } else if (bytes[1] == 2) {
+            queries++;
+            Check(queries <= responses.count && packet.length == 3 && bytes[2] == (queries << 2),
+                  "each discovered endpoint queried at most once in order");
+            Chunks(input, responses[queries - 1], 0, YES);
+            return;
+        } else if (bytes[1] == 3) {
+            configurations++;
+            Check(expectedSink && bytes[2] == (expectedSink << 2), "configure only selected endpoint");
+        } else if (bytes[1] == 4) [response appendData:ServiceBytes(probe.sampleRate, NO)];
+        Chunks(input, response, 0, YES);
+    };
+    int events[2];
+    Check(pipe(events) == 0, "event pipe");
+    int savedOutput = dup(STDOUT_FILENO);
+    Check(dup2(events[1], STDOUT_FILENO) == STDOUT_FILENO, "redirect events");
+    close(events[1]);
+    struct ProtocolThread state = {events[0], parentWrite, NO};
+    pthread_t thread;
+    Check(pthread_create(&thread, NULL, ParentProtocol, &state) == 0, "start parent protocol");
+    BOOL result = PlaybackSequence(probe);
+    fflush(stdout);
+    dup2(savedOutput, STDOUT_FILENO);
+    close(savedOutput);
+    pthread_join(thread, NULL);
+    Check(result == (expectedSink != 0) && probe.selectedSink == expectedSink, "endpoint selection result");
+    Check(queries == expectedQueries && configurations == (expectedSink ? 1 : 0), "endpoint selection query count");
+    Check(!probe.configurationSent && !probe.configured && !probe.streamOpened, "endpoint selection leaves no configuration");
+    output.onWrite = nil;
+}
+
 int main(void) {
     @autoreleasepool {
         setbuf(stdout, NULL);
@@ -359,6 +414,7 @@ int main(void) {
         NSData *marker = Hex(@"f1 3f");
         NSArray *cases = @[
             @[Hex(@"12 01 04 08 08 08 0c 08"), @1, @YES, @NO],
+            @[Hex(@"12 01"), @1, @YES, @NO],
             @[Hex(@"12 0c 01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07 04 02 02 00 08 00"), @12, @YES, @NO],
             @[Hex(@"12 04 01 00 07 0a 00 ff 2d 01 00 00 aa 00 10 01"), @4, @YES, @NO],
             @[Hex(@"12 03"), @3, @YES, @NO],
@@ -377,6 +433,37 @@ int main(void) {
                       [fixture[2] boolValue], [fixture[3] boolValue]);
         }
         NSData *discover = cases[0][0];
+        Check([DecodeReply(Hex(@"12 01"), 1, 1, 0, NO) isEqualToArray:@[]],
+              "empty discovery is a valid response with no endpoints");
+        QueryCase(Hex(@"12 01"), 1, Hex(@"20 01 f1 3f"), 0, YES, YES, NO);
+        NSData *customerDiscover = Hex(@"12 01 04 08 08 08 0c 08 10 08 14 08 18 08");
+        for (NSUInteger label = 0; label < 16; label++) {
+            uint8_t bytes[] = {(uint8_t)((label << 4) | 1), 0x3F};
+            NSData *boundary = [NSData dataWithBytes:bytes length:sizeof(bytes)];
+            QueryCase(Hex(@"12 01"), 1, boundary, 0, YES, YES, NO);
+            for (NSUInteger split = 0; split <= customerDiscover.length; split++)
+                QueryCase(customerDiscover, 1, boundary, split, NO, YES, NO);
+            QueryCase(customerDiscover, 1, boundary, 0, YES, YES, NO);
+            NSMutableData *capabilities = [Hex(@"12 02 01 00 07 0a 00 ff") mutableCopy];
+            [capabilities appendData:boundary];
+            [capabilities appendData:Hex(@"00 00 aa 00 10 01")];
+            for (NSUInteger split = 0; split <= capabilities.length; split++)
+                QueryCase(capabilities, 2, boundary, split, NO, YES, NO);
+            QueryCase(capabilities, 2, boundary, 0, YES, YES, NO);
+            NSMutableData *incoming = [customerDiscover mutableCopy];
+            [incoming appendData:boundary];
+            FramingPrefixes(incoming, customerDiscover.length, incoming.length);
+            for (NSUInteger type = 0; type < 16; type++) {
+                if (type == 1) continue;
+                ((uint8_t *)incoming.mutableBytes)[customerDiscover.length] = (label << 4) | type;
+                FramingPrefixes(incoming, 0, 0);
+            }
+            ResetParent();
+            DirectPlaybackProbe *unsolicited = Probe();
+            [unsolicited.pending appendData:boundary];
+            Check(ServicePendingSignals(unsolicited, 0, 0) == -1 && unsolicited.framingUncertain,
+                  "marker replies cannot establish a boundary outside a pending marker query");
+        }
         NSData *protection = Hex(@"12 02 01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07 04 02 02 00 04 02 03 00");
         Check(DecodeReply(protection, 1, 2, 3, NO) != nil, "multiple content protection capabilities are valid");
         for (BOOL opened = NO; ; opened = YES) {
@@ -603,6 +690,22 @@ int main(void) {
         Check(!WaitControl(peerClose, @"media-finished") && peerClose.peerStopped &&
               !peerClose.configurationSent && [((TestOutput *)peerClose.output).writes.lastObject isEqualToData:Hex(@"22 08")],
               "peer Close during playback wait is answered and stops playback without parent activity");
+        for (NSUInteger terminal = 0; terminal < 3; terminal++) {
+            ResetParent();
+            DirectPlaybackProbe *rejected = Probe();
+            TestInput *input = (id)rejected.input;
+            TestOutput *output = (id)rejected.output;
+            output.onWrite = ^(NSData *packet) { Chunks(input, Hex(@"13 02 12"), 0, YES); };
+            uint8_t transaction = 1;
+            Check(!Query(rejected, &transaction, 2, Hex(@"04")) && rejected.lastRejected && !rejected.framingUncertain,
+                  "capability rejection accounted before terminal event");
+            if (terminal == 0) rejected.stopRequested = YES;
+            else if (terminal == 1) rejected.closed = YES;
+            else rejected.failed = YES;
+            Check(!Query(rejected, &transaction, 2, Hex(@"08")) && !rejected.lastRejected &&
+                  transaction == 2 && output.writes.count == 1, "terminal event prevents next endpoint query after rejection");
+            output.onWrite = nil;
+        }
         ResetParent();
         DirectPlaybackProbe *partialWrite = Probe();
         ((TestOutput *)partialWrite.output).shortWrite = YES;
@@ -641,14 +744,24 @@ int main(void) {
         for (NSString *invalid in @[@"acquire 99 200", @"acquire 100 100", @"acquire 100 301", @"acquire 100 200 extra", @"stop"])
             Check(!AcquisitionTrigger(invalid, 100, 300), "bad acquisition rejected");
         Check(!AcquisitionTrigger(@"acquire 100 200", 100, 200 + NSEC_PER_SEC + 1), "stale acquisition rejected");
+        NSData *laterLDAC = Hex(@"32 02 01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07");
+        EndpointSelectionCase(@[Hex(@"23 02 12"), laterLDAC], 2, 2);
+        EndpointSelectionCase(@[Hex(@"21 02"), laterLDAC], 2, 2);
+        EndpointSelectionCase(@[Hex(@"23 02 12"), Hex(@"33 02 12")], 2, 0);
+        EndpointSelectionCase(@[Hex(@"23 02"), laterLDAC], 1, 0);
+        EndpointSelectionCase(@[Hex(@"22 02 01 00 07 01 ff"), laterLDAC], 1, 0);
+        EndpointSelectionCase(@[Hex(@"23 02 12"), Hex(@"32 02 01 00 07 0a 10 ff 2d 01 00 00 aa 00 3c 07"),
+                               Hex(@"42 02 01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07")], 2, 0);
         for (NSNumber *rate in @[@44100, @48000, @88200, @96000]) {
-            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, NO);
-            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, YES);
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, NO, NO);
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, NO, YES);
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, YES, NO);
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, YES, YES);
         }
-        PlaybackCase(YES, NO, 48000, NO, NO);
-        PlaybackCase(NO, YES, 48000, NO, NO);
-        PlaybackCase(NO, YES, 48000, NO, YES);
-        PlaybackCase(NO, NO, 48000, YES, NO);
+        PlaybackCase(YES, NO, 48000, NO, NO, NO);
+        PlaybackCase(NO, YES, 48000, NO, NO, NO);
+        PlaybackCase(NO, YES, 48000, NO, YES, NO);
+        PlaybackCase(NO, NO, 48000, YES, NO, NO);
         dup2(originalInput, STDIN_FILENO);
         close(originalInput);
         if (parentWrite >= 0) close(parentWrite);
