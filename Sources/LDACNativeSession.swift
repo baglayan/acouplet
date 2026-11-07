@@ -256,6 +256,9 @@ final class LDACNativeSession: @unchecked Sendable {
     private var loggedBytes = 0
     private var diagnosticStage = "startup"
     private var lastSenderTiming: String?
+    private var signalingTrace: [String] = []
+    private var omittedSignalingTraceLines = 0
+    private var signalingTraceReported = false
 
     init(id: UUID, address: String, helpers: Helpers, gain: Double, outputDeviceUID: String? = nil,
          priority: LDACPriorityControl? = nil,
@@ -324,11 +327,21 @@ final class LDACNativeSession: @unchecked Sendable {
 
     func simulateDiagnosticHelperFailure(_ line: String, source: String = "probe", stopping: Bool = false,
                                          previousStage: String = "startup") {
+        simulateDiagnosticHelperLines([line], source: source, stopping: stopping, previousStage: previousStage)
+    }
+
+    func simulateDiagnosticHelperLines(_ lines: [String], source: String = "probe", stopping: Bool = false,
+                                      previousStage: String = "startup", logURL: URL? = nil) {
         diagnosticStage = previousStage
         if stopping { stop() }
-        do { try handle(source, line: line) }
+        do {
+            if let logURL { log = try FileHandle(forWritingTo: logURL) }
+            for line in lines { try handle(source, line: line) }
+        }
         catch { fail(error.localizedDescription) }
         finish()
+        try? log?.close()
+        log = nil
     }
 
     func simulateDiagnosticFailure(_ message: String) {
@@ -470,6 +483,23 @@ final class LDACNativeSession: @unchecked Sendable {
     }
 
     private func handle(_ source: String, line: String) throws {
+        let trace = source == "probe" ? Self.signalingTraceLines(line) : nil
+        if let trace {
+            for detail in trace { record("probe \(detail)") }
+            signalingTrace.append(contentsOf: trace)
+            if signalingTrace.count > 24 {
+                omittedSignalingTraceLines += signalingTrace.count - 24
+                signalingTrace.removeFirst(signalingTrace.count - 24)
+            }
+        }
+        if source == "probe", !shouldStop,
+           ["RESPONSE_FAILED ", "CONFIGURATION_VERIFICATION_FAILED", "UNMATCHED_RESPONSE_FRAMING_UNSUPPORTED",
+            "PEER_COMMAND_FRAMING_UNSUPPORTED", "NEGOTIATION_FAILED "].contains(where: line.hasPrefix) {
+            let lastResponse = signalingTrace.last { $0.hasPrefix("RESPONSE_REJECTED ") || $0.hasPrefix("RESPONSE_ACCEPTED ") }
+            let cause = line.hasPrefix("NEGOTIATION_FAILED ") && lastResponse?.hasPrefix("RESPONSE_REJECTED ") == true
+                ? lastResponse! : Self.helperFailureSummary(line)
+            fail(cause, stage: "signaling")
+        }
         if (source == "probe" || source == "media"), line.hasPrefix("NO_OPEN ") {
             diagnose(Self.helperFailureSummary(line), stage: source, isFailure: !shouldStop)
         }
@@ -477,7 +507,7 @@ final class LDACNativeSession: @unchecked Sendable {
            ["NO_PLAYBACK ", "CONTROL_FAILED ", "PCM_FAILED ", "ENCODER_FAILED ", "AUDIO_PERMISSION_FAILED"].contains(where: line.hasPrefix) {
             diagnose(Self.helperFailureSummary(line), stage: source, isFailure: !shouldStop)
         }
-        if !line.hasPrefix("SEND ") && !line.hasPrefix("DRAIN ") && !line.hasPrefix("RX ") {
+        if trace == nil && !line.hasPrefix("SEND ") && !line.hasPrefix("DRAIN ") && !line.hasPrefix("RX ") {
             record("\(source) \(line)")
         }
         if source == "probe" || source == "media" {
@@ -1301,19 +1331,37 @@ final class LDACNativeSession: @unchecked Sendable {
                "OPEN_CLEANUP_UNCONFIRMED", "MEDIA_CLOSE_UNCONFIRMED", "OWNED_CLOSE_UNCONFIRMED", "CONNECT_RETURN",
                "CONNECTION_CALLBACK", "ACL_OBSERVATION_FAILED", "NATIVE_AUDIO_UNCONFIRMED", "CONNECT_CANCEL_CLOSE",
                "CONNECT_CANCELED", "CONNECT_CANCELLATION_UNCONFIRMED", "CONNECT_TERMINAL_UNCONFIRMED",
-               "CONNECT_LOCK_UNAVAILABLE", "AFTER"].contains(kind) else { return "Unrecognized helper event" }
+               "CONNECT_LOCK_UNAVAILABLE", "AFTER", "RESPONSE_FAILED", "RESPONSE_REJECTED", "RESPONSE_ACCEPTED",
+               "RESPONSE_FRAMING_REJECT", "UNMATCHED_RESPONSE_DISCARDED", "UNMATCHED_RESPONSE_FRAMING_UNSUPPORTED",
+               "PEER_COMMAND_FRAMING_UNSUPPORTED", "CONFIGURATION_VERIFICATION_FAILED", "SIGNALING_COMPLETE",
+               "NEGOTIATION_FAILED"].contains(kind) else { return "Unrecognized helper event" }
         var fields = [kind]
+        if kind == "NEGOTIATION_FAILED", let stage = LDACChannelGate.captures("(?:^| )stage=([a-z]+)(?: |$)", line)?.first,
+           ["discover", "capabilities", "configuration", "readback", "open", "media", "start", "playback", "close"].contains(stage) {
+            fields.append("stage=\(stage)")
+        }
         if let value = LDACChannelGate.captures("(?:^| )status=(0x[0-9a-f]{8}|-?[0-9]{1,20})(?: |$)", line)?.first {
             fields.append("status=\(value)")
         }
-        for key in ["code", "errno", "openError", "closed", "error", "callback_status"] {
+        if let value = LDACChannelGate.captures("(?:^| )transaction=([0-9]{1,2})(?: |$)", line)?.first,
+           let transaction = Int(value), transaction < 16 {
+            fields.append("transaction=\(transaction)")
+        }
+        for key in kind == "RESPONSE_REJECTED" ? ["signal", "error"] : ["signal"] {
+            if let value = LDACChannelGate.captures("(?:^| )\(key)=([0-9a-f]{2})(?: |$)", line)?.first {
+                fields.append("\(key)=\(value.uppercased())")
+            }
+        }
+        for key in ["code", "errno", "openError", "closed", "error", "callback_status", "result", "length",
+                    "raw_bytes", "received_bytes", "pending_bytes"] where key != "error" || kind != "RESPONSE_REJECTED" {
             if let value = LDACChannelGate.captures("(?:^| )\(key)=(-?[0-9]{1,20})(?: |$)", line)?.first {
                 fields.append("\(key)=\(value)")
             }
         }
         for key in ["nil_channel", "pending", "indeterminate", "closeRequested", "parentEOF", "deadline",
                     "openPending", "openIndeterminate", "inputEOF", "callback", "connected", "disconnected",
-                    "issued", "settled", "originalDisconnected", "retired", "canceled"] {
+                    "issued", "settled", "originalDisconnected", "retired", "canceled", "rejected", "framing_unconfirmed",
+                    "marker_sent", "framing_uncertain", "owned_closed", "saved"] {
             if let value = LDACChannelGate.captures("(?:^| )\(key)=([01])(?: |$)", line)?.first {
                 fields.append("\(key)=\(value)")
             }
@@ -1341,6 +1389,42 @@ final class LDACNativeSession: @unchecked Sendable {
         return fields.joined(separator: " ")
     }
 
+    static func signalingTraceLines(_ line: String) -> [String]? {
+        let kind = line.split(separator: " ", maxSplits: 1).first.map(String.init) ?? ""
+        if ["RESPONSE_FAILED", "RESPONSE_REJECTED", "RESPONSE_ACCEPTED", "RESPONSE_FRAMING_REJECT",
+            "UNMATCHED_RESPONSE_DISCARDED", "UNMATCHED_RESPONSE_FRAMING_UNSUPPORTED", "PEER_COMMAND_FRAMING_UNSUPPORTED",
+            "CONFIGURATION_VERIFICATION_FAILED", "SIGNALING_COMPLETE", "NEGOTIATION_FAILED"].contains(kind) {
+            return [helperFailureSummary(line)]
+        }
+        guard kind == "RX" || kind == "TX_BEGIN" else { return nil }
+        let direction = kind == "RX" ? "RX" : "TX"
+        let timePattern = "([0-9]{1,12}(?:\\.[0-9]{1,6})?)"
+        let prefix = kind == "RX"
+            ? "^RX time=\(timePattern) channel=(?:0x[0-9a-f]+|\\(nil\\)) length=(-?[0-9]{1,10}) bytes=(.*)$"
+            : "^TX_BEGIN time=\(timePattern) bytes=(.*)$"
+        guard let values = LDACChannelGate.captures(prefix, line) else { return ["\(direction) malformed=1"] }
+        var bytes = values.last!.split(separator: " ").map(String.init)
+        let abbreviated = bytes.last == "..."
+        if abbreviated { bytes.removeLast() }
+        guard bytes.count <= (kind == "RX" ? 256 : 2570),
+              bytes.allSatisfy({ $0.utf8.count == 2 && $0.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) } }) else {
+            return ["\(direction) malformed=1"]
+        }
+        let length = kind == "RX" ? Int(values[1])! : bytes.count
+        guard kind == "RX" ? bytes.count == min(max(length, 0), 256) && abbreviated == (length > 256) : !abbreviated else {
+            return ["\(direction) malformed=1"]
+        }
+        let retained = min(bytes.count, 256)
+        var result: [String] = []
+        for offset in stride(from: 0, to: retained, by: 32) {
+            let payload = bytes[offset..<min(offset + 32, retained)].map { $0.uppercased() }.joined(separator: " ")
+            result.append("\(direction) time=\(values[0]) length=\(length) offset=\(offset) bytes=\(payload)")
+        }
+        if retained == 0 { result.append("\(direction) time=\(values[0]) length=\(length)") }
+        if length > retained { result.append("\(direction) time=\(values[0]) omitted_bytes=\(length - retained)") }
+        return result
+    }
+
     static func senderTimingSummary(_ line: String) -> String? {
         let fields = ["serviceMean", "serviceMax", "sendMax", "waitMax", "localStallMax", "debtMax", "debt"]
             .map { "\($0)=[0-9]+\\.[0-9]{6}" }.joined(separator: " ")
@@ -1352,6 +1436,13 @@ final class LDACNativeSession: @unchecked Sendable {
         let detail = message.hasPrefix("PCM_FAILED ") ? Self.helperFailureSummary(message) : message
         emit(.diagnostic(Diagnostic(stage: diagnosticStage, detail: detail, isFailure: isFailure)))
         if isFailure {
+            if !signalingTraceReported, !signalingTrace.isEmpty {
+                signalingTraceReported = true
+                if omittedSignalingTraceLines > 0 {
+                    emit(.diagnostic(Diagnostic(stage: "signaling trace", detail: "Earlier trace lines omitted=\(omittedSignalingTraceLines)")))
+                }
+                for line in signalingTrace { emit(.diagnostic(Diagnostic(stage: "signaling trace", detail: line))) }
+            }
             if let lastSenderTiming { emit(.diagnostic(Diagnostic(stage: "sender timing (seconds)", detail: lastSenderTiming))) }
             let readiness = "preflight=\(preflightCompleted) armed=\(signalingArmed != nil) acl=\(connected) connector=\(connectorReady) signal=\(signalingGate.opened) media=\(mediaGate.opened) capture=\(captureReady) pcm=\(pcmReady) start=\(startAccepted) priority=\(priorityPhase) active=\(active)"
             emit(.diagnostic(Diagnostic(stage: "readiness", detail: readiness)))

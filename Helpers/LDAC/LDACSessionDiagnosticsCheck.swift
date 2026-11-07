@@ -78,6 +78,14 @@ enum LDACSessionDiagnosticsCheck {
         precondition(LDACNativeSession.helperFailureSummary("CONNECTION_CALLBACK status=-536870174 connected=0") == "CONNECTION_CALLBACK status=-536870174 connected=0")
         precondition(LDACNativeSession.helperFailureSummary("OPEN_CLEANUP_UNCONFIRMED pending=10 indeterminate=0-private cleanup=private") == "OPEN_CLEANUP_UNCONFIRMED")
         precondition(LDACNativeSession.helperFailureSummary("PRIVATE_HEADPHONES_UNCONFIRMED address=AA-BB-CC-DD-EE-FF") == "Unrecognized helper event")
+        precondition(LDACNativeSession.helperFailureSummary("RESPONSE_REJECTED transaction=15 signal=03 error=31 CID=0041") == "RESPONSE_REJECTED transaction=15 signal=03 error=31")
+        precondition(LDACNativeSession.helperFailureSummary("RESPONSE_FRAMING_REJECT result=-1 marker_sent=0") == "RESPONSE_FRAMING_REJECT result=-1 marker_sent=0")
+        precondition(LDACNativeSession.helperFailureSummary("RESPONSE_ACCEPTED transaction=16 signal=010 length=4") == "RESPONSE_ACCEPTED length=4")
+        for stage in ["discover", "capabilities", "configuration", "readback", "open", "media", "start", "playback", "close"] {
+            precondition(LDACNativeSession.helperFailureSummary("NEGOTIATION_FAILED stage=\(stage) address=AA-BB-CC-DD-EE-FF") == "NEGOTIATION_FAILED stage=\(stage)")
+        }
+        precondition(LDACNativeSession.helperFailureSummary("NEGOTIATION_FAILED stage=private") == "NEGOTIATION_FAILED")
+        checkSignalingTraceParsing()
         if CommandLine.arguments.count == 3, ["--live", "--finish"].contains(CommandLine.arguments[1]) {
             let directory = URL(fileURLWithPath: CommandLine.arguments[2])
             let active = try LDACNativeSession.beginDiagnostics(in: directory)
@@ -90,6 +98,7 @@ enum LDACSessionDiagnosticsCheck {
         }
         #if DEBUG
         try await checkHelperEmission()
+        try await checkSignalingFailureEvidence()
         #endif
         let manager = FileManager.default
         let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -218,7 +227,136 @@ enum LDACSessionDiagnosticsCheck {
         print("LDAC diagnostic checks passed: redacted helper events/status/reasons, mixed completed/managed-orphan limit, legacy preservation, concurrent live locks and completion, forced-exit recovery, unrelated paths")
     }
 
+    static func checkSignalingTraceParsing() {
+        let bytes = "12 01 04 08 08 08 0C 08 10 08 14 08 18 08 1C 08"
+        precondition(LDACNativeSession.signalingTraceLines("RX time=123.456 channel=0x12345678 length=16 bytes=\(bytes)") == ["RX time=123.456 length=16 offset=0 bytes=\(bytes)"])
+        precondition(LDACNativeSession.signalingTraceLines("TX_BEGIN time=123.456 bytes=10 01") == ["TX time=123.456 length=2 offset=0 bytes=10 01"])
+        precondition(LDACNativeSession.signalingTraceLines("RX time=123 channel=0x12345678 length=-1 bytes=") == ["RX time=123 length=-1"])
+        precondition(LDACNativeSession.signalingTraceLines("RX time=123 channel=(nil) length=0 bytes=") == ["RX time=123 length=0"])
+        precondition(LDACNativeSession.signalingTraceLines("TX_BEGIN time=1793642544.578000 bytes=10 01") == ["TX time=1793642544.578000 length=2 offset=0 bytes=10 01"])
+        for time in ["NaN", "inf", "123.4.5", "1e3", "123.1234567", String(repeating: "1", count: 13), "/Users/alex/private"] {
+            precondition(LDACNativeSession.signalingTraceLines("RX time=\(time) channel=0x12345678 length=2 bytes=12 01") == ["RX malformed=1"])
+            precondition(LDACNativeSession.signalingTraceLines("TX_BEGIN time=\(time) bytes=10 01") == ["TX malformed=1"])
+        }
+        for line in [
+            "RX time=123 channel=0x12345678 length=1 bytes=12 01",
+            "RX time=123 channel=0x12345678 length=2 bytes=12",
+            "RX time=123 channel=0x12345678 length=2 bytes=12 zz",
+            "RX time=123 channel=0x12345678 length=2 bytes=12 +1",
+            "RX time=123 channel=0x12345678 length=2 bytes=12 01 name=Private-headphones",
+            "RX time=123 channel=0x12345678 length=2 bytes=12 01 ...",
+            "RX time=123 channel=0x12345678 length=99999999999 bytes=12 01",
+            "RX address=AA-BB-CC-DD-EE-FF name=Private-headphones /Users/alex/private",
+        ] {
+            precondition(LDACNativeSession.signalingTraceLines(line) == ["RX malformed=1"])
+        }
+        precondition(LDACNativeSession.signalingTraceLines("LIVE_SENT packets=1 rate=96000 channels=2 bitrateKbps=990 eqmid=0") == nil)
+        let payload = (0..<256).map { String(format: "%02X", $0) }.joined(separator: " ")
+        let trace = LDACNativeSession.signalingTraceLines("RX time=123 channel=0x12345678 length=4096 bytes=\(payload) ...")!
+        precondition(trace.count == 9)
+        precondition(trace.first == "RX time=123 length=4096 offset=0 bytes=" + (0..<32).map { String(format: "%02X", $0) }.joined(separator: " "))
+        precondition(trace[7] == "RX time=123 length=4096 offset=224 bytes=" + (224..<256).map { String(format: "%02X", $0) }.joined(separator: " "))
+        precondition(trace.last == "RX time=123 omitted_bytes=3840")
+        precondition(trace.allSatisfy { $0.utf8.count < 160 })
+        let oversized = Array(repeating: "FF", count: 257).joined(separator: " ")
+        precondition(LDACNativeSession.signalingTraceLines("RX time=123 channel=0x12345678 length=257 bytes=\(oversized)") == ["RX malformed=1"])
+        let maximumTX = Array(repeating: "FF", count: 2570).joined(separator: " ")
+        let transmitted = LDACNativeSession.signalingTraceLines("TX_BEGIN time=123 bytes=\(maximumTX)")!
+        precondition(transmitted.count == 9 && transmitted.last == "TX time=123 omitted_bytes=2314")
+        precondition(LDACNativeSession.signalingTraceLines("TX_BEGIN time=123 bytes=\(maximumTX) FF") == ["TX malformed=1"])
+    }
+
     #if DEBUG
+    @MainActor
+    static func checkSignalingFailureEvidence() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let logURL = root.appendingPathComponent("session.log")
+        try Data().write(to: logURL)
+        let original = "RESPONSE_FAILED transaction=1 signal=01 rejected=0 framing_unconfirmed=1"
+        var diagnostics: [LDACNativeSession.Diagnostic] = []
+        var connectionLost = false
+        var completion: LDACNativeSession.Completion?
+        let session = LDACNativeSession(id: UUID(), address: "AA:BB:CC:DD:EE:FF", helpers: .init(bundle: .main), gain: 0) {
+            switch $0 {
+            case let .diagnostic(value): diagnostics.append(value)
+            case .connectionLost: connectionLost = true
+            case let .finished(value): completion = value
+            default: break
+            }
+        }
+        var lines = ["OWNED_OPEN CID=0041 outgoingMTU=895"]
+        for value in 0..<30 {
+            lines.append("RX time=123 channel=0x12345678 length=2 bytes=12 \(String(format: "%02X", value))")
+        }
+        lines += [original + " address=AA-BB-CC-DD-EE-FF name=Private-headphones /Users/alex/private channel=0x12345678", "OWNED_CLOSED CID=0041",
+                  "SIGNALING_COMPLETE result=5 raw_bytes=60 received_bytes=60 pending_bytes=60 framing_uncertain=1 owned_closed=1 saved=1"]
+        session.simulateDiagnosticHelperLines(lines, logURL: logURL)
+        let deadline = DispatchTime.now() + 2
+        while completion == nil && DispatchTime.now() < deadline { try await Task.sleep(for: .milliseconds(1)) }
+        precondition(completion != nil && completion?.canRetry == false)
+        precondition(!connectionLost)
+        precondition(diagnostics.first(where: \.isFailure)?.detail == original)
+        let trace = diagnostics.filter { $0.stage == "signaling trace" }.map(\.detail)
+        precondition(trace.count == 25)
+        precondition(trace.first == "Earlier trace lines omitted=7")
+        precondition(trace[1] == "RX time=123 length=2 offset=0 bytes=12 07")
+        precondition(trace[23] == "RX time=123 length=2 offset=0 bytes=12 1D")
+        precondition(trace.last == original)
+        precondition(diagnostics.contains { $0.stage == "cleanup" && $0.detail == original })
+        for diagnostic in diagnostics {
+            for omitted in ["AA:BB:CC:DD:EE:FF", "AA-BB-CC-DD-EE-FF", "Private-headphones", "/Users/alex", "0x12345678", "CID="] {
+                precondition(!diagnostic.detail.contains(omitted))
+            }
+        }
+        let log = try String(contentsOf: logURL, encoding: .utf8)
+        precondition(log.contains("probe RX time=123 length=2 offset=0 bytes=12 00"))
+        precondition(log.contains("probe \(original)"))
+        precondition(!log.contains("channel=") && !log.contains("0x12345678"))
+        precondition(!log.contains("CONNECTION_LOST"))
+        for (source, stopped, lines) in [
+            ("probe", true, ["RX time=123 channel=0x12345678 length=2 bytes=12 01", original, "NEGOTIATION_FAILED stage=discover"]),
+            ("media", false, ["RX time=123 channel=0x12345678 length=2 bytes=12 01", original]),
+            ("probe", false, ["RESPONSE_REJECTED transaction=1 signal=0C error=19", "RESPONSE_ACCEPTED transaction=2 signal=02 length=16"]),
+        ] {
+            var stoppedDiagnostics: [LDACNativeSession.Diagnostic] = []
+            var stoppedCompletion: LDACNativeSession.Completion?
+            let stopping = LDACNativeSession(id: UUID(), address: "AA:BB:CC:DD:EE:FF", helpers: .init(bundle: .main), gain: 0) {
+                switch $0 {
+                case let .diagnostic(value): stoppedDiagnostics.append(value)
+                case let .finished(value): stoppedCompletion = value
+                default: break
+                }
+            }
+            stopping.simulateDiagnosticHelperLines(lines, source: source, stopping: stopped)
+            let deadline = DispatchTime.now() + 2
+            while stoppedCompletion == nil && DispatchTime.now() < deadline { try await Task.sleep(for: .milliseconds(1)) }
+            precondition(stoppedCompletion != nil && stoppedCompletion?.message == nil)
+            precondition(stoppedDiagnostics.isEmpty)
+        }
+        for recovered in [false, true] {
+            var failures: [String] = []
+            var finished = false
+            let rejected = "RESPONSE_REJECTED transaction=1 signal=0C error=19"
+            let terminal = "NEGOTIATION_FAILED stage=capabilities"
+            let rejectedSession = LDACNativeSession(id: UUID(), address: "AA:BB:CC:DD:EE:FF", helpers: .init(bundle: .main), gain: 0) {
+                switch $0 {
+                case let .diagnostic(value) where value.isFailure: failures.append(value.detail)
+                case .connectionLost: preconditionFailure("Cleanup replaced the negotiation failure")
+                case .finished: finished = true
+                default: break
+                }
+            }
+            let accepted = recovered ? ["RESPONSE_ACCEPTED transaction=2 signal=02 length=16"] : []
+            rejectedSession.simulateDiagnosticHelperLines(["OWNED_OPEN CID=0041 outgoingMTU=895", rejected] + accepted + [terminal, "OWNED_CLOSED CID=0041"])
+            let deadline = DispatchTime.now() + 2
+            while !finished && DispatchTime.now() < deadline { try await Task.sleep(for: .milliseconds(1)) }
+            precondition(finished && failures.first == (recovered ? terminal : rejected))
+        }
+        print("LDAC signaling diagnostic checks passed: byte caps, malformed input, bounded recent trace, session logging, original failure preservation")
+    }
+
     @MainActor
     static func checkHelperEmission() async throws {
         for stopping in [false, true] {

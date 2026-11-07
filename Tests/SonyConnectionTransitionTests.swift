@@ -41,6 +41,36 @@ final class SonyConnectionTransitionTests: XCTestCase {
         }
     }
 
+    func testSoundQualityMultipointCautionRequiresAnOwnedChangeAndExplicitReply() throws {
+        let alert = try XCTUnwrap(SonyConnectionAlert(payload: [0x99, 0, 0x71, 1]))
+        for inquiry: UInt8 in [0, 2, 5] {
+            for action: SonyConnectionAlertAction in [.negative, .positive] {
+                var transition = try XCTUnwrap(SonyConnectionTransition(original: .stableConnection, target: .soundQuality,
+                    supportedModes: modes, session: 3, connectionModeInquiryType: inquiry))
+                XCTAssertFalse(transition.receiveAlert(alert, session: 3))
+                XCTAssertTrue(transition.commandTransmitted(transition.requestPayload, session: 3))
+                XCTAssertFalse(transition.receiveAlert(alert, session: 2))
+                XCTAssertTrue(transition.receiveAlert(alert, session: 3))
+                XCTAssertEqual(transition.phase, .awaitingUser(alert))
+                XCTAssertFalse(transition.timeout())
+                XCTAssertFalse(transition.preferenceConfirmed)
+                let reply = try XCTUnwrap(transition.respond(to: alert, action: action))
+                XCTAssertEqual(reply, [0x98, 0, 0x71, action.rawValue])
+                XCTAssertTrue(transition.commandTransmitted(reply, session: 3))
+                XCTAssertEqual(transition.phase, action == .positive ? .awaitingResponse : .cancelled)
+                XCTAssertEqual(transition.targetMode, .soundQuality)
+                if action == .positive {
+                    XCTAssertTrue(transition.receiveNotification(.soundQuality, stream: .none, session: 3))
+                    XCTAssertEqual(transition.phase, .confirmed)
+                }
+            }
+            var reverse = try XCTUnwrap(SonyConnectionTransition(original: .soundQuality, target: .stableConnection,
+                supportedModes: modes, session: 3, connectionModeInquiryType: inquiry))
+            reverse.commandTransmitted(reverse.requestPayload, session: 3)
+            XCTAssertFalse(reverse.receiveAlert(alert, session: 3))
+        }
+    }
+
     func testLegacyQualityUsesTypedPacketsAndCannotRequestOrInferLEAudio() throws {
         for (original, target, value): (SonyConnectionMode, SonyConnectionMode, UInt8) in [
             (.soundQuality, .stableConnection, 1), (.stableConnection, .soundQuality, 0),

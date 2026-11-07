@@ -87,7 +87,7 @@ struct SonyConnectionAlert: Equatable, Sendable {
 
     var requestedMode: SonyConnectionMode? {
         switch (format, messageID) {
-        case (.fixed, 0x74), (.fixed, 0x76): .soundQuality
+        case (.fixed, 0x71), (.fixed, 0x74), (.fixed, 0x76): .soundQuality
         case (.fixed, 0x75), (.fixed, 0x77): .stableConnection
         case (.flexible, 0x10), (.flexible, 0x11): .lowLatency
         default: nil

@@ -262,7 +262,7 @@ static void *ParentProtocol(void *opaque) {
     close(state->readFD);
     return NULL;
 }
-static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL cancelConfiguration) {
+static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL cancelConfiguration, BOOL reordered) {
     ResetParent();
     DirectPlaybackProbe *probe = Probe();
     probe.sampleRate = rate;
@@ -281,9 +281,18 @@ static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL
         if (cancelConfiguration && bytes[1] == 3) { ParentLine("stop\n"); return; }
         uint8_t header[] = {(uint8_t)(bytes[0] | 2), bytes[1]};
         NSMutableData *response = [NSMutableData dataWithBytes:header length:2];
-        if (bytes[1] == 1) [response appendData:Hex(@"0c 08")];
-        else if (bytes[1] == 12) [response appendData:Hex(@"01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07")];
-        else if (bytes[1] == 4) [response appendData:ServiceBytes(wrongConfiguration ? 44100 : rate, NO)];
+        Check(bytes[1] != 12, "negotiation needs no AVDTP 1.3-only capabilities query");
+        if (bytes[1] == 1) [response appendData:Hex(@"0c 08 10 08")];
+        else if (bytes[1] == 2) {
+            Check(packet.length == 3 && bytes[2] == 0x0c, "selected LDAC sink needs no later endpoint queries");
+            [response appendData:Hex(@"01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07")];
+        } else if (bytes[1] == 4) {
+            NSData *services = ServiceBytes(wrongConfiguration ? 44100 : rate, NO);
+            if (reordered) {
+                [response appendData:[services subdataWithRange:NSMakeRange(2, services.length - 2)]];
+                [response appendData:[services subdataWithRange:NSMakeRange(0, 2)]];
+            } else [response appendData:services];
+        }
         else if (bytes[1] == 8 || bytes[1] == 10) closed = YES;
         Chunks(input, response, 0, NO);
     };
@@ -355,7 +364,9 @@ int main(void) {
             @[Hex(@"12 03"), @3, @YES, @NO],
             @[Hex(@"12 07"), @7, @YES, @NO],
             @[Hex(@"13 03 07 29"), @3, @NO, @YES],
-            @[Hex(@"13 04 31"), @4, @NO, @YES]
+            @[Hex(@"13 04 31"), @4, @NO, @YES],
+            @[Hex(@"11 0c"), @12, @NO, @YES],
+            @[Hex(@"11 02"), @2, @NO, @YES]
         ];
         for (NSArray *fixture in cases) {
             NSData *response = fixture[0];
@@ -366,6 +377,19 @@ int main(void) {
                       [fixture[2] boolValue], [fixture[3] boolValue]);
         }
         NSData *discover = cases[0][0];
+        NSData *protection = Hex(@"12 02 01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07 04 02 02 00 04 02 03 00");
+        Check(DecodeReply(protection, 1, 2, 3, NO) != nil, "multiple content protection capabilities are valid");
+        for (BOOL opened = NO; ; opened = YES) {
+            DirectPlaybackProbe *probe = Probe();
+            probe.configured = opened;
+            probe.streamOpened = opened;
+            Check(HandlePeerCommand(probe, Hex(@"20 06 04")), "peer Open in Idle or Open receives a rejection");
+            Check([((TestOutput *)probe.output).writes.lastObject isEqualToData:Hex(@"23 06 31")],
+                  "peer Open rejected with Bad State without disrupting an existing stream");
+            Check(probe.streamOpened == opened && !probe.peerStopped && !probe.framingUncertain,
+                  "rejected peer Open preserves local state");
+            if (opened) break;
+        }
         QueryCase(discover, 1, Hex(@"20 01 30 02 04 f1 3f"), 1, YES, YES, NO);
         QueryCase(Hex(@"12 0c 01 00 07 0a 00 ff 2d 01 00 00 aa 00 10 01 04 02 f1 3f"),
                   12, marker, 0, YES, YES, NO);
@@ -445,6 +469,16 @@ int main(void) {
             [reply appendData:services];
             Check((DecodeReply(reply, 6, 4, 1, NO) != nil) == (((const uint8_t *)services.bytes)[1] == 0),
                   "Reporting and Recovery lengths match their protocol grammar");
+        }
+        for (NSString *invalidService in @[@"04 01 00", @"05 00", @"05 02 00 00", @"06 02 00 00",
+                                           @"06 08 00 00 00 00 00 00 00 00", @"08 01 00"]) {
+            NSMutableData *reply = [configuration mutableCopy];
+            [reply appendData:Hex(invalidService)];
+            Check(DecodeReply(reply, 6, 4, 1, NO) == nil, "known capability rejects invalid length");
+            [reply appendData:marker];
+            for (NSUInteger split = 0; split <= reply.length; split++)
+                ConfigurationCase(reply, split, NO, NO, @[]);
+            ConfigurationCase(reply, 0, YES, NO, @[]);
         }
         NSMutableData *interleaved = [configuration mutableCopy];
         [interleaved appendData:Hex(@"20 01 63 01 31 73 04 31 f2 06 30 0d 04 00 64 60 01 f1 3f")];
@@ -607,10 +641,14 @@ int main(void) {
         for (NSString *invalid in @[@"acquire 99 200", @"acquire 100 100", @"acquire 100 301", @"acquire 100 200 extra", @"stop"])
             Check(!AcquisitionTrigger(invalid, 100, 300), "bad acquisition rejected");
         Check(!AcquisitionTrigger(@"acquire 100 200", 100, 200 + NSEC_PER_SEC + 1), "stale acquisition rejected");
-        for (NSNumber *rate in @[@44100, @48000, @88200, @96000]) PlaybackCase(NO, NO, rate.unsignedIntValue, NO);
-        PlaybackCase(YES, NO, 48000, NO);
-        PlaybackCase(NO, YES, 48000, NO);
-        PlaybackCase(NO, NO, 48000, YES);
+        for (NSNumber *rate in @[@44100, @48000, @88200, @96000]) {
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, NO);
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, YES);
+        }
+        PlaybackCase(YES, NO, 48000, NO, NO);
+        PlaybackCase(NO, YES, 48000, NO, NO);
+        PlaybackCase(NO, YES, 48000, NO, YES);
+        PlaybackCase(NO, NO, 48000, YES, NO);
         dup2(originalInput, STDIN_FILENO);
         close(originalInput);
         if (parentWrite >= 0) close(parentWrite);
