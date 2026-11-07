@@ -85,6 +85,7 @@ def main():
             run(binary)
         encoder = repo / 'Vendor/libldac'
         for check, arguments in (
+            ('Helpers/LDAC/LDACChannelOpenObservationTests.m', []),
             ('Helpers/LDAC/LDACLogFreeSignalingTests.m', []),
             ('Helpers/LDAC/LDACLogFreeMediaTests.m', ['-I', encoder / 'inc', '-I', encoder / 'src',
                                                   encoder / 'src/ldacBT.c', encoder / 'src/ldaclib.c']),

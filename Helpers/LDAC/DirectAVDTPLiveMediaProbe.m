@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 #include "../SonyClassicConnection.h"
 #include "LDACParentLifetime.h"
+#include "LDACChannelOpenObservation.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/event.h>
@@ -1553,6 +1554,8 @@ int main(int argc, const char *argv[]) {
             peer.disconnectL2CAPCallback = nil;
             return 4;
         }
+        printf("RAW_CHANNEL_OPEN_OBSERVER role=media available=%d limit=%d\n",
+               LDACObserveChannelOpens(peer, "media"), LDACChannelOpenObservationLimit);
         printf("OPEN_BEGIN time=%.6f PSM=0019 role=media\n", NSDate.date.timeIntervalSince1970);
         [peer openL2CAPChannel:0x0019];
         double openDeadline = MonotonicTime() + 5;

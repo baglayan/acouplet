@@ -503,6 +503,10 @@ final class LDACNativeSession: @unchecked Sendable {
         if (source == "probe" || source == "media"), line.hasPrefix("NO_OPEN ") {
             diagnose(Self.helperFailureSummary(line), stage: source, isFailure: !shouldStop)
         }
+        if (source == "probe" || source == "media"),
+           line.hasPrefix("RAW_CHANNEL_OPEN ") || line.hasPrefix("RAW_CHANNEL_OPEN_OBSERVER ") {
+            diagnose(Self.helperFailureSummary(line), stage: source)
+        }
         if ["probe", "media", "preflight", "capture"].contains(source),
            ["NO_PLAYBACK ", "CONTROL_FAILED ", "PCM_FAILED ", "ENCODER_FAILED ", "AUDIO_PERMISSION_FAILED"].contains(where: line.hasPrefix) {
             diagnose(Self.helperFailureSummary(line), stage: source, isFailure: !shouldStop)
@@ -1326,6 +1330,31 @@ final class LDACNativeSession: @unchecked Sendable {
 
     static func helperFailureSummary(_ line: String) -> String {
         let kind = line.split(separator: " ", maxSplits: 1).first.map(String.init) ?? "failure"
+        if kind == "RAW_CHANNEL_OPEN" || kind == "RAW_CHANNEL_OPEN_OBSERVER" {
+            var fields = [kind]
+            if let role = LDACChannelGate.captures("(?:^| )role=(signaling|media)(?: |$)", line)?.first {
+                fields.append("role=\(role)")
+            }
+            for key in ["available", "limit", "event", "time_ns"] {
+                if let value = LDACChannelGate.captures("(?:^| )\(key)=([0-9]{1,20})(?: |$)", line)?.first {
+                    fields.append("\(key)=\(value)")
+                }
+            }
+            let types = "missing|number|null|string|data|array|dictionary|other"
+            if let type = LDACChannelGate.captures("(?:^| )info_type=(\(types))(?: |$)", line)?.first {
+                fields.append("info=\(type)")
+            }
+            for key in ["result", "psm", "cid", "mtu", "socket", "incoming"] {
+                guard let type = LDACChannelGate.captures("(?:^| )\(key)_type=(\(types))(?: |$)", line)?.first else { continue }
+                if type == "number" {
+                    let number = "-?(?:[0-9]{1,20}(?:\\.[0-9]{1,17})?(?:e[+-]?[0-9]{1,3})?|inf|nan)"
+                    if let value = LDACChannelGate.captures("(?:^| )\(key)_value=(\(number))(?: |$)", line)?.first {
+                        fields.append("\(key)=\(value)")
+                    } else { fields.append("\(key)=malformed") }
+                } else { fields.append("\(key)=\(type)") }
+            }
+            return fields.joined(separator: " ")
+        }
         guard ["NO_OPEN", "NO_PLAYBACK", "CONTROL_FAILED", "PCM_FAILED", "ENCODER_FAILED", "AUDIO_PERMISSION_FAILED",
                "PEER_COMMAND_UNSUPPORTED", "OPEN_INDETERMINATE", "TRANSPORT_CLOSE_UNCONFIRMED", "OWNED_CALLBACKS_LOST",
                "OPEN_CLEANUP_UNCONFIRMED", "MEDIA_CLOSE_UNCONFIRMED", "OWNED_CLOSE_UNCONFIRMED", "CONNECT_RETURN",
