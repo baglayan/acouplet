@@ -38,6 +38,7 @@ final class SonyConnectionAlertsTests: XCTestCase {
 
     func testFixedConnectionAlertsIdentifyModeAndBuildExactReplies() throws {
         for (messageID, expectedMode): (UInt8, SonyConnectionMode) in [
+            (0x71, .soundQuality),
             (0x74, .soundQuality), (0x75, .stableConnection),
             (0x76, .soundQuality), (0x77, .stableConnection),
         ] {

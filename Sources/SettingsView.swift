@@ -1628,6 +1628,8 @@ private struct ConnectionModeControl: View {
         let message = switch (alert.format, alert.messageID) {
         case (.legacyFixed, 0x01):
             String(localized: "The headphones require Stable Connection to change these settings. The audio connection will reconnect and music will stop.")
+        case (.fixed, 0x71):
+            String(localized: "Sound may cut out when Sound Quality and connections to two devices are enabled together. Continue?")
         case (.flexible, 0x10):
             String(localized: "This change requires LE Audio pairing. Pair the headphones with this Mac before using LE Audio.")
         case (.flexible, 0x11):

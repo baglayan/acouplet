@@ -106,6 +106,7 @@ static NSUInteger FixedCommandLength(const uint8_t *bytes, NSUInteger length) {
 
 static NSUInteger FixedResponseLength(const uint8_t *bytes, NSUInteger length, uint8_t transaction, uint8_t signal) {
     if (length < 2 || bytes[1] != signal || (bytes[0] >> 4) != transaction || (bytes[0] & 12)) return 0;
+    if ((bytes[0] & 3) == 1 && signal >= 1 && signal <= 13) return 2;
     if ((bytes[0] & 3) == 2) return signal == 3 || (signal >= 6 && signal <= 10) ? 2 : 0;
     if ((bytes[0] & 3) != 3) return 0;
     switch (signal) {
@@ -193,9 +194,10 @@ static int Parse(const uint8_t *bytes, NSUInteger length, uint8_t transaction, u
         if (alternateSolutions) unsupported = YES;
         while (offset + 2 <= length) {
             uint8_t category = bytes[offset], size = bytes[offset + 1];
-            if (category < 1 || category > 8 || (seen & (1U << category))) break;
+            if (category < 1 || category > 8 || (category != 4 && (seen & (1U << category)))) break;
             if (((category == 1 || category == 2) && size != 0) || (category == 3 && size != 3) ||
-                (category == 7 && size < 2)) break;
+                (category == 4 && size < 2) || (category == 5 && size != 1) ||
+                (category == 6 && (size < 3 || size > 7)) || (category == 7 && size < 2) || (category == 8 && size != 0)) break;
             seen |= 1U << category;
             offset += 2 + size;
             if (offset > length) break;
@@ -354,9 +356,11 @@ static NSArray<NSNumber *> *DecodeReply(NSData *reply, uint8_t transaction, uint
             if (length - offset < 2) return nil;
             uint8_t category = bytes[offset++];
             uint8_t size = bytes[offset++];
-            if (!category || category > 8 || seen[category] || size > length - offset) return nil;
+            if (!category || category > 8 || (category != 4 && seen[category]) || size > length - offset) return nil;
             seen[category] = YES;
-            if (((category == 1 || category == 2) && size != 0) || (category == 3 && size != 3)) return nil;
+            if (((category == 1 || category == 2) && size != 0) || (category == 3 && size != 3) ||
+                (category == 4 && size < 2) || (category == 5 && size != 1) ||
+                (category == 6 && (size < 3 || size > 7)) || (category == 8 && size != 0)) return nil;
             if (category == 7) {
                 if (size < 2 || bytes[offset] != 0) return nil;
                 if (bytes[offset + 1] == 0xFF && size < 8) return nil;
@@ -441,6 +445,11 @@ static NSData *PeerReply(DirectPlaybackProbe *probe, NSData *packet) {
             probe.configurationSent = NO;
             probe.streamOpened = NO;
             return [NSData dataWithBytes:response length:2];
+        case 6:
+            if (packet.length != 3) { error = 0x11; break; }
+            if (bytes[2] != 0x04) { error = 0x12; break; }
+            if (!probe.configured || probe.streamOpened) { error = 0x31; break; }
+            return nil;
         case 10:
             if (packet.length != 3 || bytes[2] != 0x04) return nil;
             probe.peerStopped = YES;
@@ -542,7 +551,7 @@ static NSData *AwaitResponse(DirectPlaybackProbe *probe, uint8_t transaction, ui
         int result;
         if (fixed) {
             if (probe.pending.length < fixed) continue;
-            parsed = (Parsed){fixed, fixed, 0, ((((const uint8_t *)probe.pending.bytes)[0] & 3) == 3)};
+            parsed = (Parsed){fixed, fixed, 0, ((((const uint8_t *)probe.pending.bytes)[0] & 3) != 2)};
             result = 1;
         } else result = Parse(probe.pending.bytes, probe.pending.length, transaction, signal, &parsed);
         if (result < 0 || (result == 1 && !fixed && !markerSent)) {
@@ -564,7 +573,7 @@ static NSData *AwaitResponse(DirectPlaybackProbe *probe, uint8_t transaction, ui
         probe.lastRejected = parsed.rejected;
         if (parsed.rejected) {
             printf("RESPONSE_REJECTED transaction=%u signal=%02X error=%02X\n", transaction, signal,
-                   ((const uint8_t *)reply.bytes)[reply.length - 1]);
+                   (((const uint8_t *)reply.bytes)[0] & 3) == 1 ? 0x19 : ((const uint8_t *)reply.bytes)[reply.length - 1]);
             return nil;
         }
         printf("RESPONSE_ACCEPTED transaction=%u signal=%02X length=%lu CID=%04X\n",
@@ -657,17 +666,19 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
     uint8_t transaction = 1;
     BOOL completed = NO;
     BOOL started = NO;
+    const char *stage = "discover";
     do {
         NSData *discover = Query(probe, &transaction, 1, [NSData data]);
         NSArray<NSNumber *> *sinks = discover ? DecodeReply(discover, 1, 1, 0, YES) : nil;
         if (!sinks) break;
+        stage = "capabilities";
         BOOL capabilitiesComplete = YES;
         for (NSNumber *endpoint in sinks) {
             uint8_t seid = endpoint.unsignedCharValue;
             uint8_t encoded = seid << 2;
             uint8_t label = transaction;
-            NSData *reply = Query(probe, &transaction, 12, [NSData dataWithBytes:&encoded length:1]);
-            if (!reply || !DecodeReply(reply, label, 12, seid, YES)) {
+            NSData *reply = Query(probe, &transaction, 2, [NSData dataWithBytes:&encoded length:1]);
+            if (!reply || !DecodeReply(reply, label, 2, seid, YES)) {
                 capabilitiesComplete = NO;
                 break;
             }
@@ -675,6 +686,7 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
             if (!probe.selectedSink && LDACSelection(reply, probe.sampleRate, &delayReporting)) {
                 probe.selectedSink = seid;
                 probe.delayReporting = NO;
+                break;
             }
         }
         if (!capabilitiesComplete || probe.peerStopped || probe.closed || probe.failed || probe.stopRequested) break;
@@ -683,12 +695,14 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
             break;
         }
         printf("PREPARE_MEDIA\n");
+        stage = "media";
         if (!WaitControl(probe, @"media-prepared")) break;
         printf("LDAC_SELECTED remoteSEID=%u localSourceSEID=1 delayReporting=%d rate=%u channels=2 quality=%s\n",
                probe.selectedSink, probe.delayReporting, probe.sampleRate, probe.quality.UTF8String);
         uint8_t seids[] = {(uint8_t)(probe.selectedSink << 2), 0x04};
         NSMutableData *configuration = [NSMutableData dataWithBytes:seids length:2];
         [configuration appendData:ServiceBytes(probe.sampleRate, probe.delayReporting)];
+        stage = "configuration";
         NSData *reply = Query(probe, &transaction, 3, configuration);
         if (!EmptyAcceptance(reply)) {
             if (probe.lastRejected) probe.configurationSent = NO;
@@ -698,25 +712,42 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
         printf("CONFIGURATION_ACCEPTED remoteSEID=%u localSourceSEID=1 rate=%u channels=2\n", probe.selectedSink, probe.sampleRate);
         if (probe.stopRequested) break;
         NSData *target = [NSData dataWithBytes:seids length:1];
+        stage = "readback";
+        uint8_t readbackLabel = transaction;
         NSData *readback = Query(probe, &transaction, 4, target);
         NSData *services = ServiceBytes(probe.sampleRate, probe.delayReporting);
-        if (!readback || readback.length != services.length + 2 ||
-            ![[readback subdataWithRange:NSMakeRange(2, services.length)] isEqualToData:services]) {
+        BOOL matches = readback && DecodeReply(readback, readbackLabel, 4, probe.selectedSink, NO) != nil &&
+            readback.length == services.length + 2;
+        const uint8_t *actual = readback.bytes, *expected = services.bytes;
+        for (NSUInteger offset = 2; matches && offset < readback.length; offset += 2 + actual[offset + 1]) {
+            BOOL found = NO;
+            for (NSUInteger index = 0; index < services.length; index += 2 + expected[index + 1]) {
+                if (actual[offset] == expected[index] && actual[offset + 1] == expected[index + 1] &&
+                    memcmp(actual + offset, expected + index, 2 + expected[index + 1]) == 0) found = YES;
+            }
+            matches = found;
+        }
+        if (!matches) {
             printf("CONFIGURATION_VERIFICATION_FAILED\n");
             break;
         }
         printf("CONFIGURATION_VERIFIED rate=%u channels=2\n", probe.sampleRate);
+        stage = "open";
         if (!EmptyAcceptance(Query(probe, &transaction, 6, target))) break;
         probe.streamOpened = YES;
         probe.mediaExpected = YES;
         printf("OPEN_ACCEPTED signalingCID=%04X remoteSEID=%u\n", probe.realCID, probe.selectedSink);
         if (probe.stopRequested) break;
+        stage = "media";
         if (!WaitControl(probe, @"media-ready")) break;
+        stage = "start";
         if (!EmptyAcceptance(Query(probe, &transaction, 7, target))) break;
         started = YES;
         printf("START_ACCEPTED signalingCID=%04X mediaCID=%04X\n", probe.realCID, probe.mediaCID);
         if (probe.stopRequested) break;
+        stage = "playback";
         if (!WaitControl(probe, @"media-finished")) break;
+        stage = "close";
         if (!EmptyAcceptance(Query(probe, &transaction, 8, target))) break;
         probe.streamOpened = NO;
         probe.configured = NO;
@@ -724,6 +755,8 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
         completed = YES;
         printf("STREAM_CLOSED peerSignal=00\n");
     } while (NO);
+    if (!completed && !probe.stopRequested && !probe.peerStopped && !probe.stdinEnded)
+        printf("NEGOTIATION_FAILED stage=%s\n", stage);
     if (!completed && !probe.closed && !probe.failed && !probe.peerStopped && probe.configurationSent) {
         uint8_t target = probe.selectedSink << 2;
         uint8_t signal = probe.framingUncertain ? 10 : probe.streamOpened || started ? 8 : 10;

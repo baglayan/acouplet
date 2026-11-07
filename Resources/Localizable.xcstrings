@@ -12914,6 +12914,23 @@
         }
       }
     },
+    "Sound may cut out when Sound Quality and connections to two devices are enabled together. Continue?": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ses Kalitesi ve iki cihaza bağlantı aynı anda etkin olduğunda seste kesilmeler olabilir. Devam edilsin mi?"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sound may cut out when Sound Quality and connections to two devices are enabled together. Continue?"
+          }
+        }
+      }
+    },
     "This connection uses Classic Bluetooth. Reconnect the headphones to this Mac to resume audio.": {
       "extractionState": "manual",
       "localizations": {
