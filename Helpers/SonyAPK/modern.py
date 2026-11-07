@@ -89,6 +89,14 @@ def inventory_case(identifier, command, devices, playback, inquiry=2):
 
 def cases():
     result = []
+    alert_param = "com.sony.songpal.tandemfamily.message.mdr.v2.table1.alert.param."
+    for function, action in itertools.product((0xE1, 0xE3, 0xE7), range(2)):
+        case = written(f"modern.connection.multipointAlertReply.{function}.{action}", "connectionAlertSet", "en0.n",
+                       [alert_param + "AlertMessageType", alert_param + "AlertAction"],
+                       [enum(alert_param + "AlertMessageType", "CAUTION_FOR_CHANGING_TO_QUALITY_PRIOR_CONNECTION_MODE_WITH_2_DEVICES_CONNECTION"),
+                        enum(alert_param + "AlertAction", "POSITIVE" if action else "NEGATIVE")],
+                       payload=[0x99, 0, 0x71, 1], action=action, function=function)
+        result.append(case)
     for count in (2, 3):
         for modes in itertools.permutations(range(3), count):
             for exclusions in ([], [0]):
@@ -329,6 +337,11 @@ def mutations():
         "case .soundQuality: 0x00\n        case .stableConnection: 0x01",
         "case .soundQuality: 0x01\n        case .stableConnection: 0x00")
     return [
+        {"name": "multipoint sound quality confirmation ignored",
+         "replacement": ("SonyConnectionAlerts.swift", "case (.fixed, 0x71), (.fixed, 0x74), (.fixed, 0x76): .soundQuality",
+                         "case (.fixed, 0x74), (.fixed, 0x76): .soundQuality"),
+         "case_ids": [f"modern.connection.multipointAlertReply.{function}.{action}"
+                      for function, action in itertools.product((0xE1, 0xE3, 0xE7), range(2))]},
         {"name": "connection quality and stability meaning swap",
          "replacement": ("SonyAudioFeatures.swift", connection_mapping, swapped_connection_mapping),
          "case_ids": [f"modern.connection.{phase}.{mode}" for phase in ("parameter", "set") for mode in range(2)]},

@@ -21,6 +21,16 @@ func modernAPK(_ input: [String: Any]) throws -> [String: Any]? {
     let payload = (input["payload"] as? [Int] ?? []).map(UInt8.init)
     if operation.hasPrefix("modern.connection") {
         var state = SonyAudioFeatures(supportedFunctions: [UInt8(input["function"] as? Int ?? 0xE7)])
+        if operation == "modern.connectionAlertSet" {
+            var transition = SonyConnectionTransition(original: .stableConnection, target: .soundQuality,
+                supportedModes: [.soundQuality, .stableConnection], session: 1,
+                connectionModeInquiryType: state.connectionModeInquiryType!)!
+            transition.commandTransmitted(transition.requestPayload, session: 1)
+            guard let alert = SonyConnectionAlert(payload: payload), transition.receiveAlert(alert, session: 1),
+                  let action = SonyConnectionAlertAction(rawValue: UInt8(input["action"] as! Int)),
+                  let reply = transition.respond(to: alert, action: action) else { return ["accepted": false] }
+            return ["payload": modernHex(reply)]
+        }
         if operation == "modern.connectionSet" {
             let mode: SonyConnectionMode
             switch input["mode"] as! String {
