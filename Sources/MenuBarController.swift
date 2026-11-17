@@ -163,7 +163,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         }
         let title: String
         if settings.showBatteryInMenuBar, headphones.isReady, let level = headphones.batteryLevel {
-            title = "\(level)%"
+            title = String(localized: "\(level)%")
         } else if settings.showBatteryInMenuBar, keepsLDACVisible, !headphones.isReady {
             title = button.title
         } else {

@@ -2036,7 +2036,7 @@ private struct BatteryCareControl: View {
                     }
                 }
                 if let threshold = state.threshold {
-                    LabeledContent("Charging limit", value: "\(threshold)%").font(.caption)
+                    LabeledContent("Charging limit", value: String(localized: "\(Int(threshold))%")).font(.caption)
                 }
                 if let error = headphones.settingErrors[.batteryCare] {
                     Text(error).font(.caption)

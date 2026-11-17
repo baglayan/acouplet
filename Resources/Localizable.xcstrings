@@ -688,7 +688,7 @@
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ %lld%%"
+            "value": "%@ %%%lld"
           }
         },
         "en": {
@@ -994,7 +994,7 @@
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "%lld%%"
+            "value": "%%%lld"
           }
         },
         "en": {
@@ -1113,7 +1113,7 @@
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pil %u%% seviyesine indiğinde etkinleşir."
+            "value": "Pil %%%u seviyesine indiğinde etkinleşir."
           }
         },
         "en": {
@@ -2218,7 +2218,7 @@
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pil %lld%%"
+            "value": "Pil %%%lld"
           }
         },
         "en": {
