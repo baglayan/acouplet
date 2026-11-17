@@ -273,7 +273,7 @@ struct SonyPreferencePaneView: View {
                     LabeledContent {
                         HStack(spacing: 6) {
                             if battery.isCharging { Label("Charging", systemImage: "bolt.fill") }
-                            Text("\(battery.level)%").monospacedDigit()
+                            Text(battery.level, format: .percent).monospacedDigit()
                                 .foregroundStyle(battery.level <= 20 ? Color.red : Color.primary)
                             if battery.id == "case" {
                                 Text("Last reported").foregroundStyle(.secondary)
@@ -378,7 +378,7 @@ struct SonyPreferencePaneView: View {
             Image(systemName: batterySymbol(battery, device: device))
             if battery.id == "left" { Image(systemName: "l.circle") }
             if battery.id == "right" { Image(systemName: "r.circle").foregroundStyle(.red) }
-            Text("\(battery.level)%").monospacedDigit()
+            Text(battery.level, format: .percent).monospacedDigit()
                 .foregroundStyle(battery.level <= 20 ? Color.red : Color.secondary)
             if battery.isCharging { Image(systemName: "bolt.fill") }
             if battery.id == "case" {

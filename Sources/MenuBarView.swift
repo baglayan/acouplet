@@ -464,7 +464,7 @@ struct MenuBarView: View {
                     Image(systemName: "headphones")
                         .font(.caption)
                 }
-                Text(reading.map { "\($0.level)%" } ?? "—")
+                Text(reading.map { String(localized: "\($0.level)%") } ?? "—")
                     .monospacedDigit()
             }
             .foregroundStyle(reading == nil ? Color.secondary : Color.primary)
