@@ -13,6 +13,11 @@ final class SonyPlaybackTests: XCTestCase {
                 XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload.first == 0xA0 }.count, 1)
                 XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.first == 0xA2 || $0.payload.first == 0xA6 })
                 controller.simulateProtocolMessage(replies[0])
+                if generation == .v1 {
+                    while let frame = controller.simulatedPendingFrame, frame.payload != [0xA2, 1] {
+                        controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - frame.sequence, payload: []))
+                    }
+                }
                 for reply in replies.dropFirst() {
                     let frame = try XCTUnwrap(controller.simulatedPendingFrame)
                     XCTAssertEqual(frame.payload, controller.playback.queryPayload(for: reply))
@@ -203,11 +208,19 @@ final class SonyPlaybackTests: XCTestCase {
                 XCTAssertFalse(controller.recoverMusicVolumeIfNeeded())
                 XCTAssertEqual(controller.simulatedControlSession, previousSession)
                 XCTAssertEqual(controller.simulatedTransmittedFrames, frames)
-                controller.simulatePlaybackReadTimeout(missing)
+                if legacy && missing == [0xA0, 1] {
+                    controller.simulateLegacyCapabilityReadTimeout()
+                    acknowledgeSimulatedCommands(controller)
+                    XCTAssertNil(controller.playback.musicVolumeRange)
+                    XCTAssertFalse(controller.hasCurrentMusicVolumeControl)
+                } else {
+                    controller.simulatePlaybackReadTimeout(missing)
+                }
                 for _ in 0..<8 { await Task.yield() }
                 XCTAssertNotNil(controller.playbackReadError)
                 XCTAssertTrue(controller.recoverMusicVolumeIfNeeded())
                 XCTAssertGreaterThan(controller.simulatedControlSession, previousSession)
+                XCTAssertNil(controller.playbackReadError)
                 XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0, 0])
                 XCTAssertFalse(controller.isReady)
                 XCTAssertFalse(controller.hasFreshMusicVolumeReadback)
@@ -220,6 +233,11 @@ final class SonyPlaybackTests: XCTestCase {
                 acknowledgeSimulatedCommands(controller)
                 controller.simulateProtocolMessage(legacy ? [0x07, 0, 1, 0xA1] : [0x07, 0, 1, 0xA1, 0])
                 acknowledgeSimulatedCommands(controller)
+                if legacy {
+                    XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [0x02, 0])
+                    controller.simulateLegacyCapabilityReadTimeout()
+                    acknowledgeSimulatedCommands(controller)
+                }
                 controller.simulateProtocolMessage([0x05, 2, 5] + Array("1.0.0".utf8))
                 let currentFrames = controller.simulatedTransmittedFrames
                 for reply in replies { controller.simulateProtocolMessage(reply, session: previousSession) }
@@ -284,7 +302,14 @@ final class SonyPlaybackTests: XCTestCase {
             for terminating in [false, true] {
                 let controller = makeNoNoiseController(generation: generation, functions: [0xA1])
                 defer { controller.simulateControlLoss() }
-                controller.simulatePlaybackReadTimeout([0xA0, 1])
+                if generation == .v1 {
+                    controller.simulateLegacyCapabilityReadTimeout()
+                    acknowledgeSimulatedCommands(controller)
+                    XCTAssertNil(controller.playback.musicVolumeRange)
+                    XCTAssertFalse(controller.hasCurrentMusicVolumeControl)
+                } else {
+                    controller.simulatePlaybackReadTimeout([0xA0, 1])
+                }
                 for _ in 0..<8 { await Task.yield() }
                 XCTAssertNotNil(controller.playbackReadError)
                 if terminating {
@@ -386,8 +411,8 @@ final class SonyPlaybackTests: XCTestCase {
         for hasOldPoll in [false, true] {
             let controller = makeNoNoiseController(generation: .v1, functions: [0xA1, 0xE1])
             defer { controller.simulateControlLoss() }
-            for payload: [UInt8] in [[0xA1, 1, 31, 1, 0], [0xA3, 1, 0, 2], [0xA7, 1, 0x20, 12],
-                                    [0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
+            for payload: [UInt8] in [[0xA1, 1, 31, 1, 0], [0xE1, 1, 0], [0xA3, 1, 0, 2], [0xA7, 1, 0x20, 12],
+                                    [0xE3, 1, 0], [0xE7, 1, 0, 0]] {
                 controller.simulateProtocolMessage(payload)
                 acknowledgeSimulatedCommands(controller)
             }
@@ -526,16 +551,20 @@ final class SonyPlaybackTests: XCTestCase {
         acknowledgeSimulatedCommands(controller)
         controller.simulateProtocolMessage([0x07, 0, 5, 0xA1, 0xE2, 0xF4, 0x41, 0x42])
         acknowledgeSimulatedCommands(controller)
-        for payload: [UInt8] in [[0xA1, 1, 31, 1, 0], [0xA3, 1, 0, 2], [0xA7, 1, 0x20, 12]] {
+        XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [0x02, 0])
+        controller.simulateLegacyCapabilityReadTimeout()
+        acknowledgeSimulatedCommands(controller)
+        for payload: [UInt8] in [[0xA1, 1, 31, 1, 0], [0xE1, 2, 0, 0], [0xF1, 4, 2, 0x10, 0x11],
+                                [0xA3, 1, 0, 2], [0xA7, 1, 0x20, 12]] {
             controller.simulateProtocolMessage(payload)
             acknowledgeSimulatedCommands(controller)
         }
-        controller.simulateLegacyDSEEReadTimeout([0xE0, 2])
+        controller.simulateLegacyDSEEReadTimeout([0xE2, 2])
         controller.simulateInitialFeatureReadTimeout()
         for _ in 0..<4 { await Task.yield() }
         acknowledgeSimulatedCommands(controller)
-        XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == [0xF0, 4] })
-        controller.simulateSystemReadTimeout([0xF0, 4])
+        XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.payload == [0xF2, 4] })
+        controller.simulateSystemReadTimeout([0xF2, 4])
         controller.simulateInitialFeatureReadTimeout()
         controller.simulateLegacySoundEffectReadTimeout([0x40, 1, 1])
         controller.simulateLegacySoundEffectReadTimeout([0x40, 2, 1])
@@ -611,11 +640,16 @@ final class SonyPlaybackTests: XCTestCase {
             let legacy = generation == .v1
             let controller = makeNoNoiseController(generation: generation, functions: legacy ? [0x11, 0x51, 0xA1] : [0x20, 0x50, 0xA1])
             defer { controller.simulateControlLoss() }
+            if legacy {
+                controller.simulateProtocolMessage(initialPlaybackReplies(generation: generation)[0])
+                acknowledgeSimulatedCommands(controller)
+            }
             let eqType: UInt8 = legacy ? 1 : 0
             let bands = SonyEqualizerBand.legacy.flatMap { [$0.informationType, UInt8($0.value >> 8), UInt8($0.value & 0xFF)] }
             let replies: [[UInt8]] = [[0x51, eqType, 6, 21, 1, 0xA0, 0], [0x53, eqType, 0],
                                      [0x5B, eqType, 6] + bands, [0x57, eqType, 0xA0, 6, 10, 10, 10, 10, 10, 10],
-                                     legacy ? [0x11, 0, 70, 0] : [0x23, 0, 70, 0]] + initialPlaybackReplies(generation: generation)
+                                     legacy ? [0x11, 0, 70, 0] : [0x23, 0, 70, 0]]
+                + (legacy ? Array(initialPlaybackReplies(generation: generation).dropFirst()) : initialPlaybackReplies(generation: generation))
             for payload in replies {
                 controller.simulateProtocolMessage(payload)
                 acknowledgeSimulatedCommands(controller)
@@ -1656,10 +1690,15 @@ final class SonyPlaybackTests: XCTestCase {
         let payload = [0x07, 0, UInt8(functions.count)] + (generation == .v1 ? functions : functions.flatMap { [$0, 0] })
         controller.simulateProtocolMessage(payload)
         acknowledgeSimulatedCommands(controller)
+        if generation == .v1, controller.simulatedLegacyCapabilityQuery == [0x02, 0] {
+            controller.simulateLegacyCapabilityReadTimeout()
+            acknowledgeSimulatedCommands(controller)
+        }
         controller.simulateProtocolMessage([0x05, 2, 5] + Array("1.0.0".utf8))
         XCTAssertEqual(controller.protocolInformation?.generation, generation)
         XCTAssertTrue(controller.availableNoiseModes.isEmpty)
-        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.isReady, generation != .v1 || !functions.contains(0xA1))
+        if generation == .v1, functions.contains(0xA1) { XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [0xA0, 1]) }
         return controller
     }
 
@@ -1677,8 +1716,12 @@ final class SonyPlaybackTests: XCTestCase {
         acknowledgeSimulatedCommands(controller)
         controller.simulateProtocolMessage([0x07, 0, 1, 0xA1])
         acknowledgeSimulatedCommands(controller)
+        XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [0x02, 0])
+        controller.simulateLegacyCapabilityReadTimeout()
+        acknowledgeSimulatedCommands(controller)
         controller.simulateProtocolMessage([0x05, 2, 5] + Array("1.0.0".utf8))
-        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [0xA0, 1])
         return controller
     }
 

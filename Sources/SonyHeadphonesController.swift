@@ -548,8 +548,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     && playbackReadSequence?.queries.contains($0) != true }
     }
     func recoverMusicVolumeIfNeeded() -> Bool {
-        guard [playback.capabilityQueryPayload, playback.statusQueryPayload, playback.musicVolumeQueryPayload]
-            .contains(where: { playbackReads[$0]?.timedOut == true }) else { return false }
+        guard expiredLegacyCapabilities.contains(playback.capabilityQueryPayload)
+            || [playback.capabilityQueryPayload, playback.statusQueryPayload, playback.musicVolumeQueryPayload]
+                .contains(where: { playbackReads[$0]?.timedOut == true }) else { return false }
         return reconnectExpiredControlReads()
     }
     func hasCurrentMusicSourceContext(for localAddress: @autoclosure () -> String?) -> Bool {
@@ -906,6 +907,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private static let logger = Logger(subsystem: "dev.baglayan.Acouplet", category: "SonyBluetooth")
 
     private let identityDefaults: UserDefaults?
+    private var capabilityCache: SonyCapabilityCache
+    private var capabilityCacheKey: SonyCapabilityCache.Key?
+    private var legacyCapabilityReads: InitialFeatureReadSequence?
+    private var legacyCapabilityTimeout: DispatchWorkItem?
+    private var expiredLegacyCapabilities: Set<[UInt8]> = []
+    private var legacyCapabilityQueries: Set<[UInt8]> = []
+    private var deferredCapabilityCommands: [(payload: [UInt8], type: UInt8, retryingDiscovery: Bool)] = []
     private let displayOnly: Bool
     let pinnedAddress: String?
     private var savedIdentity: SonyBLEIdentity.VerifiedDevice?
@@ -1099,7 +1107,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private var hasExpiredControlRead: Bool {
-        !timedOutLegacyReads.isEmpty
+        !expiredLegacyCapabilities.subtracting([SonyCapabilityIdentity.queryPayload]).isEmpty
+            || !timedOutLegacyReads.isEmpty
             || batteryReads.values.contains(where: { $0.timedOut })
             || equalizerRead?.timedOut == true
             || noiseControlRead?.timedOut == true
@@ -1118,6 +1127,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         precondition(pinnedAddress == nil || SonyBLEIdentity.normalizedAddress(pinnedAddress!) != nil)
         self.pinnedAddress = pinnedAddress.flatMap(SonyBLEIdentity.normalizedAddress)
         self.identityDefaults = identityDefaults
+        capabilityCache = SonyCapabilityCache(defaults: identityDefaults)
         self.displayOnly = displayOnly
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         nativeAppearanceRefresh = nativeAppearanceRefreshEnabled && !simulated && !simulatedReady && !displayOnly
@@ -1188,6 +1198,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     func simulateBatteryRefresh() { requestBattery() }
     func simulatePlaybackReadTimeout(_ query: [UInt8]) { playbackReadTimeouts[query]?.perform() }
     func simulateInitialFeatureReadTimeout() { initialFeatureReadTimeout?.perform() }
+    func simulateLegacyCapabilityReadTimeout() { legacyCapabilityTimeout?.perform() }
+    var simulatedLegacyCapabilityQuery: [UInt8]? { legacyCapabilityReads?.currentQuery }
     func simulateSoundPressureReadTimeout() { soundPressureReadTimeout?.perform() }
     func simulateInventoryReadTimeout() { inventoryReadTimeout?.perform() }
     func simulateDiscoveryReadTimeout(_ query: [UInt8], type: UInt8 = 0x0C) { discoveryReads[[type] + query]?.timeout?.perform() }
@@ -2115,9 +2127,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     func requestCurrentSettings() {
         guard powerOffState == nil, !isRunningHeadphoneTest, stage == .ready, connectionTransition?.isFinished != false, sourceTransition?.isFinished != false,
               multipointTransition?.isFinished != false, deviceActionTransition?.isFinished != false else { return }
-        for (key, read) in discoveryReads where read.transmitted && !read.resolved && !read.retried && read.timeout == nil {
-            send(Array(key.dropFirst()), type: key[0], retryingDiscovery: true)
-        }
+        retryDiscoveryReads()
         if let asmType {
             if protocolInformation?.generation == .v1 { send([0x62, 0x02]) }
             requestNoiseControl(asmType)
@@ -2126,6 +2136,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         refreshEqualizer()
         if firmwareVersion == nil { send([0x04, 0x02]) }
         requestAudioFeatures()
+    }
+
+    private func retryDiscoveryReads() {
+        for (key, read) in discoveryReads where read.transmitted && !read.resolved && !read.retried && read.timeout == nil {
+            send(Array(key.dropFirst()), type: key[0], retryingDiscovery: true)
+        }
     }
 
     private func beginDiscoveryRead(_ query: [UInt8], type: UInt8) {
@@ -2147,7 +2163,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                       let current = self.discoveryReads[key], current.id == id, current.timeout != nil else { return }
                 self.discoveryReads[key]?.timeout?.cancel()
                 self.discoveryReads[key]?.timeout = nil
-                if !current.retried { self.send(query, type: type, retryingDiscovery: true) }
+                if !current.retried, self.protocolInformation?.generation != .v1 || self.stage == .ready {
+                    self.send(query, type: type, retryingDiscovery: true)
+                }
                 self.verifyConnectionPreferenceIfNeeded()
             }
         }
@@ -2576,13 +2594,138 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
     }
 
+    private func beginLegacyCapabilities() {
+        var sequence = InitialFeatureReadSequence()
+        let functions = legacyControls!.supportedFunctions
+        let queries: [[UInt8]] = [(UInt8(0xA1), [UInt8(0xA0), 1]), (0xE1, [0xE0, 1]),
+                                  (0xE2, [0xE0, 2]), (0xF4, [0xF0, 4])].compactMap {
+            functions.contains($0.0) ? $0.1 : nil
+        }
+        legacyCapabilityQueries = Set(queries)
+        if !queries.isEmpty { sequence.append(SonyCapabilityIdentity.queryPayload) }
+        for query in queries { sequence.append(query) }
+        legacyCapabilityReads = sequence
+        advanceLegacyCapabilities()
+    }
+
+    private func advanceLegacyCapabilities() {
+        while let query = legacyCapabilityReads?.currentQuery {
+            if query != SonyCapabilityIdentity.queryPayload, let key = capabilityCacheKey,
+               let reply = capabilityCache.reply(for: query, key: key) {
+                if applyLegacyCapability(reply, query: query) {
+                    recordDiagnostic("Capability cache reused; query=\(query.map { String(format: "%02X", $0) }.joined(separator: " "))")
+                    legacyCapabilityReads?.advance()
+                    continue
+                }
+                capabilityCache.remove(for: query, key: key)
+            }
+            send(query)
+            return
+        }
+        legacyCapabilityReads = nil
+        let deferred = deferredCapabilityCommands
+        deferredCapabilityCommands = []
+        for command in deferred { send(command.payload, type: command.type, retryingDiscovery: command.retryingDiscovery) }
+        enableConnectionAlerts()
+        if asmType != nil {
+            stage = .noiseControl
+            send([0x60, 0x02])
+            send([0x62, 0x02])
+            requestBattery()
+            send([0x04, 0x02])
+        } else {
+            finishControlSync(initial: true)
+        }
+    }
+
+    private func acknowledgeLegacyCapabilityRead(_ query: [UInt8]) {
+        guard legacyCapabilityReads?.currentQuery == query, let ordinal = legacyCapabilityReads?.transmissionOrdinal else { return }
+        if legacyCapabilityReads?.acknowledge(query) == true {
+            legacyCapabilityReads?.advance()
+            advanceLegacyCapabilities()
+            return
+        }
+        let session = controlSession
+        let timeout = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.controlSession == session,
+                      self.legacyCapabilityReads?.currentQuery == query,
+                      self.legacyCapabilityReads?.transmissionOrdinal == ordinal,
+                      self.legacyCapabilityReads?.received == false else { return }
+                self.expiredLegacyCapabilities.insert(query)
+                if query == self.playback.capabilityQueryPayload {
+                    self.playbackReadError = String(localized: "Playback information was not received. Reconnect the headphones to try again.")
+                }
+                self.recordDiagnostic("Capability read timed out; query=\(query.map { String(format: "%02X", $0) }.joined(separator: " "))", failure: true)
+                self.finishLegacyCapabilityRead()
+            }
+        }
+        legacyCapabilityTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: timeout)
+    }
+
+    private func finishLegacyCapabilityRead() {
+        legacyCapabilityTimeout?.cancel()
+        legacyCapabilityTimeout = nil
+        legacyCapabilityReads?.received = true
+        if legacyCapabilityReads?.acknowledged == true {
+            legacyCapabilityReads?.advance()
+            advanceLegacyCapabilities()
+        }
+    }
+
+    private func receiveLegacyCapability(_ payload: [UInt8], type: UInt8) -> Bool {
+        guard type == 0x0C, let query = legacyCapabilityReads?.currentQuery,
+              payload.count >= 2, payload[0] == query[0] + 1, payload[1] == query[1] else { return false }
+        guard legacyCapabilityReads?.received == false,
+              receivedAfter(legacyCapabilityReads?.transmissionOrdinal) else { return true }
+        if query == SonyCapabilityIdentity.queryPayload {
+            guard let identity = SonyCapabilityIdentity(payload: payload) else { return true }
+            let key = SonyCapabilityCache.Key(protocolVersion: protocolVersion!, identity: identity, displayLanguage: 1)
+            capabilityCache.bind(to: key)
+            capabilityCacheKey = key
+        } else if applyLegacyCapability(payload, query: query) {
+            if let key = capabilityCacheKey { capabilityCache.store(payload, for: query, key: key) }
+            recordDiagnostic("Capability received; reply=\(payload.map { String(format: "%02X", $0) }.joined(separator: " "))")
+        } else {
+            if let key = capabilityCacheKey { capabilityCache.remove(for: query, key: key) }
+            return true
+        }
+        finishLegacyCapabilityRead()
+        return true
+    }
+
+    private func applyLegacyCapability(_ payload: [UInt8], query: [UInt8]) -> Bool {
+        if query == playback.capabilityQueryPayload {
+            var value = playback
+            guard value.update(payload) else { return false }
+            playback = value
+            playbackFreshQueries.insert(query)
+            return true
+        }
+        var controls = legacyControls!
+        guard controls.update(payload) else { return false }
+        legacyControls = controls
+        return true
+    }
+
+    private func resetLegacyCapabilities() {
+        legacyCapabilityTimeout?.cancel()
+        legacyCapabilityTimeout = nil
+        expiredLegacyCapabilities = []
+        legacyCapabilityReads = nil
+        legacyCapabilityQueries = []
+        deferredCapabilityCommands = []
+        capabilityCacheKey = nil
+    }
+
     private func requestAudioFeatures(initial: Bool = false) {
         if let legacyControls {
             requestFeatureQueries(legacyControls.dsee.queryPayloads + legacyControls.connectionQuality.queryPayloads + legacyControls.wearingControl.queryPayloads
                 + (legacyControls.standaloneNoiseCancel?.queryPayloads ?? []) + (legacyControls.standaloneAmbient?.queryPayloads ?? [])
                 + (legacyControls.automaticPowerOff?.queryPayloads ?? []) + touchAssignments.queryPayloads + systemFeatures.queryPayloads, initial: initial)
-            for payload in legacyIndicators.queryPayloads + legacySurround.queryPayloads + legacySoundPosition.queryPayloads { send(payload) }
             requestPlayback(.all)
+            for payload in legacyIndicators.queryPayloads + legacySurround.queryPayloads + legacySoundPosition.queryPayloads { send(payload) }
             for payload in voiceGuidance.queryPayloads + multipoint.queryPayloads { send(payload, type: 0x0E) }
             return
         }
@@ -2601,7 +2744,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private func requestFeatureQueries(_ queries: [[UInt8]], initial: Bool) {
         if initial, initialFeatureReads == nil {
             var sequence = InitialFeatureReadSequence()
-            for query in queries where query.count == 2 && ([0xE0, 0xE2, 0xE6, 0xF0, 0xF2, 0xF6, 0xFA].contains(query[0])
+            for query in queries where !legacyCapabilityQueries.contains(query) && query.count == 2 && ([0xE0, 0xE2, 0xE6, 0xF0, 0xF2, 0xF6, 0xFA].contains(query[0])
                 || (protocolInformation?.generation == .v2 && [0x60, 0x62, 0x66].contains(query[0]))) {
                 sequence.append(query)
             }
@@ -2662,7 +2805,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     @discardableResult
     private func requestPlayback(_ refresh: PlaybackRefresh) -> Bool {
         let queries = refresh == .musicVolume ? [playback.statusQueryPayload, playback.musicVolumeQueryPayload]
-            : playback.queryPayloads.filter { $0 != playback.capabilityQueryPayload || !playback.hasReceivedCapabilities }
+            : playback.queryPayloads.filter { $0 != playback.capabilityQueryPayload || (!playback.hasReceivedCapabilities && !legacyCapabilityQueries.contains($0)) }
         guard !queries.isEmpty, queries.allSatisfy({ playbackReads[$0]?.timedOut != true }) else { return false }
         if let sequence = playbackReadSequence {
             if !queries.allSatisfy({ sequence.queries.contains($0) }) { pendingPlaybackRefresh.insert(refresh) }
@@ -5617,7 +5760,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     private func beginHandshake(reusingConnection: Bool = false) {
         guard powerOffState == nil, !isRunningHeadphoneTest else { return }
-        if reusingConnection, equalizerRead != nil || !batteryReads.isEmpty || !playbackReads.isEmpty
+        if reusingConnection, !expiredLegacyCapabilities.isEmpty || legacyCapabilityReads != nil
+            || equalizerRead != nil || !batteryReads.isEmpty || !playbackReads.isEmpty
             || soundPressureRead != nil || inventoryRead != nil || noiseControlRead != nil
             || queuedNoiseControlRead || !noiseReadTimeouts.isEmpty || noiseControlRefresh != nil
             || discoveryReads.values.contains(where: { $0.retryTransmitted || ($0.transmitted && !$0.resolved) }) {
@@ -5627,6 +5771,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             return
         }
         resetWearingStatusRead(preservingPendingRead: reusingConnection)
+        resetLegacyCapabilities()
         protocolInformation = nil
         supportFunctionsReadOrdinal = nil
         bluetoothLEIdentityReadOrdinal = nil
@@ -5787,6 +5932,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func resetCommandQueue() {
+        resetLegacyCapabilities()
         initialFeatureReadTimeout?.cancel()
         initialFeatureReadTimeout = nil
         initialFeatureReads = nil
@@ -5853,6 +5999,17 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         #else
         guard channel != nil else { return }
         #endif
+        if type == 0x0C, legacyCapabilityReads?.currentQuery == payload {
+            guard legacyCapabilityReads?.queued == false else { return }
+            legacyCapabilityReads?.prepare(payload)
+            if let frame = commandQueue.enqueue(payload: payload) { transmit(frame) }
+            return
+        }
+        if type == 0x0C, legacyCapabilityQueries.contains(payload) { return }
+        if legacyCapabilityReads != nil {
+            deferredCapabilityCommands.append((payload, type, retryingDiscovery))
+            return
+        }
         if protocolInformation?.generation == .v1 {
             let isEqualizerQuery = equalizer.queryPayloads.contains(payload)
             let isSoundEffectQuery = legacySoundEffectQueryKind(payload) != nil
@@ -6410,6 +6567,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if self.recordsDiagnosticCommands { self.recordDiagnosticCommand("TX", frame: frame) }
             self.beginDiscoveryRead(frame.payload, type: frame.type)
             if frame.type == 0x0C {
+                if self.legacyCapabilityReads?.currentQuery == frame.payload {
+                    self.legacyCapabilityReads?.transmissionOrdinal = ordinal
+                }
                 self.beginInitialFeatureRead(frame.payload)
                 if self.noiseControlReadSequence?.currentQuery == frame.payload {
                     self.noiseControlReadSequence?.transmissionOrdinal = self.completedTransmissionOrdinal
@@ -6497,7 +6657,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if frame.type == 0x0C, frame.payload[0] == 0xA8, let query = self.playback.queryPayload(for: frame.payload) {
                 self.playbackReads[query]?.isObsolete = true
             }
-            if frame.type == 0x0C, self.playback.queryPayloads.contains(frame.payload) {
+            if frame.type == 0x0C, self.legacyCapabilityReads?.currentQuery != frame.payload,
+               self.playback.queryPayloads.contains(frame.payload) {
                 let query = frame.payload
                 self.playbackReadSequence?.transmitted(query)
                 let setting = self.playbackVolumeSetting(query)
@@ -6842,6 +7003,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 || (soundPressure.isSupported && payload == SonySoundPressure.levelQueryPayload)
         }
         guard frame.type == 0x0C else { return false }
+        if legacyCapabilityReads?.currentQuery == payload { return true }
         if [[0x00, 0x00], [0x04, 0x01], [0x04, 0x02], [0x04, 0x03], [0x06, 0x00], [0x10, 0x04]].contains(payload) { return true }
         if payload.count == 2, [0x60, 0x62, 0x66].contains(payload[0]), payload[1] == asmType { return true }
         if noiseToggle?.queryPayloads.contains(payload) == true || payload == noiseTest?.queryPayload { return true }
@@ -7149,6 +7311,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     }
                 }
                 if let next = acknowledgment.nextFrame { transmit(next) }
+                if sent.type == 0x0C { acknowledgeLegacyCapabilityRead(sent.payload) }
                 if playbackReadCompleted { advancePlaybackReadSequence() }
                 if initialFeatureReadCompleted { finishInitialFeatureRead() }
                 if noiseControlReadCompleted { advanceNoiseControlRead() }
@@ -7516,7 +7679,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             }
             if let read {
                 playbackReadTimeouts.removeValue(forKey: query)?.cancel()
-                if !playbackReads.values.contains(where: { $0.timedOut }) { playbackReadError = nil }
+                if !expiredLegacyCapabilities.contains(playback.capabilityQueryPayload),
+                   !playbackReads.values.contains(where: { $0.timedOut }) { playbackReadError = nil }
                 needsReplacement = read.refreshRequested || read.isObsolete || read.sourceGeneration != playbackSourceGeneration
                 guard read.sourceGeneration == playbackSourceGeneration, !read.isObsolete else { return true }
                 isFreshResponse = !read.timedOut && !read.refreshRequested
@@ -7558,6 +7722,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         receivedTransmissionOrdinal = transmissionOrdinal
         defer { receivedTransmissionOrdinal = previousOrdinal }
         if stage == .unsupported { return }
+        if receiveLegacyCapability(payload, type: type) { return }
         if type == 0x0E, payload.count >= 2, payload[0] == 0x37, payload[1] == multipoint.inventoryInquiryType, let read = inventoryRead,
            read.transmitted, !receivedAfter(read.transmissionOrdinal) { return }
         if type == 0x0C, payload.count >= 2, payload[0] == 0xE7,
@@ -8340,16 +8505,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             voiceGuidance = SonyVoiceGuidance(supportedFunctions: controls.supportedFunctions, generation: .v1)
             asmType = controls.supportedFunctions.contains(0x62) ? 0x02 : nil
             availableNoiseModes = []
-            enableConnectionAlerts()
-            if asmType != nil {
-                stage = .noiseControl
-                send([0x60, 0x02])
-                send([0x62, 0x02])
-                requestBattery()
-                send([0x04, 0x02])
-            } else {
-                finishControlSync(initial: true)
-            }
+            beginLegacyCapabilities()
             return
         }
         if payload.prefix(2) == [0x05, 0x02] {
@@ -8787,6 +8943,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     private func finishControlSync(initial isInitialSync: Bool) {
         stage = .ready
+        retryDiscoveryReads()
         handshakeTimeoutWorkItem?.cancel()
         handshakeTimeoutWorkItem = nil
         linkState = .ready

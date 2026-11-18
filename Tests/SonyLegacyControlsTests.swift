@@ -538,6 +538,7 @@ final class SonyLegacyControllerTests: XCTestCase {
         deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
         deliver([0x05, 3, 0x30, 0x01], to: controller)
         deliver(whXM4Functions, to: controller)
+        completeCapabilityReads([[0xA1, 1, 31, 1, 1], [0xE1, 1, 0], [0xE1, 2, 2, 0], [0xF1, 4, 3, 0x10, 0x11, 1]], on: controller)
         acknowledgeAll(controller)
         deliver([0x61, 2, 2, 0, 1, 2, 0, 0x14, 1, 0x14], to: controller)
         deliver([0x63, 2, 0], to: controller)
@@ -876,8 +877,12 @@ final class SonyLegacyControllerTests: XCTestCase {
     }
 
     func testLegacyDSEEWaitsForCapabilityAvailabilityAndCurrentTypedValue() {
-        let controller = makeController(supportsDSEE: true)
+        let controller = beginController()
         defer { controller.simulateControlLoss() }
+        deliver([0x07, 0, 2, 0x62, 0xE2], to: controller)
+        completeCapabilityReads([], on: controller)
+        acknowledgeAll(controller)
+        XCTAssertFalse(controller.isReady)
         XCTAssertTrue(controller.supportsDSEE)
         XCTAssertFalse(controller.audioFeatures.supportsDSEE)
         XCTAssertFalse(controller.canSetDSEE)
@@ -895,6 +900,12 @@ final class SonyLegacyControllerTests: XCTestCase {
         XCTAssertEqual(controller.dseeType, .hx)
         XCTAssertFalse(controller.canSetDSEE)
         acknowledgeAll(controller)
+        deliver(capability, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        acknowledgeAll(controller)
+        deliver(ambient, to: controller)
+        acknowledgeAll(controller)
+        XCTAssertTrue(controller.isReady)
         deliver([0xE3, 2, 0], to: controller)
         XCTAssertFalse(controller.canSetDSEE)
         acknowledgeAll(controller)
@@ -993,8 +1004,8 @@ final class SonyLegacyControllerTests: XCTestCase {
         XCTAssertTrue(controller.canSetDSEE)
     }
 
-    func testAcknowledgedLegacyDSEEReadExpiryIsIsolatedAndLateRepliesRequireAFreshRead() async {
-        let replies: [[UInt8]] = [[0xE1, 2, 0, 0], [0xE3, 2, 0], [0xE7, 2, 0, 1]]
+    func testAcknowledgedLegacyDSEEStatusReadExpiryIsIsolatedAndLateRepliesRequireAFreshRead() async {
+        let replies: [[UInt8]] = [[0xE3, 2, 0], [0xE7, 2, 0, 1]]
         for (index, reply) in replies.enumerated() {
             let query: [UInt8] = [reply[0] - 1, 2]
             let controller = makeController(supportsDSEE: true)
@@ -1754,15 +1765,21 @@ final class SonyLegacyControllerTests: XCTestCase {
     }
 
     func testLegacyPowerPolicyOwnsItsTypedReadsAndUnknownTypeKeepsTheDeadline() async {
-        let controller = beginPowerPolicyController()
+        let controller = beginController()
         defer { controller.simulateControlLoss() }
+        deliver([0x07, 0, 2, 0x62, 0xF4], to: controller)
+        acknowledgeAll(controller)
+        controller.defersSimulatedWrites = true
+        controller.simulateLegacyCapabilityReadTimeout()
         let replies: [[UInt8]] = [[0xF1, 4, 3, 0x10, 0x11, 1], [0xF3, 4, 0], [0xF7, 4, 1, 0x10, 3]]
         for reply in replies { deliver(reply, to: controller) }
         XCTAssertNil(controller.automaticPowerOff?.options)
         XCTAssertNil(controller.automaticPowerOff?.current)
         controller.simulateSystemReadTimeout([0xF6, 4])
         for _ in 0..<4 { await Task.yield() }
-        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.isReady)
+        controller.defersSimulatedWrites = false
+        controller.completeSimulatedWrite()
         acknowledgeAll(controller)
         for reply in replies { deliver(reply, type: 0x0E, to: controller) }
         for reply: [UInt8] in [[0x21, 4, 2, 0, 0x11], [0x23, 4, 0], [0x27, 4, 0, 0], [0xF7, 4, 0x10, 3]] {
@@ -1770,7 +1787,14 @@ final class SonyLegacyControllerTests: XCTestCase {
         }
         XCTAssertNil(controller.automaticPowerOff?.options)
         XCTAssertNil(controller.automaticPowerOff?.current)
-        for reply in replies {
+        deliver(replies[0], to: controller)
+        acknowledgeAll(controller)
+        deliver(capability, to: controller)
+        deliver([0x63, 2, 0], to: controller)
+        acknowledgeAll(controller)
+        deliver(ambient, to: controller)
+        acknowledgeAll(controller)
+        for reply in replies.dropFirst() {
             deliver(reply, to: controller)
             acknowledgeAll(controller)
         }
@@ -1969,6 +1993,8 @@ final class SonyLegacyControllerTests: XCTestCase {
         let functions: [UInt8] = [0x15, 0x18, 0x62, 0x23] + (supportsDSEE ? [0xE2] : []) + (supportsEqualizer ? [0x51] : [])
             + (supportsConnectionQuality ? [0xE1] : [])
         deliver([0x07, 0, UInt8(functions.count)] + functions, to: controller)
+        let replies: [[UInt8]] = (supportsConnectionQuality ? [[0xE1, 1, 0]] : []) + (supportsDSEE ? [[0xE1, 2, 0, 0]] : [])
+        if !replies.isEmpty { completeCapabilityReads(replies, on: controller) }
         acknowledgeAll(controller)
         deliver(capability ?? self.capability, to: controller)
         deliver([0x63, 2, available], to: controller)
@@ -2013,6 +2039,7 @@ final class SonyLegacyControllerTests: XCTestCase {
     private func beginPowerPolicyController() -> SonyHeadphonesController {
         let controller = beginController()
         deliver([0x07, 0, 2, 0x62, 0xF4], to: controller)
+        completeCapabilityReads([[0xF1, 4, 3, 0x10, 0x11, 1]], on: controller)
         acknowledgeAll(controller)
         deliver(capability, to: controller)
         deliver([0x63, 2, 0], to: controller)
@@ -2029,6 +2056,18 @@ final class SonyLegacyControllerTests: XCTestCase {
         }
         XCTAssertTrue(controller.canSetAutomaticPowerOff)
         return controller
+    }
+
+    private func completeCapabilityReads(_ replies: [[UInt8]], on controller: SonyHeadphonesController) {
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [0x02, 0])
+        deliver([0x03, 0, 0, 1, 0x54], to: controller)
+        for reply in replies {
+            XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [reply[0] - 1, reply[1]])
+            acknowledgeAll(controller)
+            deliver(reply, to: controller)
+        }
+        acknowledgeAll(controller)
     }
 
     private func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, to controller: SonyHeadphonesController) {
@@ -2339,6 +2378,11 @@ final class SonyLegacyMultipointTests: XCTestCase {
             headphones.simulateProtocolMessage([0x05, 1, UInt8(name.count)] + name)
             headphones.simulateProtocolMessage([0x05, 3, 0x30, 0x01])
             headphones.simulateProtocolMessage([0x07, 0, UInt8(3 + extraFunctions.count), 0x11, 0xA1, 0xD2] + extraFunctions)
+            acknowledgeAll(headphones)
+            XCTAssertEqual(headphones.simulatedLegacyCapabilityQuery, [0x02, 0])
+            headphones.simulateProtocolMessage([0x03, 0, 0, 1, 0x54])
+            acknowledgeAll(headphones)
+            headphones.simulateProtocolMessage([0xA1, 1, 31, 1, 1])
             acknowledgeAll(headphones)
             headphones.simulateProtocolMessage([0x05, 2, 5] + Array("3.0.1".utf8))
             XCTAssertTrue(headphones.isReady)

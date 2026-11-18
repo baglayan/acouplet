@@ -144,6 +144,18 @@ final class SonyOptionalNoiseReadConnectionTests: XCTestCase {
         acknowledgeAll(controller)
         let functions: [UInt8] = [legacy ? 0x62 : 0x6B, legacy ? 0x51 : 0x50, 0xA1, 0x23]
         controller.simulateProtocolMessage([0x07, 0, UInt8(functions.count)] + (legacy ? functions : functions.flatMap { [$0, 0] }))
+        if legacy {
+            for reply: [UInt8] in [[0x03, 0, 1, 3, 0x58, 0x4D, 0x34], [0xA1, 1, 31, 1, 0]] {
+                guard let frame = controller.simulatedPendingFrame else {
+                    XCTFail("Missing capability query for \(reply)")
+                    return controller
+                }
+                XCTAssertEqual(frame.payload, [reply[0] - 1, reply[1]])
+                controller.simulateProtocolMessage(reply)
+                controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - frame.sequence, payload: []))
+            }
+            XCTAssertNil(controller.simulatedLegacyCapabilityQuery)
+        }
         if acknowledgeNoise { acknowledgeAll(controller) }
         return controller
     }
@@ -157,7 +169,7 @@ final class SonyOptionalNoiseReadConnectionTests: XCTestCase {
     }
 
     private func playbackReplies(legacy: Bool) -> [[UInt8]] {
-        legacy ? [[0xA1, 1, 31, 1, 0], [0xA3, 1, 0, 2], [0xA7, 1, 0x20, 12]]
+        legacy ? [[0xA3, 1, 0, 2], [0xA7, 1, 0x20, 12]]
             : [[0xA1, 1, 31, 16], [0xA3, 1, 0, 2, 0], [0xA7, 1, 1, 0, 1, 0, 1, 0, 1, 0],
                [0xA7, 0x20, 12], [0xA7, 0x21, 7]]
     }
