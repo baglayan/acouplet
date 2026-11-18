@@ -1600,6 +1600,13 @@ final class SonyConnectionControllerTests: XCTestCase {
             acknowledgeAll(controller)
             deliver(functions, to: controller)
             acknowledgeAll(controller)
+            if controller.protocolInformation?.generation == .v1 {
+                XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [0x02, 0])
+                deliver([0x03, 0, 1, 4] + Array("h800".utf8), to: controller)
+                XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE0, 2])
+                deliver([0xE1, 2, 0, 0], to: controller)
+                acknowledgeAll(controller)
+            }
             XCTAssertTrue(controller.isReady)
             XCTAssertTrue(controller.supportsDSEE)
             XCTAssertTrue(controller.availableNoiseModes.isEmpty)
@@ -1689,6 +1696,7 @@ final class SonyConnectionControllerTests: XCTestCase {
         deliver([0x01, 0, 0x40, 0], to: controller, begin: true)
         acknowledgeAll(controller)
         deliver([0x07, 0, 2, 0x62, 0xE1], to: controller)
+        deliverLegacyQualityCapability(to: controller)
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x94, 1, 0])
         let setup = controller.simulatedPendingFrame!
         controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: setup.sequence, payload: []))
@@ -1708,13 +1716,13 @@ final class SonyConnectionControllerTests: XCTestCase {
     func testLegacyQualityMetadataNeedsTransmittedOwnedReadsAndKnownRepliesEndDeadlines() async {
         let controller = beginLegacyQualityController(deferQualityReads: true)
         defer { controller.simulateControlLoss() }
-        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE0, 1])
-        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xE0, 1] })
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE2, 1])
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xE2, 1] })
         deliverLegacyQuality(to: controller, acknowledgeQueries: false)
-        XCTAssertNil(controller.legacyControls?.connectionQuality.settingType)
+        XCTAssertEqual(controller.legacyControls?.connectionQuality.settingType, 0)
         XCTAssertNil(controller.legacyControls?.connectionQuality.available)
         XCTAssertNil(controller.connectionMode)
-        controller.simulateSystemReadTimeout([0xE0, 1])
+        controller.simulateSystemReadTimeout([0xE2, 1])
         for _ in 0..<4 { await Task.yield() }
         XCTAssertTrue(controller.isReady)
         controller.completeSimulatedWrite()
@@ -1737,12 +1745,14 @@ final class SonyConnectionControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testLegacyQualityUnknownOrMalformedOwnedRepliesRetainTheirDeadline() async {
+    func testLegacyQualityOwnedRepliesDistinguishUnknownCapabilitiesFromInvalidReads() async {
         for (query, reply): ([UInt8], [UInt8]) in [
-            ([0xE0, 1], [0xE1, 1, 0xFF]), ([0xE2, 1], [0xE3, 1, 0xFF]),
+            ([0xE0, 1], [0xE1, 1, 0xFF]), ([0xE0, 1], [0xE1, 1]),
+            ([0xE2, 1], [0xE3, 1, 0xFF]),
             ([0xE6, 1], [0xE7, 1, 0, 2]), ([0xE6, 1], [0xE7, 1, 0]),
         ] {
-            let controller = beginLegacyQualityController()
+            let capabilityRead = query == [0xE0, 1]
+            let controller = beginLegacyQualityController(deferCapabilityRead: capabilityRead)
             defer { controller.simulateControlLoss() }
             acknowledgeAll(controller)
             for known: [UInt8] in [[0xE1, 1, 0], [0xE3, 1, 0], [0xE7, 1, 0, 0]] where known[0] < reply[0] {
@@ -1754,7 +1764,24 @@ final class SonyConnectionControllerTests: XCTestCase {
             XCTAssertFalse(controller.canChangeConnectionMode)
             XCTAssertNotEqual(controller.connectionMode, .lowLatency)
             let session = controller.simulatedControlSession
-            controller.simulateSystemReadTimeout(query)
+            if capabilityRead {
+                XCTAssertFalse(controller.isReady)
+                if reply.count == 3 {
+                    XCTAssertNil(controller.simulatedLegacyCapabilityQuery)
+                    XCTAssertEqual(controller.legacyControls?.connectionQuality.settingType, 0xFF)
+                } else {
+                    XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, query)
+                    controller.simulateLegacyCapabilityReadTimeout()
+                }
+                acknowledgeAll(controller)
+                deliverLegacyNoise(to: controller)
+                acknowledgeAll(controller)
+                deliver([0xE3, 1, 0], to: controller)
+                acknowledgeAll(controller)
+                deliver([0xE7, 1, 0, 0], to: controller)
+            } else {
+                controller.simulateSystemReadTimeout(query)
+            }
             for _ in 0..<4 { await Task.yield() }
             XCTAssertTrue(controller.isReady)
             XCTAssertEqual(controller.simulatedControlSession, session)
@@ -3399,10 +3426,12 @@ final class SonyConnectionControllerTests: XCTestCase {
     }
 
     @MainActor
-    private func beginLegacyQualityController(version: UInt8 = 0x40, deferQualityReads: Bool = false) -> SonyHeadphonesController {
+    private func beginLegacyQualityController(version: UInt8 = 0x40, deferQualityReads: Bool = false,
+                                               deferCapabilityRead: Bool = false) -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM4", controlBusy: true)
-        negotiateLegacyQuality(to: controller, version: version, begin: true, deferQualityReads: deferQualityReads)
+        negotiateLegacyQuality(to: controller, version: version, begin: true, deferQualityReads: deferQualityReads,
+                               deferCapabilityRead: deferCapabilityRead)
         return controller
     }
 
@@ -3419,15 +3448,30 @@ final class SonyConnectionControllerTests: XCTestCase {
 
     @MainActor
     private func negotiateLegacyQuality(to controller: SonyHeadphonesController, version: UInt8 = 0x40,
-                                        begin: Bool = false, deferQualityReads: Bool = false) {
+                                        begin: Bool = false, deferQualityReads: Bool = false, deferCapabilityRead: Bool = false) {
         deliver([0x01, 0, version, 0], to: controller, begin: begin)
         acknowledgeAll(controller)
         let name = Array("WF-1000XM4".utf8)
         deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
         deliver([0x05, 3, 0, 1], to: controller)
         deliver([0x07, 0, 2, 0x62, 0xE1], to: controller)
+        deliverLegacyQualityCapability(to: controller, deferRead: deferCapabilityRead)
+        if deferCapabilityRead { return }
         acknowledgeAll(controller)
         deliverLegacyNoise(to: controller, deferQualityReads: deferQualityReads)
+    }
+
+    @MainActor
+    private func deliverLegacyQualityCapability(to controller: SonyHeadphonesController, deferRead: Bool = false) {
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [0x02, 0])
+        deliver([0x03, 0, 1, 7] + Array("quality".utf8), to: controller)
+        if deferRead { return }
+        if controller.simulatedLegacyCapabilityQuery == [0xE0, 1] {
+            deliver([0xE1, 1, 0], to: controller)
+            acknowledge(controller)
+        }
+        XCTAssertNil(controller.simulatedLegacyCapabilityQuery)
     }
 
     @MainActor

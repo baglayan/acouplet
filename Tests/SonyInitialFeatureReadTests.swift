@@ -23,6 +23,7 @@ final class SonyInitialFeatureReadTests: XCTestCase {
                         XCTAssertNil(controller.simulatedPendingFrame)
                         controller.simulateProtocolMessage(reply)
                     }
+                    if generation == .v1, index == 0 { completeFirmwareRead(controller) }
                 }
                 XCTAssertNil(controller.simulatedPendingFrame)
                 XCTAssertEqual(featureQueries(controller), queries)
@@ -47,13 +48,14 @@ final class SonyInitialFeatureReadTests: XCTestCase {
             let query = try XCTUnwrap(controller.simulatedPendingFrame).payload
             acknowledgeSimulatedCommands(controller)
             for reply: [UInt8] in [[0xE1, legacy ? 1 : 2, 0], [0xE1, query[1]],
-                                  legacy ? [0xE1, 2, 0xFF, 0] : [0xE1, 1, 0xFF],
+                                  legacy ? [0xE1, 2, 0xFF] : [0xE1, 1, 0xFF],
                                   [0xE5, query[1], 0], legacy ? [0xE9, 2, 0, 1] : [0xE9, 1, 1], replies[3]] {
                 controller.simulateProtocolMessage(reply)
                 XCTAssertNil(controller.simulatedPendingFrame)
                 XCTAssertEqual(featureQueries(controller), [query])
             }
             controller.simulateProtocolMessage(replies[0])
+            if legacy { completeFirmwareRead(controller) }
             XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE2, query[1]])
             acknowledgeSimulatedCommands(controller)
             controller.simulateProtocolMessage([0xE3, query[1], 1])
@@ -74,18 +76,24 @@ final class SonyInitialFeatureReadTests: XCTestCase {
         for generation in [SonyProtocolInfo.Generation.v1, .v2] {
             let controller = makeController(generation: generation)
             defer { controller.simulateControlLoss() }
-            let replies = initialReplies(generation: generation)
+            var replies = initialReplies(generation: generation)
+            if generation == .v1 {
+                controller.simulateProtocolMessage(replies.removeFirst())
+                acknowledge(try XCTUnwrap(controller.simulatedPendingFrame), on: controller)
+                completeFirmwareRead(controller)
+            }
             let first = try XCTUnwrap(controller.simulatedPendingFrame).payload
             acknowledgeSimulatedCommands(controller)
             controller.requestCurrentSettings()
-            XCTAssertEqual(featureQueries(controller), [first])
+            let capabilityQueries: [[UInt8]] = generation == .v1 ? [[0xE0, 2]] : []
+            XCTAssertEqual(featureQueries(controller), capabilityQueries + [first])
             controller.simulateInitialFeatureReadTimeout()
             for _ in 0..<8 { await Task.yield() }
             XCTAssertTrue(controller.isReady)
             XCTAssertFalse(controller.simulatedHandshakeTimeoutPending)
-            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF0, replies[3][1]])
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF0, replies[replies.count - 3][1]])
             controller.simulateProtocolMessage(replies[0])
-            XCTAssertFalse(featureQueries(controller).contains([0xE2, first[1]]))
+            XCTAssertFalse(featureQueries(controller).contains([generation == .v1 ? 0xE6 : 0xE2, first[1]]))
             for reply in replies.suffix(3) {
                 controller.simulateProtocolMessage(reply)
                 acknowledgeSimulatedCommands(controller)
@@ -93,7 +101,7 @@ final class SonyInitialFeatureReadTests: XCTestCase {
             XCTAssertNil(controller.simulatedPendingFrame)
             XCTAssertFalse(controller.canSetDSEE)
             XCTAssertTrue(controller.isReady)
-            XCTAssertEqual(featureQueries(controller), [first] + replies.suffix(3).map { [$0[0] - 1, $0[1]] })
+            XCTAssertEqual(featureQueries(controller), capabilityQueries + [first] + replies.suffix(3).map { [$0[0] - 1, $0[1]] })
         }
     }
 
@@ -125,12 +133,12 @@ final class SonyInitialFeatureReadTests: XCTestCase {
         defer { controller.simulateControlLoss() }
         let replies = initialReplies(generation: .v1)
         let queries = replies.map { [$0[0] - 1, $0[1]] }
+        controller.simulateProtocolMessage(replies[0])
         acknowledgeSimulatedCommands(controller)
         XCTAssertTrue(controller.beginLegacyOptimizer())
         let id = try XCTUnwrap(controller.legacyOptimizerTransition?.id)
-        controller.simulateProtocolMessage(replies[0])
         controller.requestCurrentSettings()
-        XCTAssertEqual(featureQueries(controller), [queries[0]])
+        XCTAssertEqual(featureQueries(controller), Array(queries.prefix(2)))
         for reply: [UInt8] in [[0x81, 1, 5, 1, 3, 1, 4], [0x83, 1, 0, 0], [0x87, 1, 1, 0, 1, 10]] {
             let frame = try XCTUnwrap(controller.simulatedPendingFrame)
             XCTAssertEqual(frame.payload, [reply[0] - 1, reply[1]])
@@ -141,15 +149,13 @@ final class SonyInitialFeatureReadTests: XCTestCase {
         controller.dismissLegacyOptimizer(id: id)
         XCTAssertFalse(controller.isRunningHeadphoneTest)
         controller.requestCurrentSettings()
-        for (index, reply) in replies.enumerated().dropFirst() {
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertEqual(featureQueries(controller), Array(queries.prefix(2)))
+        controller.simulateProtocolMessage(replies[1])
+        for (index, reply) in replies.enumerated().dropFirst(2) {
             let frame = try XCTUnwrap(controller.simulatedPendingFrame)
             XCTAssertEqual(frame.payload, queries[index])
-            if index == 1 {
-                controller.requestCurrentSettings()
-                XCTAssertEqual(controller.simulatedPendingFrame, frame)
-            }
             acknowledge(frame, on: controller)
-            if index == 1 { controller.requestCurrentSettings() }
             XCTAssertNil(controller.simulatedPendingFrame)
             XCTAssertEqual(featureQueries(controller), Array(queries.prefix(index + 1)))
             controller.simulateProtocolMessage(reply)
@@ -214,6 +220,7 @@ final class SonyInitialFeatureReadTests: XCTestCase {
             acknowledge(frame, on: controller)
             XCTAssertNil(controller.simulatedPendingFrame)
             controller.simulateProtocolMessage(reply)
+            if generation == .v1 { completeFirmwareRead(controller) }
             XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE2, reply[1]])
         }
     }
@@ -320,12 +327,17 @@ final class SonyInitialFeatureReadTests: XCTestCase {
         controller.simulateProtocolMessage(legacy ? [0x01, 0, 2, 0x10] : [0x01, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
         controller.simulateProtocolMessage([0x07, 0, UInt8(functions.count)] + (legacy ? functions : functions.flatMap { [$0, 0] }))
+        if legacy {
+            acknowledgeSimulatedCommands(controller)
+            XCTAssertEqual(controller.simulatedLegacyCapabilityQuery, [0x02, 0])
+            controller.simulateProtocolMessage([0x03, 0, 0, 1, 0x54])
+        }
         for _ in 0..<64 {
             guard let frame = controller.simulatedPendingFrame, frame.payload != firstQuery else { break }
             acknowledge(frame, on: controller)
         }
         controller.simulateProtocolMessage([0x05, 2, 5] + Array("1.0.0".utf8))
-        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.isReady, !legacy)
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, firstQuery)
     }
 
@@ -334,6 +346,16 @@ final class SonyInitialFeatureReadTests: XCTestCase {
                              [0xF1, 3, 0], [0xF3, 3, 0], [0xF7, 3, 0, 1]]
             : [[0xE1, 1, 2], [0xE3, 1, 0], [0xE7, 1, 1],
                [0xF1, 4, 0, 1, 0x30], [0xF3, 4, 0], [0xF7, 4, 0x30]]
+    }
+
+    private func completeFirmwareRead(_ controller: SonyHeadphonesController) {
+        guard let frame = controller.simulatedPendingFrame else {
+            XCTFail("The legacy firmware read was not queued after capability acquisition.")
+            return
+        }
+        XCTAssertEqual(frame.payload, [0x04, 2])
+        controller.simulateProtocolMessage([0x05, 2, 5] + Array("1.0.0".utf8))
+        acknowledge(frame, on: controller)
     }
 
     private func acknowledge(_ frame: SonyFrame, on controller: SonyHeadphonesController) {

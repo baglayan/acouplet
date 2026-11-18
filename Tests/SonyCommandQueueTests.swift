@@ -498,26 +498,31 @@ final class SonyCommandQueueTests: XCTestCase {
             controller.simulateProtocolMessage(legacy ? [0x01, 0, 0x40, 0] : [0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
             acknowledgeSimulatedCommands(controller)
             controller.simulateProtocolMessage(legacy ? [0x07, 0, 1, 0xE1] : [0x07, 0, 1, 0xD1, 0])
+            if legacy {
+                XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x02, 0])
+                acknowledgeSimulatedCommands(controller)
+                controller.simulateProtocolMessage([0x03, 0, 1, 3, 0x58, 0x4D, 0x33])
+            }
             let query: [UInt8] = legacy ? [0xE0, 1] : [0xD0, 0xD1, 1]
             while let frame = controller.simulatedPendingFrame, frame.payload != query {
                 controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
             }
             let frame = try XCTUnwrap(controller.simulatedPendingFrame)
             XCTAssertEqual(frame.payload, query)
-            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.isReady, !legacy)
             XCTAssertTrue(controller.canRetryRead(frame))
             let session = controller.simulatedControlSession
             let count = controller.simulatedTransmittedFrames.filter { $0 == frame }.count
             controller.simulateProtocolMessage(legacy ? [0xE1, 1, 0] : [0xD1, 0xD1, 0, 0, 0, 0])
             let queries = legacy ? controller.legacyControls?.connectionQuality.queryPayloads : controller.systemFeatures.queryPayloads
             XCTAssertFalse(try XCTUnwrap(queries).contains(query))
-            XCTAssertFalse(controller.canRetryRead(frame))
+            XCTAssertEqual(controller.canRetryRead(frame), legacy)
             controller.simulateAcknowledgmentTimeout()
             for _ in 0..<4 { await Task.yield() }
             XCTAssertEqual(controller.simulatedPendingFrame, frame)
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0 == frame }.count, count + 1)
             XCTAssertEqual(controller.simulatedControlSession, session)
-            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.isReady, !legacy)
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
             XCTAssertNotEqual(controller.simulatedPendingFrame, frame)
             XCTAssertTrue(controller.isReady)
@@ -598,6 +603,8 @@ final class SonyCommandQueueTests: XCTestCase {
                     controller.simulateProtocolMessage([0x01, 0, 2, 0x10], beginConnection: true)
                     acknowledgeSimulatedCommands(controller)
                     controller.simulateProtocolMessage([0x07, 0, 1, 0xA1])
+                    acknowledgeSimulatedCommands(controller)
+                    controller.simulateProtocolMessage([0x03, 0, 1, 3, 0x58, 0x4D, 0x33])
                     acknowledgeSimulatedCommands(controller)
                     for payload: [UInt8] in [[0xA1, 1, 31, 1, 0], [0xA3, 1, 0, 2], [0xA7, 1, 0x20, 12]] {
                         controller.simulateProtocolMessage(payload)

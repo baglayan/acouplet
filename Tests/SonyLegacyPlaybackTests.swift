@@ -160,3 +160,160 @@ final class SonyLegacyPlaybackTests: XCTestCase {
         XCTAssertNil(playback.volumePayload(0))
     }
 }
+
+@MainActor
+final class SonyLegacyPlaybackOrderTests: XCTestCase {
+    func testStartupRequestsPlaybackBeforeLegacyIndicatorsAndSoundEffects() {
+        for replyFirst in [false, true] {
+            let controller = beginDiscovery()
+            defer { controller.simulateControlLoss() }
+            XCTAssertFalse(controller.playback.hasReceivedCapabilities)
+            XCTAssertFalse(controller.canControlMusicVolume)
+            completeCapabilities(controller, replyFirst: replyFirst)
+            XCTAssertEqual(orderedQueries(controller), capabilityQueries)
+            completeReads(controller, replyFirst: replyFirst, volume: 12)
+            XCTAssertEqual(orderedQueries(controller), capabilityQueries + [[0xA2, 1]] + optionalQueries + [[0xA6, 1, 0x20]])
+            XCTAssertTrue(controller.playback.hasReceivedCapabilities)
+            XCTAssertTrue(controller.canControlMusicVolume)
+            #if !ACOUPLET_PUBLIC_APIS_ONLY
+            XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
+            #endif
+            XCTAssertEqual(controller.playback.musicVolumeRange, 0...30)
+            XCTAssertEqual(controller.playback.state, .paused)
+            XCTAssertEqual(controller.playback.volume, 12)
+            XCTAssertTrue(controller.canSetDSEE)
+            XCTAssertTrue(controller.legacySurround.canSet)
+            XCTAssertTrue(controller.legacySoundPosition.canSet)
+        }
+    }
+
+    func testRefreshRequestsPlaybackBeforeLegacyIndicatorsAndSoundEffects() {
+        for replyFirst in [false, true] {
+            let controller = beginDiscovery()
+            defer { controller.simulateControlLoss() }
+            completeCapabilities(controller, replyFirst: replyFirst)
+            completeReads(controller, replyFirst: replyFirst, volume: 12)
+            let first = orderedQueries(controller).count
+            let session = controller.simulatedControlSession
+            controller.requestCurrentSettings()
+            completeReads(controller, replyFirst: replyFirst, volume: 18)
+            XCTAssertEqual(Array(orderedQueries(controller).dropFirst(first)),
+                           [[0xA2, 1], [0x18, 0], [0x14, 0], [0x46, 1], [0x46, 2], [0xA6, 1, 0x20]])
+            XCTAssertEqual(controller.simulatedControlSession, session)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertTrue(controller.canControlMusicVolume)
+            #if !ACOUPLET_PUBLIC_APIS_ONLY
+            XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
+            #endif
+            XCTAssertEqual(controller.playback.volume, 18)
+        }
+    }
+
+    private func beginDiscovery() -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM3", controlBusy: true)
+        controller.simulateProtocolMessage([0x01, 0, 0x40, 0x10], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        let name = Array("WH-1000XM3".utf8)
+        controller.simulateProtocolMessage([0x05, 1, UInt8(name.count)] + name)
+        controller.simulateProtocolMessage([0x05, 3, 0x20, 0])
+        controller.simulateProtocolMessage([0x07, 0, 8, 0xA1, 0xE1, 0xE2, 0xF4, 0x41, 0x42, 0x12, 0x13])
+        XCTAssertFalse(controller.isReady)
+        XCTAssertEqual(controller.protocolInformation?.generation, .v1)
+        XCTAssertEqual(controller.protocolInformation?.version, 0x4010)
+        return controller
+    }
+
+    private func completeCapabilities(_ controller: SonyHeadphonesController, replyFirst: Bool) {
+        let replies: [[UInt8]] = [[0x03, 0, 1, 3, 0x58, 0x4D, 0x33], [0xA1, 1, 31, 1, 1],
+                                 [0xE1, 1, 0], [0xE1, 2, 0, 0], [0xF1, 4, 2, 0x10, 0x11]]
+        for (query, reply) in zip(capabilityQueries, replies) {
+            guard let frame = controller.simulatedPendingFrame else {
+                XCTFail("Missing capability query: \(query)")
+                return
+            }
+            XCTAssertEqual(frame.payload, query)
+            XCTAssertFalse(controller.isReady)
+            if replyFirst {
+                controller.simulateProtocolMessage(reply)
+                XCTAssertEqual(controller.simulatedPendingFrame, frame)
+                acknowledge(frame, on: controller)
+            } else {
+                acknowledge(frame, on: controller)
+                XCTAssertNil(controller.simulatedPendingFrame)
+                controller.simulateProtocolMessage(reply)
+            }
+        }
+        XCTAssertNil(controller.simulatedLegacyCapabilityQuery)
+        XCTAssertTrue(controller.isReady)
+    }
+
+    private func completeReads(_ controller: SonyHeadphonesController, replyFirst: Bool, volume: UInt8) {
+        var delayedReplies: [[UInt8]] = []
+        for _ in 0..<100 {
+            guard let frame = controller.simulatedPendingFrame else { break }
+            XCTAssertTrue(controller.simulatedTransmittedFrames.contains(frame))
+            let reply: [UInt8]
+            switch frame.payload {
+            case [0x94, 1, 0]:
+                acknowledge(frame, on: controller)
+                continue
+            case [0x04, 2]: reply = [0x05, 2, 5] + Array("4.5.2".utf8)
+            case [0xA2, 1]: reply = [0xA3, 1, 0, 2]
+            case [0xA6, 1, 0x20]:
+                let playback = controller.playback
+                XCTAssertEqual(delayedReplies.count, controller.legacySurround.status == nil ? 4 : 2)
+                for delayed in delayedReplies { controller.simulateProtocolMessage(delayed) }
+                delayedReplies = []
+                XCTAssertEqual(controller.playback, playback)
+                XCTAssertEqual(controller.simulatedPendingFrame, frame)
+                reply = [0xA7, 1, 0x20, volume]
+            case [0xE2, 2]: reply = [0xE3, 2, 0]
+            case [0xE6, 2]: reply = [0xE7, 2, 0, 1]
+            case [0xE2, 1]: reply = [0xE3, 1, 0]
+            case [0xE6, 1]: reply = [0xE7, 1, 0, 0]
+            case [0xF2, 4]: reply = [0xF3, 4, 0]
+            case [0xF6, 4]: reply = [0xF7, 4, 1, 0x10, 3]
+            case [0x18, 0]: reply = [0x19, 0, 0x20]
+            case [0x14, 0]: reply = [0x15, 0, 0, 1]
+            case [0x40, 1, 1]: reply = [0x41, 1, 3, 0, 0, 2, 0, 3, 0]
+            case [0x40, 2, 1]: reply = [0x41, 2, 1]
+            case [0x42, 1], [0x42, 2], [0x46, 1], [0x46, 2]:
+                delayedReplies.append([frame.payload[0] + 1, frame.payload[1], 0])
+                acknowledge(frame, on: controller)
+                continue
+            default:
+                XCTFail("Unexpected query: \(frame.payload)")
+                return
+            }
+            if replyFirst {
+                controller.simulateProtocolMessage(reply)
+                XCTAssertEqual(controller.simulatedPendingFrame, frame)
+                acknowledge(frame, on: controller)
+            } else {
+                acknowledge(frame, on: controller)
+                controller.simulateProtocolMessage(reply)
+            }
+        }
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertTrue(delayedReplies.isEmpty)
+    }
+
+    private func acknowledge(_ frame: SonyFrame, on controller: SonyHeadphonesController) {
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - frame.sequence, payload: []))
+    }
+
+    private func orderedQueries(_ controller: SonyHeadphonesController) -> [[UInt8]] {
+        controller.simulatedTransmittedFrames.filter {
+            $0.type == 0x0C && (capabilityQueries.contains($0.payload) || optionalQueries.contains($0.payload) || [0xA2, 0xA6].contains($0.payload.first))
+        }.map(\.payload)
+    }
+
+    private var capabilityQueries: [[UInt8]] {
+        [[0x02, 0], [0xA0, 1], [0xE0, 1], [0xE0, 2], [0xF0, 4]]
+    }
+
+    private var optionalQueries: [[UInt8]] {
+        [[0x18, 0], [0x14, 0], [0x40, 1, 1], [0x42, 1], [0x46, 1], [0x40, 2, 1], [0x42, 2], [0x46, 2]]
+    }
+}
