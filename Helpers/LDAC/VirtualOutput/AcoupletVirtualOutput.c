@@ -14,8 +14,8 @@
 #define ACOUPLET_SIGNING_TEAM "5743Y47SC7"
 #endif
 
-enum { kAcoupletLease = 'xmls', kAcoupletModel = 'xmnm', kAcoupletPriority = 'xmpr', kAcoupletRevision = 'xmvr' };
-static const SInt32 kAcoupletDriverRevision = 10;
+enum { kAcoupletLease = 'xmls', kAcoupletModel = 'xmnm', kAcoupletPriority = 'xmpr', kAcoupletRevision = 'xmvr', kAcoupletRatePending = 'xmrt' };
+static const SInt32 kAcoupletDriverRevision = 11;
 static UInt64 gLeaseDeadline;
 static pid_t gLeaseOwner;
 static atomic_bool gAvailable;
@@ -498,6 +498,9 @@ static Boolean AcoupletRefreshLease(void) {
         gDesiredAvailable = desired;
         ++gLeaseGeneration;
     }
+    if (gPendingRateAction && (!desired || gPendingRateOwner != gLeaseOwner ||
+        gPendingRateGeneration != gLeaseGeneration))
+        gPendingRateAction = 0;
     return expired;
 }
 
@@ -553,6 +556,7 @@ static OSStatus AcoupletPerformConfiguration(AudioServerPlugInDriverRef driver, 
     pthread_mutex_lock(&gPlugIn_StateMutex);
     Boolean expired = AcoupletRefreshLease();
     Boolean changed = false;
+    OSStatus status = noErr;
     if (!gShuttingDown && action == gPendingAction && action) {
         if (gPendingGeneration == gLeaseGeneration && gPendingAvailable == gDesiredAvailable) {
             changed = AcoupletAlive() != gPendingAvailable;
@@ -561,8 +565,11 @@ static OSStatus AcoupletPerformConfiguration(AudioServerPlugInDriverRef driver, 
         gPendingAction = 0;
     }
     if (!gShuttingDown && action && action == gPendingRateAction) {
-        if (gPendingRateOwner == gLeaseOwner && AcoupletLeaseValid() &&
-            gPendingRateGeneration == gLeaseGeneration && !gDevice_IOIsRunning) {
+        Boolean ownsRequest = gPendingRateOwner == gLeaseOwner && AcoupletLeaseValid() &&
+            gPendingRateGeneration == gLeaseGeneration;
+        if (ownsRequest && gDevice_IOIsRunning) {
+            status = kAudioHardwareIllegalOperationError;
+        } else if (ownsRequest) {
             gDevice_SampleRate = gPendingRate;
             gDevice_HostTicksPerFrame = gTicksPerSecond / gDevice_SampleRate;
             gDevice_NumberTimeStamps = 0;
@@ -578,7 +585,7 @@ static OSStatus AcoupletPerformConfiguration(AudioServerPlugInDriverRef driver, 
     pthread_mutex_unlock(&gPlugIn_StateMutex);
     if (expired || changed) AcoupletLeaseChanged();
     AcoupletQueueAvailability();
-    return noErr;
+    return status;
 }
 
 static OSStatus AcoupletAbortConfiguration(AudioServerPlugInDriverRef driver, AudioObjectID device,
@@ -721,13 +728,14 @@ static UInt32 AcoupletSize(AudioObjectID object, const AudioObjectPropertyAddres
     if (object == kObjectID_Device) {
         switch (property->mSelector) {
             case kAcoupletLease: return sizeof(CFBooleanRef);
+            case kAcoupletRatePending: return sizeof(CFNumberRef);
             case kAcoupletModel: return sizeof(CFStringRef);
             case kAudioDevicePropertyIcon: return sizeof(CFURLRef);
             case kAcoupletPriority: return sizeof(CFPropertyListRef);
             case kAcoupletRevision: return sizeof(CFNumberRef);
             case kAudioDevicePropertyVolumeScalar: return sizeof(Float32);
             case kAudioDevicePropertyMute: return sizeof(UInt32);
-            case kAudioObjectPropertyCustomPropertyInfoList: return 4 * sizeof(AudioServerPlugInCustomPropertyInfo);
+            case kAudioObjectPropertyCustomPropertyInfoList: return 5 * sizeof(AudioServerPlugInCustomPropertyInfo);
             case kAudioDevicePropertyAvailableNominalSampleRates: return 4 * sizeof(AudioValueRange);
         }
     }
@@ -755,7 +763,7 @@ static Boolean AcoupletHasProperty(AudioServerPlugInDriverRef driver, AudioObjec
         (object == kObjectID_PlugIn && property->mSelector == kAudioPlugInPropertyTranslateUIDToBox))
         return false;
     if (object == kObjectID_Device && (property->mSelector == kAcoupletLease || property->mSelector == kAcoupletModel ||
-        property->mSelector == kAcoupletPriority || property->mSelector == kAcoupletRevision ||
+        property->mSelector == kAcoupletPriority || property->mSelector == kAcoupletRevision || property->mSelector == kAcoupletRatePending ||
         property->mSelector == kAudioObjectPropertyCustomPropertyInfoList))
         return property->mScope == kAudioObjectPropertyScopeGlobal && property->mElement == kAudioObjectPropertyElementMain;
     return NullAudio_HasProperty(driver, object, client, property);
@@ -772,7 +780,7 @@ static OSStatus AcoupletIsSettable(AudioServerPlugInDriverRef driver, AudioObjec
         *settable = true;
         return noErr;
     }
-    if (property->mSelector == kAudioObjectPropertyCustomPropertyInfoList || property->mSelector == kAcoupletRevision ||
+    if (property->mSelector == kAudioObjectPropertyCustomPropertyInfoList || property->mSelector == kAcoupletRevision || property->mSelector == kAcoupletRatePending ||
         (object == kObjectID_PlugIn && property->mSelector == kAudioPlugInPropertyBundleID)) {
         *settable = false;
         return noErr;
@@ -855,6 +863,19 @@ static OSStatus AcoupletGetData(AudioServerPlugInDriverRef driver, AudioObjectID
                 *size = sizeof(CFURLRef);
                 return noErr;
             }
+            case kAcoupletRatePending: {
+                if (!AcoupletClientAuthorized(client)) return kAudioDevicePermissionsError;
+                pthread_mutex_lock(&gPlugIn_StateMutex);
+                if (client != gLeaseOwner || !AcoupletLeaseValid()) {
+                    pthread_mutex_unlock(&gPlugIn_StateMutex);
+                    return kAudioDevicePermissionsError;
+                }
+                SInt32 rate = gPendingRateAction ? 0 : (SInt32)gDevice_SampleRate;
+                pthread_mutex_unlock(&gPlugIn_StateMutex);
+                *(CFNumberRef *)data = CFNumberCreate(NULL, kCFNumberSInt32Type, &rate);
+                *size = sizeof(CFNumberRef);
+                return *(CFNumberRef *)data ? noErr : kAudioHardwareUnspecifiedError;
+            }
             case kAcoupletLease: {
                 pthread_mutex_lock(&gPlugIn_StateMutex);
                 Boolean ownsLease = client == gLeaseOwner && AcoupletLeaseValid();
@@ -916,7 +937,10 @@ static OSStatus AcoupletGetData(AudioServerPlugInDriverRef driver, AudioObjectID
                 ((AudioServerPlugInCustomPropertyInfo *)data)[3] = (AudioServerPlugInCustomPropertyInfo){
                     kAcoupletRevision, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
                     kAudioServerPlugInCustomPropertyDataTypeNone};
-                *size = 4 * sizeof(AudioServerPlugInCustomPropertyInfo);
+                ((AudioServerPlugInCustomPropertyInfo *)data)[4] = (AudioServerPlugInCustomPropertyInfo){
+                    kAcoupletRatePending, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
+                    kAudioServerPlugInCustomPropertyDataTypeNone};
+                *size = 5 * sizeof(AudioServerPlugInCustomPropertyInfo);
                 return noErr;
             case kAudioDevicePropertyAvailableNominalSampleRates:
                 *size = (capacity / sizeof(AudioValueRange) < 4 ? capacity / sizeof(AudioValueRange) : 4) * sizeof(AudioValueRange);
@@ -988,7 +1012,7 @@ static OSStatus AcoupletSetRate(pid_t client, Float64 rate) {
         pthread_mutex_unlock(&gPlugIn_StateMutex);
         return kAudioDevicePermissionsError;
     }
-    if (gDevice_IOIsRunning || gShuttingDown || (gPendingRateAction && rate != gPendingRate)) {
+    if (gShuttingDown || (gPendingRateAction && rate != gPendingRate)) {
         pthread_mutex_unlock(&gPlugIn_StateMutex);
         return kAudioHardwareIllegalOperationError;
     }
@@ -1002,7 +1026,11 @@ static OSStatus AcoupletSetRate(pid_t client, Float64 rate) {
     gPendingRateGeneration = gLeaseGeneration;
     pthread_mutex_unlock(&gPlugIn_StateMutex);
     dispatch_async(gLeaseQueue, ^{
-        if (gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, action, NULL)) {
+        pthread_mutex_lock(&gPlugIn_StateMutex);
+        Boolean current = gPendingRateAction == action && AcoupletLeaseValid() &&
+            gPendingRateOwner == gLeaseOwner && gPendingRateGeneration == gLeaseGeneration;
+        pthread_mutex_unlock(&gPlugIn_StateMutex);
+        if (current && gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, action, NULL)) {
             pthread_mutex_lock(&gPlugIn_StateMutex);
             if (gPendingRateAction == action) gPendingRateAction = 0;
             pthread_mutex_unlock(&gPlugIn_StateMutex);

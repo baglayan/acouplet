@@ -1002,7 +1002,7 @@ static void CheckRevision(void) {
     Get(kObjectID_Device, owner, kAcoupletRevision, kAudioObjectPropertyScopeGlobal, sizeof(revision), &revision);
     SInt32 value = 0;
     assert(revision && CFGetTypeID(revision) == CFNumberGetTypeID());
-    assert(CFNumberGetValue(revision, kCFNumberSInt32Type, &value) && value == kAcoupletDriverRevision && value == 10);
+    assert(CFNumberGetValue(revision, kCFNumberSInt32Type, &value) && value == kAcoupletDriverRevision && value == 11);
     assert((*driver)->SetPropertyData(driver, kObjectID_Device, owner, &property, 0, NULL,
         sizeof(revision), &revision) != noErr);
     CFRelease(revision);
@@ -1015,8 +1015,162 @@ static void CheckRevision(void) {
     assert(!(*driver)->HasProperty(driver, kObjectID_PlugIn, owner, &property));
 }
 
+static OSStatus SetFixtureRate(pid_t client, Float64 rate) {
+    return Set(kObjectID_Device, client, kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal, sizeof(rate), &rate);
+}
+
+static SInt32 ClockRequest(pid_t client) {
+    CFNumberRef result;
+    Get(kObjectID_Device, client, kAcoupletRatePending, kAudioObjectPropertyScopeGlobal, sizeof(result), &result);
+    SInt32 value = -1;
+    assert(CFNumberGetValue(result, kCFNumberSInt32Type, &value));
+    CFRelease(result);
+    return value;
+}
+
+static void CheckLiveClock(pid_t client, Float64 expected, UInt64 expectedSeed) {
+    Float64 rate;
+    Get(kObjectID_Device, client, kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal, sizeof(rate), &rate);
+    assert(rate == expected);
+    UInt32 selectors[] = {kAudioStreamPropertyVirtualFormat, kAudioStreamPropertyPhysicalFormat};
+    for (UInt32 i = 0; i < 2; i++) {
+        AudioStreamBasicDescription format;
+        Get(kObjectID_Stream_Output, client, selectors[i], kAudioObjectPropertyScopeGlobal,
+            sizeof(format), &format);
+        assert(format.mSampleRate == expected && format.mFormatID == kAudioFormatLinearPCM &&
+            format.mFormatFlags == (kAudioFormatFlagIsFloat | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsPacked) &&
+            format.mBytesPerPacket == 8 && format.mFramesPerPacket == 1 && format.mBytesPerFrame == 8 &&
+            format.mChannelsPerFrame == 2 && format.mBitsPerChannel == 32 && format.mReserved == 0);
+    }
+    UInt32 period = Available(kAudioDevicePropertyZeroTimeStampPeriod, kAudioObjectPropertyScopeGlobal);
+    assert(period == (UInt32)ceil(kDevice_RingBufferSize * expected / 48000));
+    assert(fabs(atomic_load(&gClockTicksPerFrame) - gTicksPerSecond / expected) < 0.00001);
+    Float64 sampleTime;
+    UInt64 hostTime, seed;
+    assert((*driver)->GetZeroTimeStamp(driver, kObjectID_Device, 1, &sampleTime, &hostTime, &seed) == noErr);
+    assert(sampleTime >= 0 && fmod(sampleTime, period) == 0 && hostTime >= atomic_load(&gClockAnchor) &&
+        hostTime <= mach_absolute_time() && seed == expectedSeed);
+    CFStringRef uid;
+    Get(kObjectID_Device, client, kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal,
+        sizeof(uid), &uid);
+    assert(CFEqual(uid, CFSTR("dev.baglayan.Acouplet.ldac-output")));
+    CFRelease(uid);
+}
+
+static void CheckSignedLiveRate(pid_t signedPID, Boolean blocked) {
+    assert(gClientCheckAuthentication == NULL && signedPID != getpid());
+    assert(AcoupletClientAuthorized(signedPID) && !AcoupletClientAuthorized(getpid()));
+    assert(RequestLease(getpid(), true) == kAudioDevicePermissionsError);
+    SetLease(signedPID, true);
+    Perform(WaitRequest());
+    assert(AcoupletAlive() && Lease(signedPID));
+    assert(ClockRequest(signedPID) == 48000);
+    AudioObjectPropertyAddress requestAddress = Property(kAcoupletRatePending, kAudioObjectPropertyScopeGlobal);
+    UInt32 size = 0;
+    CFNumberRef forbidden = NULL;
+    assert((*driver)->GetPropertyData(driver, kObjectID_Device, getpid(), &requestAddress, 0, NULL,
+        sizeof(forbidden), &size, &forbidden) == kAudioDevicePermissionsError && !forbidden);
+    assert((*driver)->StartIO(driver, kObjectID_Device, 1) == noErr);
+    assert((*driver)->StartIO(driver, kObjectID_Device, 2) == noErr);
+    assert(gDevice_IOIsRunning == 2);
+    UInt64 seed = atomic_load(&gClockSeed);
+    UInt64 generation = gLeaseGeneration;
+    CheckLiveClock(signedPID, 48000, seed);
+    assert(SetFixtureRate(getpid(), 96000) == kAudioDevicePermissionsError);
+    assert(!gPendingRateAction && dispatch_semaphore_wait(requested, DISPATCH_TIME_NOW) != 0);
+
+    OSStatus status = SetFixtureRate(signedPID, 96000);
+    if (blocked) {
+        assert(status == kAudioHardwareIllegalOperationError);
+        assert(!gPendingRateAction && dispatch_semaphore_wait(requested, DISPATCH_TIME_NOW) != 0);
+        CheckLiveClock(signedPID, 48000, seed);
+        puts("AUTHENTICATED_LIVE_BASELINE: signed, leased PID refused before HAL host request while two clients are running.");
+        assert((*driver)->StopIO(driver, kObjectID_Device, 1) == noErr);
+        assert((*driver)->StopIO(driver, kObjectID_Device, 2) == noErr);
+    } else {
+        assert(status == noErr);
+        UInt64 request = WaitRequest();
+        assert(gPendingRateAction == request && gDevice_IOIsRunning == 2 && ClockRequest(signedPID) == 0);
+        assert(SetFixtureRate(signedPID, 96000) == noErr);
+        assert(SetFixtureRate(signedPID, 88200) == kAudioHardwareIllegalOperationError);
+        assert(dispatch_semaphore_wait(requested, DISPATCH_TIME_NOW) != 0);
+        assert((*driver)->StartIO(driver, kObjectID_Device, 3) == kAudioHardwareIllegalOperationError);
+        CheckLiveClock(signedPID, 48000, seed);
+        assert((*driver)->StopIO(driver, kObjectID_Device, 1) == noErr);
+        assert(gDevice_IOIsRunning == 1);
+        assert((*driver)->PerformDeviceConfigurationChange(driver, kObjectID_Device, request, NULL) ==
+            kAudioHardwareIllegalOperationError);
+        assert(!gPendingRateAction);
+        CheckLiveClock(signedPID, 48000, seed);
+
+        assert(SetFixtureRate(signedPID, 96000) == noErr);
+        request = WaitRequest();
+        assert(gDevice_IOIsRunning == 1);
+        assert((*driver)->StopIO(driver, kObjectID_Device, 2) == noErr);
+        assert(!gDevice_IOIsRunning);
+        CheckLiveClock(signedPID, 48000, seed);
+        SetLease(signedPID, true);
+        Perform(request);
+        assert(!gPendingRateAction && gLeaseGeneration == generation && Lease(signedPID) && AcoupletAlive());
+        assert(ClockRequest(signedPID) == 96000);
+        CheckLiveClock(signedPID, 96000, ++seed);
+        assert((*driver)->StartIO(driver, kObjectID_Device, 1) == noErr);
+        CheckLiveClock(signedPID, 96000, ++seed);
+
+        assert(SetFixtureRate(signedPID, 48000) == noErr);
+        UInt64 aborted = WaitRequest();
+        assert((*driver)->AbortDeviceConfigurationChange(driver, kObjectID_Device, aborted, NULL) == noErr);
+        Perform(aborted);
+        assert(!gPendingRateAction && gDevice_IOIsRunning == 1);
+        CheckLiveClock(signedPID, 96000, seed);
+        atomic_store(&rejectRequest, true);
+        assert(SetFixtureRate(signedPID, 48000) == noErr);
+        UInt64 rejected = WaitRequest();
+        atomic_store(&rejectRequest, false);
+        assert(!gPendingRateAction && gDevice_IOIsRunning == 1);
+        Perform(rejected);
+        CheckLiveClock(signedPID, 96000, seed);
+
+        assert(SetFixtureRate(signedPID, 48000) == noErr);
+        UInt64 stale = WaitRequest();
+        assert((*driver)->StopIO(driver, kObjectID_Device, 1) == noErr);
+        dispatch_suspend(gLeaseQueue);
+        SetLease(signedPID, false);
+        SetLease(signedPID, true);
+        dispatch_resume(gLeaseQueue);
+        assert(gLeaseGeneration != generation && Lease(signedPID));
+        Perform(stale);
+        assert(!gPendingRateAction);
+        CheckLiveClock(signedPID, 96000, seed);
+        assert((*driver)->StartIO(driver, kObjectID_Device, 1) == noErr);
+        CheckLiveClock(signedPID, 96000, ++seed);
+
+        AudioStreamBasicDescription format;
+        Get(kObjectID_Stream_Output, signedPID, kAudioStreamPropertyPhysicalFormat, kAudioObjectPropertyScopeGlobal,
+            sizeof(format), &format);
+        format.mSampleRate = 48000;
+        assert(Set(kObjectID_Stream_Output, getpid(), kAudioStreamPropertyPhysicalFormat,
+            kAudioObjectPropertyScopeGlobal, sizeof(format), &format) == kAudioDevicePermissionsError);
+        assert(Set(kObjectID_Stream_Output, signedPID, kAudioStreamPropertyPhysicalFormat,
+            kAudioObjectPropertyScopeGlobal, sizeof(format), &format) == noErr);
+        request = WaitRequest();
+        Perform(aborted);
+        assert(gPendingRateAction == request);
+        CheckLiveClock(signedPID, 96000, seed);
+        assert((*driver)->StopIO(driver, kObjectID_Device, 1) == noErr);
+        Perform(request);
+        CheckLiveClock(signedPID, 48000, ++seed);
+        puts("AUTHENTICATED_LIVE_RATE_CHECK passed: actual signed and unsigned PIDs; 48→96→48; simulated HAL shared I/O stop/perform/restart; lease renew/replace; abort/reject/stale; nominal/virtual/physical UID, clock period, timestamp and seed.");
+    }
+    SetLease(signedPID, false);
+    Perform(WaitRequest());
+    assert(!Lease(signedPID) && !AcoupletAlive() && !gDevice_IOIsRunning);
+}
+
 int main(int argc, const char *argv[]) {
-    assert(argc == 1 || argc == 2);
+    assert(argc == 1 || argc == 2 || (argc >= 3 && argc <= 4 && !strcmp(argv[1], "--signed-live-rate")));
     if (argc == 2) {
         CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)argv[1], strlen(argv[1]), true);
         iconBundle = CFBundleCreate(NULL, url);
@@ -1033,6 +1187,12 @@ int main(int argc, const char *argv[]) {
         atomic_fetch_add(&timerWakeups, 1);
         AcoupletRequestAvailability();
     });
+    if (argc >= 3) {
+        CheckSignedLiveRate((pid_t)strtol(argv[2], NULL, 10), argc == 4 && !strcmp(argv[3], "blocked"));
+        assert((*driver)->Release(driver) == 0);
+        dispatch_release(requested);
+        return 0;
+    }
     owner = getpid();
     assert(!AcoupletClientAuthorized(0) && !AcoupletClientAuthorized(-1));
     assert(!AcoupletClientAuthorized(owner));
@@ -1054,7 +1214,7 @@ int main(int argc, const char *argv[]) {
     assert((*driver)->GetPropertyDataSize(driver, kObjectID_Device, owner, &property, 0, NULL, &size) == noErr && !size);
     AudioObjectID unusedObject;
     assert((*driver)->GetPropertyData(driver, kObjectID_Device, owner, &property, 0, NULL, 0, &size, &unusedObject) == noErr);
-    AudioServerPlugInCustomPropertyInfo custom[4];
+    AudioServerPlugInCustomPropertyInfo custom[5];
     Get(kObjectID_Device, owner, kAudioObjectPropertyCustomPropertyInfoList, kAudioObjectPropertyScopeGlobal,
         sizeof(custom), custom);
     assert(custom[0].mSelector == kAcoupletLease && custom[0].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList &&
@@ -1062,6 +1222,7 @@ int main(int argc, const char *argv[]) {
     assert(custom[1].mSelector == kAcoupletModel && custom[1].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFString);
     assert(custom[2].mSelector == kAcoupletPriority && custom[2].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList);
     assert(custom[3].mSelector == kAcoupletRevision && custom[3].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList);
+    assert(custom[4].mSelector == kAcoupletRatePending && custom[4].mPropertyDataType == kAudioServerPlugInCustomPropertyDataTypeCFPropertyList);
     assert(!gPriorityConnection && gPriorityNotify == -1 && CFEqual(gPriorityPhase, CFSTR("idle")));
     CFStringRef initialName;
     Get(kObjectID_Device, owner, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
@@ -1261,7 +1422,11 @@ int main(int argc, const char *argv[]) {
         assert((*driver)->StartIO(driver, kObjectID_Device, 1) == noErr);
         Float64 different = rate == 96000 ? 48000 : 96000;
         assert(Set(kObjectID_Device, rateOwner, kAudioDevicePropertyNominalSampleRate,
-            kAudioObjectPropertyScopeGlobal, sizeof(different), &different) == kAudioHardwareIllegalOperationError);
+            kAudioObjectPropertyScopeGlobal, sizeof(different), &different) == noErr);
+        UInt64 runningRateAction = WaitRequest();
+        assert((*driver)->PerformDeviceConfigurationChange(driver, kObjectID_Device, runningRateAction, NULL) ==
+            kAudioHardwareIllegalOperationError);
+        assert(gDevice_SampleRate == rate && !gPendingRateAction);
         assert((*driver)->StopIO(driver, kObjectID_Device, 1) == noErr);
     }
     rate = 48000;
