@@ -3,6 +3,20 @@ import CryptoKit
 import Foundation
 import OSLog
 
+struct SonyDisplayFirmwareVersion: Equatable, Sendable {
+    let value: String
+
+    static func query(supportedFunctions: Set<UInt8>) -> [UInt8]? {
+        supportedFunctions.contains(0x1B) ? [0x10, 0x09] : nil
+    }
+
+    init?(payload: [UInt8]) {
+        guard payload.count > 3, payload[0] == 0x11, payload[1] == 0x09,
+              payload[2] <= 128, payload.count == 3 + Int(payload[2]) else { return nil }
+        value = String(decoding: payload.dropFirst(3), as: UTF8.self)
+    }
+}
+
 struct SonyFirmwareVersion: Comparable, Sendable {
     let text: String
     private let parts: [Int]

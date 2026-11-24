@@ -1,5 +1,23 @@
 import Foundation
 
+enum SonyPowerOffCommand {
+    static let frameType: UInt8 = 0x0C
+    private static let legacyPayload: [UInt8] = [0x22, 0x00, 0x01]
+    private static let modernPayload: [UInt8] = [0x24, 0x03, 0x01]
+
+    static func payload(generation: SonyProtocolInfo.Generation?, supportedFunctions: Set<UInt8>) -> [UInt8]? {
+        switch generation {
+        case .v1: supportedFunctions.contains(0x21) ? legacyPayload : nil
+        case .v2: supportedFunctions.contains(0x23) ? modernPayload : nil
+        case nil: nil
+        }
+    }
+
+    static func matches(_ frame: SonyFrame) -> Bool {
+        frame.type == frameType && (frame.payload == legacyPayload || frame.payload == modernPayload)
+    }
+}
+
 struct SonyBatteryCare: Equatable, Sendable {
     let includesThreshold: Bool
     private(set) var threshold: UInt8?
@@ -270,5 +288,82 @@ struct SonyStaminaChange: Equatable, Sendable {
         let payload: [UInt8] = [0x98, 0x00, alert.messageID, 0x01]
         replyPayload = payload
         return payload
+    }
+}
+
+struct SonyUSBProtection: Equatable, Sendable {
+    enum Kind: UInt8, CaseIterable, Sendable {
+        case moisture = 0x02
+        case overheat = 0x03
+
+        var function: UInt8 { rawValue + 0x21 }
+        var caution: UInt8 { self == .moisture ? 0x91 : 0x95 }
+    }
+
+    enum Monitoring: UInt8, Sendable { case whileNotCharging, inChargingCase }
+
+    struct PortState: Equatable, Sendable {
+        fileprivate(set) var monitoring: Monitoring?
+        fileprivate(set) var detected: Bool?
+        fileprivate var hasStatusNotification = false
+    }
+
+    private(set) var ports: [Kind: PortState]
+    private(set) var cautions: Set<Kind> = []
+    private(set) var heatAcknowledgementAccepted: Bool?
+
+    init(supportedFunctions: Set<UInt8> = []) {
+        ports = Dictionary(uniqueKeysWithValues: Kind.allCases.filter { supportedFunctions.contains($0.function) }
+            .map { ($0, PortState()) })
+    }
+
+    var queryPayloads: [[UInt8]] {
+        Kind.allCases.flatMap { kind -> [[UInt8]] in
+            guard let state = ports[kind] else { return [] }
+            return (state.monitoring == nil ? [[0x20, kind.rawValue]] : [])
+                + (state.detected == nil ? [[0x22, kind.rawValue]] : [])
+        }
+    }
+
+    @discardableResult
+    mutating func receiveCaution(_ alert: SonyConnectionAlert) -> Bool {
+        guard alert.format == .fixed, let kind = Kind.allCases.first(where: { $0.caution == alert.messageID }),
+              ports[kind] != nil else { return false }
+        if case .unknown = alert.actionType { return false }
+        cautions.insert(kind)
+        return true
+    }
+
+    func acknowledgement(_ kind: Kind) -> [UInt8]? {
+        guard cautions.contains(kind) else { return nil }
+        return [0x98, 0x00, kind.caution, SonyConnectionAlertAction.positive.rawValue]
+    }
+
+    mutating func didSendAcknowledgement(_ payload: [UInt8]) {
+        guard let kind = Kind.allCases.first(where: { acknowledgement($0) == payload }) else { return }
+        cautions.remove(kind)
+    }
+
+    @discardableResult
+    mutating func update(_ payload: [UInt8], frameType: UInt8) -> Bool {
+        guard frameType == 0x0E, payload.count == 3, let kind = Kind(rawValue: payload[1]),
+              var state = ports[kind], payload[2] <= 1 else { return false }
+        switch payload[0] {
+        case 0x21:
+            state.monitoring = Monitoring(rawValue: payload[2])
+        case 0x23, 0x25:
+            if payload[0] == 0x23, state.hasStatusNotification { return true }
+            let detected = payload[2] == 0
+            if state.detected != detected, kind == .overheat {
+                heatAcknowledgementAccepted = nil
+            }
+            state.detected = detected
+            if payload[0] == 0x25 { state.hasStatusNotification = true }
+        case 0x29 where kind == .overheat:
+            heatAcknowledgementAccepted = payload[2] == 0
+        default: return false
+        }
+        ports[kind] = state
+        return true
     }
 }

@@ -1,7 +1,23 @@
+import Foundation
 import XCTest
 @testable import Acouplet
 
 final class SonyCommonConnectionTests: XCTestCase {
+    func testConnectionTimeUsesUTCComponentsAndSignedLocalOffset() throws {
+        let date = Date(timeIntervalSince1970: 1_709_210_096)
+        let zone = try XCTUnwrap(TimeZone(secondsFromGMT: -12_600))
+        let expected: [UInt8] = [0x18, 0x05, 0x00, 0, 0, 0, 0, 0x65, 0xE0, 0x79, 0xF0, 0x07, 0xE8,
+                                 2, 29, 12, 34, 56, 0xFD, 0xE2]
+        XCTAssertEqual(SonyConnectionEstablishedTime.payload(supportedFunctions: [0x16, 0x17], at: date, timeZone: zone), expected)
+        XCTAssertNil(SonyConnectionEstablishedTime.payload(supportedFunctions: [0x17], at: date, timeZone: zone))
+
+        let newfoundland = try XCTUnwrap(TimeZone(identifier: "America/St_Johns"))
+        XCTAssertEqual(SonyConnectionEstablishedTime.payload(supportedFunctions: [0x16], at: date, timeZone: newfoundland), expected)
+        let summer = date.addingTimeInterval(150 * 24 * 3600)
+        let summerPayload = try XCTUnwrap(SonyConnectionEstablishedTime.payload(supportedFunctions: [0x16], at: summer, timeZone: newfoundland))
+        XCTAssertEqual(Array(summerPayload.suffix(2)), [0xFE, 0xE2])
+    }
+
     func testAdvertisedReconnectionRequestsPreserveRequestTypeAndNormalizeTheAddress() {
         for (value, requestType): (UInt8, SonyCommonConnection.RequestType) in [(0x00, .underConfirmation), (0x01, .execute)] {
             for address in ["01:23:45:67:89:AB", "01:23:45:67:89:ab", "aB:cD:eF:01:23:45"] {
