@@ -322,10 +322,12 @@ final class SonyNativeHUD {
         if panel == nil {
             guard let nativeWindowClass = NSClassFromString("SystemBannerUI.SystemBannerWindow") as? NSPanel.Type else { return false }
             let panel = nativeWindowClass.init()
+            panel.ignoresMouseEvents = true
             nativeWindowSize = panel.frame.size
             self.panel = panel
         }
-        position()
+        let placement = BannerPlacement.current(anchorView: anchorView)
+        position(placement)
         #if DEBUG
         logGeometry("before present: \(mode)")
         #endif
@@ -347,7 +349,7 @@ final class SonyNativeHUD {
         #if DEBUG
         logGeometry("hosting updated: \(mode)")
         #endif
-        position()
+        position(placement)
         panel?.orderFrontRegardless()
         #if DEBUG
         logGeometry("ordered: \(mode)")
@@ -380,25 +382,8 @@ final class SonyNativeHUD {
     }
     #endif
 
-    private func position() {
-        guard let panel else { return }
-        let screen: NSScreen
-        let center: CGFloat
-        let top: CGFloat
-        if let anchorView, !anchorView.isHiddenOrHasHiddenAncestor,
-           let window = anchorView.window, window.isVisible, let anchorScreen = window.screen {
-            let anchor = window.convertToScreen(anchorView.convert(anchorView.bounds, to: nil))
-            screen = anchorScreen
-            center = anchor.midX
-            top = window.frame.minY
-        } else {
-            guard let fallback = NSScreen.main ?? NSScreen.screens.first else { return }
-            screen = fallback
-            center = screen.frame.midX
-            top = screen.frame.maxY - (nativeWindowSize.height - 121)
-        }
-        let left = max(screen.frame.minX, min(center - nativeWindowSize.width / 2, screen.frame.maxX - nativeWindowSize.width + 20))
-        panel.setFrameTopLeftPoint(NSPoint(x: left, y: top))
+    private func position(_ placement: BannerPlacement?) {
+        if let placement { panel?.setFrameTopLeftPoint(placement.nativeTopLeft(size: nativeWindowSize)) }
     }
 
     private func dismissNative() {

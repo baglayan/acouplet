@@ -338,20 +338,10 @@ final class SonyNoiseModeHUD {
         dismissFallback()
     }
 
-    static func fallbackFrame(size: NSSize, screen: NSRect, anchor: NSRect?) -> NSRect {
-        let width = min(size.width, screen.width)
-        let height = min(size.height, screen.height)
-        let left = max(screen.minX, min((anchor?.midX ?? screen.midX) - width / 2, screen.maxX - width))
-        let top = min(anchor?.minY ?? screen.maxY, screen.maxY) - 8
-        return NSRect(x: left, y: max(screen.minY, top - height), width: width, height: height)
-    }
-
     private func showFallback(title: String, symbol: String = "", detail: String? = nil, image: NSImage? = nil,
                               batteryLevel: Int? = nil, replacing: Bool = false) -> Bool {
         guard !menuVisible, replacing || fallbackPanel?.isVisible != true else { return false }
-        let anchorWindow = anchorView.flatMap { !$0.isHiddenOrHasHiddenAncestor && $0.window?.isVisible == true ? $0.window : nil }
-        guard let screen = anchorWindow?.screen ?? NSScreen.main ?? NSScreen.screens.first else { return false }
-        let anchor = anchorWindow.flatMap { window in anchorView.map { window.convertToScreen($0.convert($0.bounds, to: nil)) } }
+        guard let placement = BannerPlacement.current(anchorView: anchorView) else { return false }
         var useGlass = true
         #if DEBUG
         if CommandLine.arguments.contains("-ui-testing"), CommandLine.arguments.contains("--material-hud-preview") { useGlass = false }
@@ -379,7 +369,7 @@ final class SonyNoiseModeHUD {
         }
         panel.title = image == nil ? String(localized: "Noise Control") : title
         panel.contentView = hosting
-        panel.setFrame(Self.fallbackFrame(size: hosting.fittingSize, screen: screen.visibleFrame, anchor: anchor), display: false)
+        panel.setFrame(placement.fallbackFrame(size: hosting.fittingSize), display: false)
         panel.orderFrontRegardless()
         fallbackLifetime.presented()
         NSAccessibility.post(element: panel, notification: .announcementRequested, userInfo: [

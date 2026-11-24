@@ -127,19 +127,57 @@ final class SonyNoiseModeHUDTests: XCTestCase {
     func testFallbackFrameRemainsOnTheAnchorScreenOrCentersWithoutAnAnchor() {
         let screen = NSRect(x: -1920, y: 0, width: 1920, height: 1055)
         let size = NSSize(width: 400, height: 66)
-        let left = SonyNoiseModeHUD.fallbackFrame(size: size, screen: screen,
-                                                 anchor: NSRect(x: -1910, y: 1055, width: 30, height: 25))
-        let right = SonyNoiseModeHUD.fallbackFrame(size: size, screen: screen,
-                                                  anchor: NSRect(x: -40, y: 1055, width: 30, height: 25))
+        func placement(anchorX: CGFloat) -> BannerPlacement {
+            .desktop(screen: screen, visibleFrame: screen,
+                     anchor: (NSRect(x: anchorX, y: 1055, width: 30, height: 25), 1055))
+        }
+        let left = placement(anchorX: -1910).fallbackFrame(size: size)
+        let right = placement(anchorX: -40).fallbackFrame(size: size)
         XCTAssertEqual(left.minX, screen.minX)
         XCTAssertEqual(right.maxX, screen.maxX)
         XCTAssertEqual(left.maxY, screen.maxY - 8)
         XCTAssertEqual(right.maxY, screen.maxY - 8)
-        let centered = SonyNoiseModeHUD.fallbackFrame(size: size, screen: screen, anchor: nil)
+        let centered = BannerPlacement.desktop(screen: screen, visibleFrame: screen, anchor: nil).fallbackFrame(size: size)
         XCTAssertEqual(centered.midX, screen.midX)
         XCTAssertEqual(centered.maxY, screen.maxY - 8)
-        let smallScreen = NSRect(x: 100, y: 200, width: 300, height: 40)
-        XCTAssertEqual(SonyNoiseModeHUD.fallbackFrame(size: size, screen: smallScreen, anchor: nil), smallScreen)
+        let small = NSRect(x: 100, y: 200, width: 300, height: 40)
+        XCTAssertEqual(BannerPlacement.desktop(screen: small, visibleFrame: small, anchor: nil).fallbackFrame(size: size), small)
+    }
+
+    @MainActor
+    func testFullScreenUsesOnlyTheActiveDisplaysCurrentSpace() {
+        let desktop = ["type": 0]
+        let fullScreen = ["type": 4]
+        let displays: [[String: Any]] = [
+            ["Display Identifier": "left", "Current Space": desktop, "Spaces": [desktop, fullScreen]],
+            ["Display Identifier": "right", "Current Space": fullScreen],
+        ]
+        XCTAssertFalse(BannerPlacement.isFullScreen(activeDisplay: "left", separateSpaces: true, displays: displays))
+        XCTAssertTrue(BannerPlacement.isFullScreen(activeDisplay: "right", separateSpaces: true, displays: displays))
+        XCTAssertFalse(BannerPlacement.isFullScreen(activeDisplay: "missing", separateSpaces: true, displays: displays))
+        let shared: [[String: Any]] = [["Display Identifier": "Main", "Current Space": fullScreen]]
+        XCTAssertTrue(BannerPlacement.isFullScreen(activeDisplay: "right", separateSpaces: false, displays: shared))
+    }
+
+    @MainActor
+    func testFullScreenCentersBothRenderersBelowTheRevealedMenuBar() {
+        let screen = NSRect(x: -1440, y: 220, width: 1440, height: 900)
+        let nativeSize = NSSize(width: 367, height: 160)
+        let fallbackSize = NSSize(width: 240, height: 66)
+        for height: CGFloat in [24, 39] {
+            let placement = BannerPlacement.fullScreen(screen: screen, menuBarHeight: height)
+            let native = placement.nativeTopLeft(size: nativeSize)
+            let fallback = placement.fallbackFrame(size: fallbackSize)
+            XCTAssertEqual(native.x + nativeSize.width / 2, screen.midX)
+            XCTAssertEqual(fallback.midX, screen.midX)
+            XCTAssertEqual(native.y, screen.maxY - height)
+            XCTAssertEqual(fallback.maxY, native.y - 10)
+        }
+        let anchor = NSRect(x: -300, y: screen.maxY - 26, width: 32, height: 26)
+        let desktop = BannerPlacement.desktop(screen: screen, visibleFrame: screen, anchor: (anchor, anchor.minY - 1))
+        XCTAssertEqual(desktop.nativeTopLeft(size: nativeSize), NSPoint(x: anchor.midX - nativeSize.width / 2, y: anchor.minY - 1))
+        XCTAssertEqual(desktop.fallbackFrame(size: fallbackSize).midX, anchor.midX)
+        XCTAssertEqual(desktop.fallbackFrame(size: fallbackSize).maxY, anchor.minY - 8)
     }
 
     @MainActor
