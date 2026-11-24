@@ -1,8 +1,100 @@
 import XCTest
 import IOBluetooth
+import SwiftUI
 @testable import Acouplet
 
 final class SonyConnectionControllerTests: XCTestCase {
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    @MainActor
+    func testRenderedSettingsShowsDeviceReportedAssistantSetupWithoutSelection() async throws {
+        let suite = "AcoupletTests.AssistantSetupSettings.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = SettingsStore(defaults: defaults, preferencesDomain: suite)
+        settings.selectedSettingsPane = "headphones"
+        let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { headphones.simulateControlLoss() }
+        headphones.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+        headphones.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+        acknowledgeSimulatedCommands(headphones)
+        headphones.simulateProtocolMessage([7, 0, 2, 0x6B, 1, SonyVoiceAssistantSetup.capability, 1])
+        acknowledgeSimulatedCommands(headphones)
+        headphones.simulateProtocolMessage([0x67, 0x17, 1, 1, 1, 0, 8])
+        acknowledgeSimulatedCommands(headphones)
+        XCTAssertTrue(headphones.isReady)
+        let environment = AppEnvironment(settings: settings, headphones: headphones,
+                                         audioRoute: MacAudioRouteObserver(startAutomatically: false))
+        let content = SettingsView()
+            .environmentObject(headphones)
+            .environmentObject(environment.devices)
+            .environmentObject(environment.audioRoute)
+            .environmentObject(settings)
+            .environmentObject(environment.ldac)
+            #if canImport(Sparkle)
+            .environmentObject(environment.updater)
+            #endif
+        let host = NSHostingView(rootView: content)
+        let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 700, height: 950),
+                             styleMask: [.titled, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.title = suite
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.contentView = host
+        window.orderBack(nil)
+        XCTAssertFalse(window.isKeyWindow)
+        defer { window.orderOut(nil) }
+
+        let readDeadline = ContinuousClock.now + .seconds(2)
+        while !headphones.simulatedTransmittedFrames.contains(where: { $0.type == 0x0C && $0.payload == SonyVoiceAssistantSetup.query }),
+              ContinuousClock.now < readDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(headphones.simulatedTransmittedFrames.contains(where: { $0.type == 0x0C && $0.payload == SonyVoiceAssistantSetup.query }))
+        let before = await renderedMenuElements(in: suite)
+        XCTAssertFalse(before.contains { $0.identifier == "system.voiceAssistantSetupOptions" })
+        acknowledgeSimulatedCommands(headphones)
+        headphones.simulateProtocolMessage([0x93, 3, 2, 1, 2])
+        var after = await renderedMenuElements(in: suite)
+        let renderDeadline = ContinuousClock.now + .seconds(2)
+        while !after.contains(where: { $0.identifier == "system.voiceAssistantSetupOptions" }), ContinuousClock.now < renderDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+            after = await renderedMenuElements(in: suite)
+        }
+        let options = try XCTUnwrap(after.first { $0.identifier == "system.voiceAssistantSetupOptions" })
+        XCTAssertEqual(options.role, kAXStaticTextRole)
+        XCTAssertTrue(options.label?.contains("Amazon Alexa") == true)
+        XCTAssertTrue(options.label?.contains("Tencent Xiaowei") == true)
+        XCTAssertFalse(after.contains { $0.identifier == "system.voiceAssistant" })
+    }
+
+    private struct MenuElement: Sendable {
+        let identifier: String?
+        let label: String?
+        let role: String?
+    }
+
+    @MainActor
+    private func renderedMenuElements(in windowTitle: String) async -> [MenuElement] {
+        await Task.yield()
+        func attribute(_ element: AXUIElement, _ name: String) -> Any? {
+            var value: CFTypeRef?
+            return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+        }
+        func elements(in element: AXUIElement) -> [MenuElement] {
+            let item = MenuElement(identifier: attribute(element, kAXIdentifierAttribute) as? String,
+                                   label: attribute(element, kAXDescriptionAttribute) as? String
+                                       ?? attribute(element, kAXValueAttribute) as? String
+                                       ?? attribute(element, kAXTitleAttribute) as? String,
+                                   role: attribute(element, kAXRoleAttribute) as? String)
+            let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+            return [item] + children.flatMap { elements(in: $0) }
+        }
+        let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
+        let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        return windows.first { (attribute($0, kAXTitleAttribute) as? String) == windowTitle }.map(elements) ?? []
+    }
+    #endif
+
     @MainActor
     func testNoiseShortcutUsesOffAndAmbientWhenANCIsNotAdvertised() throws {
         for (function, inquiry): (UInt8, UInt8) in [(0x66, 0x21), (0x67, 0x22)] {

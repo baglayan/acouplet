@@ -651,9 +651,22 @@ final class AppUITests: XCTestCase {
 
     @MainActor
     func testLegacyOptimizerRequiresStartAndShowsConfirmedResults() {
+        verifyOptimizer(model: "whXM4")
+    }
+
+    @MainActor
+    func testModernOptimizerRequiresStartAndShowsConfirmedResults() {
+        for (variant, personal, pressure) in [("combined", true, true), ("personal", true, false), ("barometric", false, true)] {
+            verifyOptimizer(model: "whXM5", extraArguments: ["--modern-optimizer", variant],
+                            personal: personal, pressure: pressure)
+        }
+    }
+
+    @MainActor
+    private func verifyOptimizer(model: String, extraArguments: [String] = [], personal: Bool = true, pressure: Bool = true) {
         let app = XCUIApplication()
         defer { app.terminate() }
-        app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "whXM4", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", model, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"] + extraArguments
         app.launch()
         let settings = app.buttons["menu.settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
@@ -692,6 +705,8 @@ final class AppUITests: XCTestCase {
         XCTAssertEqual(heading.value as? String, "Noise Cancelling Optimizer")
         XCTAssertEqual(window.frame, parentFrame)
         XCTAssertTrue(sheet.frame.contains(result.frame))
+        XCTAssertEqual(sheet.staticTexts["Personal optimization"].exists, personal)
+        XCTAssertEqual(sheet.staticTexts["Atmospheric pressure"].exists, pressure)
         XCTAssertTrue(sheet.frame.contains(done.frame))
         XCTAssertTrue(done.isHittable)
         done.click()
@@ -1929,6 +1944,41 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testULTEqualizerChangesModeAndPreservesClearBass() {
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", "whULT900N", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        XCTAssertTrue(app.windows["Headphone Controls"].waitForExistence(timeout: 5))
+        let preset = app.popUpButtons["equalizer.preset"]
+        XCTAssertEqual(preset.value as? String, "Bass Boost")
+        preset.click()
+        app.menuItems["Bright"].click()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Bright"), object: preset)], timeout: 3), .completed)
+
+        app.menuButtons["More"].click()
+        app.menuItems["Custom Equalizer…"].click()
+        let editor = app.windows["Equalizer"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 3))
+        let mode = editor.popUpButtons["equalizer.ultMode"]
+        let bass = editor.sliders["Clear Bass"]
+        XCTAssertEqual(mode.value as? String, "ULT 1")
+        XCTAssertEqual((bass.value as? NSNumber)?.intValue, 0)
+        mode.click()
+        app.menuItems["ULT 2"].click()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == 4"), object: bass)], timeout: 3), .completed)
+        XCTAssertEqual((editor.sliders["400 Hz"].value as? NSNumber)?.intValue, 0)
+
+        bass.adjust(toNormalizedSliderPosition: 0.75)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: mode)], timeout: 3), .completed)
+        XCTAssertEqual((bass.value as? NSNumber)?.intValue, 5)
+        mode.click()
+        app.menuItems["Off"].click()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == 1"), object: bass)], timeout: 3), .completed)
+        XCTAssertTrue(editor.staticTexts["Bright"].exists)
+    }
+
+    @MainActor
     func testTenBandEqualizerUsesAdvertisedPresetsAndVerticalFaders() throws {
         let app = XCUIApplication()
         defer { app.terminate() }
@@ -2469,6 +2519,165 @@ final class AppUITests: XCTestCase {
     }
 
     @MainActor
+    func testWearingPositionCheckInNativeSettings() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--wearing-position", "-AppleLanguages", "(en)"]
+        app.launch()
+        defer { app.terminate() }
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        panel.buttons["menu.settings"].click()
+        let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+        selectSettingsPane("headphones", in: settings)
+        let start = settings.buttons["wearingPosition.start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 3))
+        start.click()
+        XCTAssertTrue(settings.staticTexts["wearingPosition.result"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testAdaptiveVolumeShowsSafeVolumeCautionInNativeSettings() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--adaptive-volume-limited", "-AppleLanguages", "(en)"]
+        app.launch()
+        defer { app.terminate() }
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        panel.buttons["menu.settings"].click()
+        let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+        selectSettingsPane("headphones", in: settings)
+        let toggle = settings.descendants(matching: .any)["audio.adaptiveVolume"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3))
+        toggle.click()
+        let acknowledgment = settings.sheets.buttons["OK"]
+        XCTAssertTrue(acknowledgment.waitForExistence(timeout: 3))
+        acknowledgment.click()
+        let confirmed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %d AND isEnabled == true", 1), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [confirmed], timeout: 3), .completed)
+    }
+
+    @MainActor
+    func testAdaptiveVolumeInNativeSoundSettings() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--adaptive-volume", "-AppleLanguages", "(en)"]
+        app.launch()
+        defer { app.terminate() }
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        panel.buttons["menu.settings"].click()
+        let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+        selectSettingsPane("headphones", in: settings)
+        let toggle = settings.descendants(matching: .any)["system.10"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3))
+        toggle.click()
+        let confirmed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %d AND isEnabled == true", 1), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [confirmed], timeout: 3), .completed)
+    }
+
+    @MainActor
+    func testMicrophoneOperationRequiresGestureBeforeToneInNativeSettings() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--microphone-operation", "-AppleLanguages", "(en)"]
+        app.launch()
+        defer { app.terminate() }
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        panel.buttons["menu.settings"].click()
+        let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+        selectSettingsPane("headphones", in: settings)
+        let gesture = settings.descendants(matching: .any)["microphoneOperation.gesture"]
+        let tone = settings.descendants(matching: .any)["microphoneOperation.tone"]
+        XCTAssertTrue(gesture.waitForExistence(timeout: 3))
+        XCTAssertTrue(tone.exists)
+        XCTAssertFalse(tone.isEnabled)
+        gesture.click()
+        let available = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: tone)
+        XCTAssertEqual(XCTWaiter.wait(for: [available], timeout: 3), .completed)
+        tone.click()
+        let confirmation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %d AND isEnabled == true", 1), object: tone)
+        XCTAssertEqual(XCTWaiter.wait(for: [confirmation], timeout: 3), .completed)
+        gesture.click()
+        let disabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == false", 1), object: tone)
+        XCTAssertEqual(XCTWaiter.wait(for: [disabled], timeout: 3), .completed)
+    }
+
+    @MainActor
+    func testAdvertisedCallSettingsLeaveExistingSidetoneControlIndependent() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "--ui-test-host", "--call-settings", "-AppleLanguages", "(en)"]
+        app.launch()
+        defer { app.terminate() }
+        let panel = app.windows["Headphone Controls"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        panel.buttons["menu.settings"].click()
+        let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+        selectSettingsPane("headphones", in: settings)
+        let sidetone = settings.descendants(matching: .any)["system.sidetone"]
+        XCTAssertTrue(sidetone.waitForExistence(timeout: 3))
+        XCTAssertTrue(sidetone.isEnabled)
+        XCTAssertEqual(sidetone.value as? Int, 0)
+        XCTAssertFalse(settings.staticTexts["Call Settings"].exists)
+        XCTAssertFalse(settings.buttons["Play Test Sound"].exists)
+        sidetone.click()
+        let confirmed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %d AND isEnabled == true", 1), object: sidetone)
+        XCTAssertEqual(XCTWaiter.wait(for: [confirmed], timeout: 3), .completed)
+    }
+
+    @MainActor
+    func testIncomingCallVibrationInNativeSettings() {
+        let app = XCUIApplication()
+        let scenarios = [[], ["--call-vibration"], ["--call-vibration", "--gallery-model", "whXM3"]]
+        for arguments in scenarios {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "-AppleLanguages", "(en)"] + arguments
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            panel.buttons["menu.settings"].click()
+            let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+            selectSettingsPane("headphones", in: settings)
+            let toggle = settings.descendants(matching: .any)["system.0"]
+            if arguments.isEmpty {
+                XCTAssertFalse(toggle.exists)
+            } else {
+                XCTAssertTrue(toggle.waitForExistence(timeout: 3))
+                XCTAssertTrue(toggle.isEnabled)
+                toggle.click()
+                let confirmed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %d AND isEnabled == true", 1), object: toggle)
+                XCTAssertEqual(XCTWaiter.wait(for: [confirmed], timeout: 3), .completed)
+            }
+            app.terminate()
+        }
+    }
+
+    @MainActor
+    func testLRBalanceCorrectionSettingsRequireSetupBeforeOfferingToggle() {
+        let app = XCUIApplication()
+        for needsSetup in [true, false] {
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "-AppleLanguages", "(en)",
+                                   needsSetup ? "--lr-balance-needs-setup" : "--lr-balance-saved"]
+            app.launch()
+            let panel = app.windows["Headphone Controls"]
+            XCTAssertTrue(panel.waitForExistence(timeout: 5))
+            panel.buttons["menu.settings"].click()
+            let settings = app.windows["com_apple_SwiftUI_Settings_window"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 5))
+            selectSettingsPane("headphones", in: settings)
+            let toggle = settings.descendants(matching: .any)["audio.lrBalanceCorrection"]
+            if needsSetup {
+                XCTAssertTrue(settings.staticTexts["Setup required"].waitForExistence(timeout: 3))
+                XCTAssertFalse(toggle.exists)
+            } else {
+                XCTAssertTrue(toggle.waitForExistence(timeout: 3))
+                XCTAssertTrue(toggle.isEnabled)
+                toggle.click()
+                let confirmed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %d AND isEnabled == true", 1), object: toggle)
+                XCTAssertEqual(XCTWaiter.wait(for: [confirmed], timeout: 3), .completed)
+            }
+            app.terminate()
+        }
+    }
+
+    @MainActor
     func testConnectionPreferenceOmitsUnverifiedLEAudio() {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-testing", "--ui-test-host", "--left-disconnected", "-AppleLanguages", "(en)"]
@@ -2910,6 +3119,37 @@ final class AppUITests: XCTestCase {
                 capture.lifetime = .keepAlways
                 add(capture)
             }
+        }
+    }
+
+    @MainActor
+    func testStandaloneClearBassUsesAdvertisedRangeWithoutWideningDesktopControls() {
+        for (model, language) in [("whXM4", "(en)"), ("whXM5", "(tr)")] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-ui-testing", "--ui-test-host", "--gallery-model", model, "--bass-boost", "-AppleLanguages", language]
+            app.launch()
+            defer { app.terminate() }
+            let panel = app.windows.firstMatch
+            let slider = panel.sliders["audio.clearBass"]
+            XCTAssertTrue(slider.waitForExistence(timeout: 5))
+            XCTAssertTrue(slider.isHittable)
+            XCTAssertEqual(slider.label, "Clear Bass")
+            let width = panel.frame.width
+            let previous = String(describing: slider.value)
+            slider.adjust(toNormalizedSliderPosition: 0.75)
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                slider.isEnabled && String(describing: slider.value) != previous
+            }, object: slider)], timeout: 5), .completed)
+            XCTAssertEqual(panel.frame.width, width, accuracy: 1)
+            let selected = String(describing: slider.value)
+
+            panel.buttons["menu.settings"].click()
+            let window = app.windows["com_apple_SwiftUI_Settings_window"]
+            selectSettingsPane(language == "(tr)" ? "kulaklıklar" : "headphones", in: window)
+            let setting = window.sliders["audio.clearBass"]
+            XCTAssertTrue(setting.waitForExistence(timeout: 5))
+            XCTAssertEqual(setting.label, "Clear Bass")
+            XCTAssertEqual(String(describing: setting.value), selected)
         }
     }
 

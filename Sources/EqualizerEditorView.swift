@@ -10,6 +10,7 @@ struct EqualizerEditorView: View {
     @State private var presetChange: PresetChange?
     @State private var confirmationWidth: CGFloat?
     @State private var syncDraft: EqualizerSettings?
+    @State private var ultDraft: EqualizerSettings?
     @State private var availableSize = NSScreen.main?.visibleFrame.size ?? CGSize(width: 720, height: 720)
 
     struct PresetChange: Identifiable {
@@ -40,20 +41,43 @@ struct EqualizerEditorView: View {
                 LabeledContent("Device") {
                     Text(headphones.deviceName).foregroundStyle(.primary)
                 }
+                if headphones.equalizer.supportsULT {
+                    if let preset = headphones.equalizer.presetTitle {
+                        LabeledContent("Equalizer", value: preset)
+                    }
+                    Picker("ULT Mode", selection: Binding(
+                        get: { headphones.equalizer.ultMode },
+                        set: { if let mode = $0 { headphones.setEqualizerULTMode(mode) } }
+                    )) {
+                        if headphones.equalizer.ultMode == nil {
+                            Text("Loading…").tag(nil as SonyEqualizerULTMode?).disabled(true)
+                        }
+                        ForEach(SonyEqualizerULTMode.allCases) { mode in
+                            Text(mode.title).tag(Optional(mode))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(!canRead || !headphones.equalizer.canEdit || headphones.listeningModeExcludesEqualizer
+                              || headphones.isEqualizerUpdatePending
+                              || headphones.pendingChanges[.equalizerReadback] != nil)
+                    .accessibilityIdentifier("equalizer.ultMode")
+                }
                 equalizerStatus
             }
             Section("Custom Equalizer") {
-                let displayedDraft = settings.customEqualizerDraft
+                let displayedDraft = editorDraft
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 56), spacing: 8, alignment: .top),
                                          count: bandColumns), alignment: .leading, spacing: 16) {
                     ForEach(displayedDraft.layout.indices, id: \.self) { index in
-                        equalizerColumn(displayedDraft.layout[index].title, value: Binding(
-                            get: { Double(displayedDraft[index]) },
+                        equalizerColumn(displayedDraft.layout[index].title, range: displayedDraft.levelRange, value: Binding(
+                            get: { Double(headphones.equalizer.displayedLevel(displayedDraft[index], at: index)) },
                             set: { value in
-                                var draft = settings.customEqualizerDraft
+                                var draft = editorDraft
                                 guard draft.layout == displayedDraft.layout,
                                       draft.levelSteps == displayedDraft.levelSteps else { return }
-                                draft[index] = Int(value)
+                                let level = Int(value)
+                                guard level != headphones.equalizer.displayedLevel(draft[index], at: index) else { return }
+                                draft[index] = headphones.equalizer.settingLevel(level, at: index)
                                 apply(draft)
                             }
                         ))
@@ -62,12 +86,13 @@ struct EqualizerEditorView: View {
                 .padding(.vertical, 8)
                 .accessibilityIdentifier("equalizer.bands")
                 Button("Reset Flat") {
-                    var draft = settings.customEqualizerDraft
+                    var draft = editorDraft
                     draft.values = Array(repeating: 0, count: draft.layout.count)
                     apply(draft)
                 }
                     .tint(.primary)
             }
+            .disabled(ultEditingUnavailable)
             Section {
                 HStack {
                     TextField("Preset name", text: $profileName)
@@ -80,7 +105,8 @@ struct EqualizerEditorView: View {
                     HStack {
                         Button(profile.name) { apply(profile.settings) }
                             .tint(.primary)
-                            .disabled(headphones.isReady && headphones.equalizer.settingsPayload(profile.settings) == nil)
+                            .disabled(ultEditingUnavailable
+                                      || (headphones.isReady && headphones.equalizer.settingsPayload(profile.settings) == nil))
                         Spacer()
                         Button(role: .destructive) {
                             confirmationWidth = editorWidth
@@ -114,11 +140,19 @@ struct EqualizerEditorView: View {
         }
         .onChange(of: headphones.equalizerReadbackID) { _, _ in finishSync() }
         .onChange(of: settings.customEqualizerDraft) { _, _ in syncDraft = nil }
+        .onChange(of: headphones.isEqualizerUpdatePending) { _, pending in
+            if !pending { ultDraft = nil }
+        }
+        .onChange(of: headphones.equalizer.presetID) { _, _ in ultDraft = nil }
+        .onChange(of: headphones.equalizer.ultMode) { _, _ in ultDraft = nil }
         .onChange(of: presetChange?.id) { _, id in
             if id == nil { confirmationWidth = nil }
         }
         .onChange(of: headphones.isReady) { _, ready in
-            if !ready { syncDraft = nil }
+            if !ready {
+                syncDraft = nil
+                ultDraft = nil
+            }
         }
         .onChange(of: headphones.settingErrors[.equalizerReadback]) { _, error in
             if error != nil { syncDraft = nil }
@@ -136,18 +170,29 @@ struct EqualizerEditorView: View {
         .accessibilityIdentifier("equalizer.editor")
     }
 
+    private var editorDraft: EqualizerSettings {
+        if headphones.equalizer.supportsULT,
+           let curve = ultDraft ?? headphones.equalizer.settings ?? headphones.equalizer.flatSettings { return curve }
+        return settings.customEqualizerDraft
+    }
+
+    private var ultEditingUnavailable: Bool {
+        headphones.equalizer.supportsULT && (!canRead || !headphones.equalizer.canEdit
+            || headphones.isULTEqualizerSelectionPending || headphones.pendingChanges[.equalizerReadback] != nil)
+    }
+
     private var editorWidth: CGFloat {
-        let bandCount = settings.customEqualizerDraft.layout.count
+        let bandCount = editorDraft.layout.count
         let preferred = max(bandCount > 6 ? 720 : 520, CGFloat(bandCount) * 64 + 64)
         return min(confirmationWidth ?? preferred, availableSize.width)
     }
 
     private var bandColumns: Int {
-        max(1, min(settings.customEqualizerDraft.layout.count, Int((editorWidth - 64) / 64)))
+        max(1, min(editorDraft.layout.count, Int((editorWidth - 64) / 64)))
     }
 
     private var editorHeight: CGFloat {
-        let rows = (settings.customEqualizerDraft.layout.count + bandColumns - 1) / bandColumns
+        let rows = (editorDraft.layout.count + bandColumns - 1) / bandColumns
         return min(620 + CGFloat(rows - 1) * 240, availableSize.height)
     }
 
@@ -157,11 +202,12 @@ struct EqualizerEditorView: View {
     }
 
     private var canApply: Bool {
-        canRead && headphones.equalizer.settingsPayload(settings.customEqualizerDraft) != nil
+        canRead && !ultEditingUnavailable && headphones.equalizer.settingsPayload(editorDraft) != nil
     }
 
     private var isApplied: Bool {
-        headphones.equalizerPreset == .manual && headphones.equalizer.settings == settings.customEqualizerDraft
+        (headphones.equalizer.supportsULT || headphones.equalizerPreset == .manual)
+            && headphones.equalizer.settings == editorDraft
     }
 
     private var equalizerStatus: some View {
@@ -179,7 +225,7 @@ struct EqualizerEditorView: View {
                     Text("Reading equalizer…")
                 } else if let error = headphones.settingErrors[.equalizer] ?? headphones.settingErrors[.equalizerReadback] {
                     Text(error)
-                } else if headphones.equalizer.available == false {
+                } else if headphones.equalizer.available == false || headphones.listeningModeExcludesEqualizer {
                     Text("Equalizer is unavailable in the current headphone mode.")
                 } else if headphones.equalizer.requiresManualSelection {
                     Text("Choose Manual to apply this draft.")
@@ -202,7 +248,7 @@ struct EqualizerEditorView: View {
                         .accessibilityLabel(headphones.isEqualizerUpdatePending ? String(localized: "Applying equalizer") : String(localized: "Reading equalizer"))
                 }
             }
-            if headphones.isReady {
+            if headphones.isReady, !headphones.equalizer.supportsULT {
                 if headphones.equalizer.requiresManualSelection {
                     Button("Use Manual") { headphones.setEqualizerPreset(.manual) }
                         .disabled(!canRead || headphones.isEqualizerUpdatePending
@@ -210,7 +256,7 @@ struct EqualizerEditorView: View {
                         .tint(.primary)
                 } else {
                     Button(headphones.settingErrors[.equalizer] == nil ? String(localized: "Apply") : String(localized: "Retry")) {
-                        apply(settings.customEqualizerDraft)
+                        apply(editorDraft)
                     }
                     .accessibilityLabel("Apply equalizer to headphones")
                     .disabled(!canApply || headphones.isEqualizerUpdatePending
@@ -235,16 +281,16 @@ struct EqualizerEditorView: View {
               !headphones.isEqualizerUpdatePending, headphones.pendingChanges[.equalizerReadback] == nil,
               headphones.settingErrors[.equalizerReadback] == nil else { return }
         self.syncDraft = nil
-        if headphones.equalizerPreset == .manual, let curve = headphones.equalizer.settings {
+        if headphones.equalizer.supportsULT || headphones.equalizerPreset == .manual, let curve = headphones.equalizer.settings {
             settings.customEqualizerDraft = curve
         }
     }
 
-    private func equalizerColumn(_ title: String, value: Binding<Double>) -> some View {
+    private func equalizerColumn(_ title: String, range: ClosedRange<Int>?, value: Binding<Double>) -> some View {
         VStack(spacing: 8) {
             Text(title).font(.caption).foregroundStyle(.primary)
                 .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-            EqualizerFader(value: value, title: title, range: settings.customEqualizerDraft.levelRange,
+            EqualizerFader(value: value, title: title, range: range,
                            color: settings.controlAccentColor)
                 .frame(width: 28, height: 180)
             Text(Int(value.wrappedValue).formatted(.number.sign(strategy: .always())))
@@ -255,10 +301,12 @@ struct EqualizerEditorView: View {
     }
 
     private func apply(_ equalizer: EqualizerSettings) {
+        guard !ultEditingUnavailable else { return }
         syncDraft = nil
         settings.customEqualizerDraft = equalizer
-        if headphones.equalizer.canEdit {
+        if headphones.equalizer.canEdit, !headphones.listeningModeExcludesEqualizer {
             headphones.setCustomEqualizer(equalizer)
+            if headphones.equalizer.supportsULT, headphones.isEqualizerUpdatePending { ultDraft = equalizer }
         }
     }
 
@@ -266,8 +314,9 @@ struct EqualizerEditorView: View {
         let name = settings.equalizerProfileName(for: profileName)
         if let profile = settings.equalizerProfiles.first(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) {
             confirmationWidth = editorWidth
-            presetChange = PresetChange(profile: profile, replacement: settings.customEqualizerDraft)
+            presetChange = PresetChange(profile: profile, replacement: editorDraft)
         } else {
+            settings.customEqualizerDraft = editorDraft
             saveProfile(named: name)
         }
     }

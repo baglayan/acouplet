@@ -72,6 +72,14 @@ struct MenuBarView: View {
                     .padding(.top, 20)
                     .padding(.bottom, 16)
             }
+            if !headphones.usbProtection.cautions.isEmpty || headphones.usbProtection.ports.values.contains(where: { $0.detected == true }) {
+                VStack(alignment: .leading, spacing: 8) {
+                    USBProtectionNotice(headphones: headphones)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+            }
             ViewThatFits(in: .vertical) {
                 controls
                 ScrollView {
@@ -181,6 +189,9 @@ struct MenuBarView: View {
             if showsHeadphoneControls {
                 Group {
                     if headphones.equalizer.isSupported { equalizer }
+                    if headphones.equalizer.bassBoost.inquiryType != nil {
+                        BassBoostControl(effect: headphones.equalizer.bassBoost)
+                    }
                     if headphones.legacySurround.isSupported { LegacySoundEffectControl(kind: .surround) }
                     if headphones.legacySoundPosition.isSupported { LegacySoundEffectControl(kind: .soundPosition) }
                     if headphones.supportsDSEE { DSEEControl() }
@@ -621,8 +632,15 @@ struct MenuBarView: View {
                 .labelsHidden()
                 .fixedSize()
                 .tint(.primary)
-                .disabled(!headphones.equalizer.canSelectPreset)
+                .disabled(!headphones.equalizer.canSelectPreset || headphones.listeningModeExcludesEqualizer
+                          || (headphones.equalizer.supportsULT && (headphones.isEqualizerUpdatePending
+                              || headphones.pendingChanges[.equalizerReadback] != nil)))
                 .accessibilityIdentifier("equalizer.preset")
+            }
+            if let mode = headphones.equalizer.ultMode {
+                LabeledContent("ULT Mode", value: mode.title)
+                    .font(.caption)
+                    .accessibilityIdentifier("equalizer.ultSummary")
             }
             if let error = headphones.settingErrors[.equalizer] {
                 Text(error).font(.caption).foregroundStyle(.primary)
@@ -671,7 +689,7 @@ struct MenuBarView: View {
                     .disabled(headphones.powerOffState != nil || headphones.isRunningHeadphoneTest)
                 }
                 Divider()
-                if headphones.supportedFunctions.contains(0x23) {
+                if headphones.supportsPowerOff {
                     Button("Turn Off Headphones…", systemImage: "power") {
                         if let session = headphones.powerOffSession {
                             powerOffTarget = .init(controller: headphones, session: session, name: headphones.deviceName)
