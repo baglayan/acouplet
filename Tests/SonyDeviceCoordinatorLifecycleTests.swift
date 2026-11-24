@@ -50,6 +50,50 @@ final class SonyDeviceCoordinatorLifecycleTests: XCTestCase {
         XCTAssertTrue(devices.reportBluetoothAuthorization(.allowedAlways))
     }
 
+    func testManualRefreshRediscoversAfterAuthorizationRestoresWithoutDelegateEvent() throws {
+        let devices = makeCoordinator()
+        defer { devices.stop() }
+        devices.isRunning = true
+        devices.setReconnectAutomatically(false)
+        devices.reconcileDiscoveredDevices([earbuds, headphones], connectedAddresses: [earbuds.address, headphones.address])
+        let first = try XCTUnwrap(devices.controller(for: earbuds.address))
+        let second = try XCTUnwrap(devices.controller(for: headphones.address))
+        XCTAssertFalse(devices.reportBluetoothAuthorization(.denied))
+        first.refresh()
+        XCTAssertNil(first.simulatedPendingFrame)
+        var discoveries = 0
+        let beginDiscovery: @MainActor @Sendable () -> Void = {
+            discoveries += 1
+            devices.isDiscovering = true
+        }
+
+        devices.refreshControls(for: first, authorization: .allowedAlways, beginDiscovery: beginDiscovery)
+        devices.refreshControls(for: first, authorization: .allowedAlways, beginDiscovery: beginDiscovery)
+        XCTAssertEqual(discoveries, 1)
+        XCTAssertNil(first.simulatedPendingFrame)
+        devices.isDiscovering = false
+        devices.reconcileDiscoveredDevices([earbuds, headphones], connectedAddresses: [earbuds.address, headphones.address])
+        XCTAssertEqual(first.simulatedPendingFrame?.payload, [0, 0])
+        XCTAssertNil(second.simulatedPendingFrame)
+        XCTAssertNil(devices.pendingManualRefreshAddress)
+    }
+
+    func testLaterAuthorizationLossCancelsQueuedManualRefresh() throws {
+        let devices = makeCoordinator()
+        defer { devices.stop() }
+        devices.isRunning = true
+        devices.setReconnectAutomatically(false)
+        devices.reconcileDiscoveredDevices([earbuds], connectedAddresses: [earbuds.address])
+        let controller = try XCTUnwrap(devices.controller(for: earbuds.address))
+        devices.isDiscovering = true
+        devices.refreshControls(for: controller, authorization: .allowedAlways)
+        XCTAssertEqual(devices.pendingManualRefreshAddress, earbuds.address)
+        XCTAssertFalse(devices.reportBluetoothAuthorization(.restricted))
+        XCTAssertNil(devices.pendingManualRefreshAddress)
+        devices.reconcileDiscoveredDevices([earbuds], connectedAddresses: [earbuds.address])
+        XCTAssertNil(controller.simulatedPendingFrame)
+    }
+
     func testInventoryRefreshRevocationInvalidatesControlsAndDiscovery() throws {
         for authorization in [CBManagerAuthorization.denied, .restricted] {
             let devices = makeCoordinator()

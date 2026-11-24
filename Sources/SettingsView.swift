@@ -521,8 +521,7 @@ struct SettingsView: View {
                 }
                 HStack {
                     Button("Sync Now") {
-                        if headphones.address.isEmpty { devices.refreshDiscovery() }
-                        else { headphones.refresh() }
+                        devices.refreshControls(for: headphones)
                     }
                         .disabled(headphones.isRunningHeadphoneTest || headphones.powerOffState != nil || headphones.connectionTransition?.isFinished == false || headphones.multipointTransition?.isFinished == false)
                     Spacer()

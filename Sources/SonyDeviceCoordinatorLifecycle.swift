@@ -21,6 +21,7 @@ extension SonyDeviceCoordinator {
         bluetoothAuthorizationManager = nil
         discoveryGeneration += 1
         isDiscovering = false
+        pendingManualRefreshAddress = nil
         discoveryTimer?.invalidate()
         discoveryTimer = nil
         for controller in controllers { controller.stop() }
@@ -48,6 +49,7 @@ extension SonyDeviceCoordinator {
         isSystemSleeping = true
         discoveryGeneration += 1
         isDiscovering = false
+        pendingManualRefreshAddress = nil
         discoveryTimer?.invalidate()
         discoveryTimer = nil
         for controller in controllers { controller.systemWillSleep() }
@@ -85,6 +87,23 @@ extension SonyDeviceCoordinator {
             }
     }
 
+    func refreshControls(for controller: SonyHeadphonesController, authorization: CBManagerAuthorization = CBManager.authorization,
+                         beginDiscovery: (@MainActor () -> Void)? = nil) {
+        guard isRunning else {
+            if !controller.address.isEmpty { controller.refresh() }
+            return
+        }
+        guard !isSystemSleeping else { return }
+        let needsDiscovery = reportBluetoothAuthorization(authorization)
+        guard authorization == .allowedAlways else { return }
+        guard controller.address.isEmpty || needsDiscovery || isDiscovering else {
+            controller.refresh()
+            return
+        }
+        pendingManualRefreshAddress = controller.address.isEmpty ? nil : controller.address
+        if !isDiscovering { (beginDiscovery ?? refreshDiscovery)() }
+    }
+
     func reconcileDiscoveredDevices(_ paired: [SonyConnectedDevice], connectedAddresses: Set<String>,
                                     pairedDeviceInventory: [IOBluetoothDevice]? = nil) {
         guard isRunning, !isSystemSleeping else { return }
@@ -112,6 +131,10 @@ extension SonyDeviceCoordinator {
             } else if retiredControllerAddresses.insert(controller.address).inserted {
                 controller.stop()
             }
+        }
+        if let address = pendingManualRefreshAddress {
+            pendingManualRefreshAddress = nil
+            if pairedAddresses.contains(address) { controller(for: address)?.refresh() }
         }
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         reconcileNativeBatteries()

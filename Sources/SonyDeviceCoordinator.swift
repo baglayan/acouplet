@@ -78,6 +78,7 @@ final class SonyDeviceCoordinator: NSObject, ObservableObject {
     var discoveryTimer: Timer?
     var bluetoothAuthorizationManager: CBCentralManager?
     var discoveryGeneration: UInt64 = 0
+    var pendingManualRefreshAddress: String?
     @Published var isDiscovering = false
     @Published var isSystemSleeping = false
     @Published var isRunning = false
@@ -143,6 +144,7 @@ final class SonyDeviceCoordinator: NSObject, ObservableObject {
         guard authorization == .allowedAlways else {
             discoveryGeneration += 1
             isDiscovering = false
+            pendingManualRefreshAddress = nil
             discoveryTimer?.invalidate()
             discoveryTimer = nil
             for controller in controllers {

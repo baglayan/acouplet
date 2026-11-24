@@ -647,8 +647,7 @@ struct MenuBarView: View {
                 .accessibilityIdentifier("menu.settings")
             Spacer()
             Button {
-                if headphones.address.isEmpty { devices.refreshDiscovery() }
-                else { headphones.refresh() }
+                devices.refreshControls(for: headphones)
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .frame(width: 24, height: 24)
