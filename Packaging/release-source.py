@@ -1,7 +1,7 @@
 from pathlib import Path
 import hashlib, json, os, stat, subprocess, sys
 
-source_roots = ('Sources', 'Helpers', 'Vendor', 'Resources', 'Configuration', 'Packaging', 'Controls', 'Acouplet.xcodeproj')
+source_roots = ('Sources', 'Helpers', 'Vendor', 'Resources', 'Configuration', 'Packaging', 'Controls', 'StatusActivity', 'Acouplet.xcodeproj')
 
 
 def git(repo, *arguments):

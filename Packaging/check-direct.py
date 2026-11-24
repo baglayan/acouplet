@@ -70,6 +70,7 @@ def command(args, **kwargs):
             entitlements = {}
             if target.name == 'Acouplet.app':
                 entitlements = {'com.apple.security.device.bluetooth': True, 'com.apple.security.network.client': True}
+            if target.name == 'Acouplet Status.appex': entitlements['com.apple.security.app-sandbox'] = True
             if failure == ('debugger', target.name): entitlements['com.apple.security.get-task-allow'] = True
             if failure == ('sandbox', target.name): entitlements['com.apple.security.app-sandbox'] = True
             if failure == ('inherit', target.name): entitlements['com.apple.security.inherit'] = True
@@ -93,7 +94,15 @@ def sparkle_fixture(app):
             'SUEnableDownloaderService': False, 'SUEnableSystemProfiling': False,
             'SUEnableAutomaticChecks': True, 'SUAutomaticallyUpdate': False, 'CFBundleShortVersionString': '0.22', 'CFBundleVersion': '22', 'AcoupletDistribution': 'production'}
     (app / 'Contents').mkdir(parents=True, exist_ok=True)
+    info.update(CFBundleIdentifier='dev.baglayan.Acouplet', DTSDKName='macosx27.3', NSSupportsLiveActivities=True)
     (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
+    extension = app / 'Contents/PlugIns/Acouplet Status.appex/Contents'
+    binary = extension / 'MacOS/Acouplet Status'
+    binary.parent.mkdir(parents=True)
+    binary.write_text('status')
+    (extension / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'dev.baglayan.Acouplet.status',
+        'CFBundleExecutable': binary.name, 'CFBundleVersion': '22', 'CFBundleShortVersionString': '0.22',
+        'NSExtension': {'NSExtensionPointIdentifier': 'com.apple.widgetkit-extension'}}))
     for target in checker['sparkle']['code_targets'](app):
         if target.name == 'Autoupdate': target.touch()
         else: target.mkdir(parents=True, exist_ok=True)
@@ -125,11 +134,11 @@ with tempfile.TemporaryDirectory(prefix='acouplet-direct-check-') as directory:
         report = inspect_package(root, False, dmg)
         assert not report['blockers'] and report['stapled_tickets_verified']
         assert [args[-1] for args in calls if args[1:3] == ['stapler', 'validate']] == [str(root / 'Acouplet.app/Contents/Resources/Acouplet LDAC Output.pkg'), str(root / 'Acouplet.app/Contents/Resources/Acouplet LDAC Removal.pkg'), str(dmg)]
-        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'release.dmg'):
+        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'Acouplet Status.appex', 'release.dmg'):
             for check in ('signature', 'developer-id', 'timestamp', 'team'):
                 failure = (check, name)
                 assert inspect_package(root, True, dmg)['blockers'], failure
-        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'):
+        for name in ('Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'Acouplet Status.appex'):
             for check in ('runtime', 'debugger'):
                 failure = (check, name)
                 assert inspect_package(root, True, dmg)['blockers'], failure
@@ -150,7 +159,7 @@ with tempfile.TemporaryDirectory(prefix='acouplet-direct-check-') as directory:
         failure = None
         info_path = root / 'Acouplet.app/Contents/Info.plist'
         original_info = plistlib.loads(info_path.read_bytes())
-        for key, value in [('SURequireSignedFeed', False), ('SUVerifyUpdateBeforeExtraction', False), ('SUEnableInstallerLauncherService', True),
+        for key, value in [('NSSupportsLiveActivities', False), ('DTSDKName', 'macosx27.2'), ('SURequireSignedFeed', False), ('SUVerifyUpdateBeforeExtraction', False), ('SUEnableInstallerLauncherService', True),
                            ('SUSignedFeedFailureExpirationInterval', 1728000), ('SUPublicEDKey', ''),
                            ('SUPublicEDKey', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='),
                            ('SUFeedURL', 'http://baglayan.dev/updates/appcast.xml'), ('AcoupletDistribution', 'development'), ('AcoupletDistribution', '')]:
@@ -193,6 +202,7 @@ elif name == 'create-dmg.sh':
     if mode == 'image-failure': sys.exit(1)
     Path(args[1]).write_text('signed image')
 elif name == 'codesign':
+    if Path(args[-1]).name == 'Acouplet Status.appex': assert '--preserve-metadata=entitlements' in args and Path(args[-1]).is_dir()
     if Path(args[-1]).name == 'Acouplet.app':
         background = Path(args[-1]) / 'Contents/Resources/DMGBackground.tiff'
         assert background.read_text() == 'Fixture background: ' + os.environ['ACOUPLET_DMG_APPEARANCE']
@@ -273,7 +283,7 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True, a
         local_previous = root / '.build/local-update/Acouplet/Local Build Receipt.txt'
         local_previous.parent.mkdir(parents=True)
         local_previous.write_text('previous development receipt')
-        for name in ('Acouplet.app.dSYM', 'Acouplet Battery Publisher.dSYM'):
+        for name in ('Acouplet.app.dSYM', 'Acouplet Battery Publisher.dSYM', 'Acouplet Status.appex.dSYM'):
             (root / '.build/Build/Products/Release' / name).mkdir(parents=True)
         for name in ('Sparkle.framework.dSYM', 'Autoupdate.dSYM', 'Updater.app.dSYM', 'Installer.xpc.dSYM'):
             (root / '.build/Sparkle-2.10.0/Symbols' / name).mkdir(parents=True)
@@ -302,7 +312,7 @@ def check_release(mode='success', notarize=False, signing=None, succeeds=True, a
             if notarize:
                 notary_index = next(index for index, args in enumerate(commands) if args[0] == 'python3' and Path(args[1]).name == 'notarize-ldac-installer.py')
                 assert installer_index < notary_index < outer_index
-            assert signed == ['SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Acouplet Battery Publisher', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'Acouplet.app', 'Acouplet-0.22.dmg'], signed
+            assert signed == ['SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Acouplet Battery Publisher', 'Acouplet Status.appex', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver', 'Acouplet.app', 'Acouplet-0.22.dmg'], signed
             assert previous.read_text() == ('signed image' if notarize else 'previous release')
             assert any(args[:3] == ['xcrun', 'notarytool', 'submit'] for args in commands) == notarize
             assert (prepared / 'Build Receipt.txt').read_text() == 'original receipt'

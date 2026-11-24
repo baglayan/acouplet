@@ -4,6 +4,7 @@ import argparse, hashlib, json, os, plistlib, re, runpy, subprocess, sys, tempfi
 from xml.etree import ElementTree as ET
 
 DEVELOPER_ID = '=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+status_activity = runpy.run_path(str(Path(__file__).with_name('check-status-bundle.py')))
 sparkle = runpy.run_path(str(Path(__file__).with_name('check-sparkle-bundle.py')))
 
 
@@ -36,10 +37,12 @@ def inspect_code(path, team=None, executable=True):
     if executable:
         checks['hardened_runtime'] = display == 0 and bool(re.search(r'^CodeDirectory .*flags=.*\b runtime\b', signature, re.MULTILINE | re.VERBOSE))
         checks['debugger_entitlement_absent'] = isinstance(entitlements, dict) and not bool(entitlements.get('com.apple.security.get-task-allow', False))
-        if path.name in ('Acouplet.app', 'Acouplet Battery Publisher'):
+        if path.name in ('Acouplet.app', 'Acouplet Battery Publisher', 'Acouplet Status.appex'):
             expected = {}
             if path.name == 'Acouplet.app':
                 expected.update({'com.apple.security.device.bluetooth': True, 'com.apple.security.network.client': True})
+            elif path.name == 'Acouplet Status.appex':
+                expected['com.apple.security.app-sandbox'] = True
             checks['security_entitlements_preserved'] = isinstance(entitlements, dict) and {key: value for key, value in entitlements.items() if key.startswith('com.apple.security.')} == expected
     return checks
 
@@ -108,7 +111,7 @@ def inspect_package(package, signatures_only=False, dmg=None):
     _, _, signature = command(['/usr/bin/codesign', '--display', '--verbose=4', str(app)])
     match = re.search(r'^TeamIdentifier=([A-Z0-9]{10})$', signature.decode(errors='replace'), re.MULTILINE)
     team = match[1] if match else None
-    targets = [app, app / 'Contents/Helpers/Acouplet Battery Publisher', app / 'Contents/Frameworks/SonyNativeHUD.dylib', app / 'Contents/Helpers/SonyNativeHUDCheck', *sparkle['code_targets'](app),
+    targets = [app, app / 'Contents/PlugIns/Acouplet Status.appex', app / 'Contents/Helpers/Acouplet Battery Publisher', app / 'Contents/Frameworks/SonyNativeHUD.dylib', app / 'Contents/Helpers/SonyNativeHUDCheck', *sparkle['code_targets'](app),
                *[app / 'Contents/Helpers' / name for name in ['LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver']], *panes]
     code = {str(path.relative_to(package)): inspect_code(path, team) for path in targets}
     installer = inspect_installer(app, team)
@@ -135,12 +138,16 @@ def inspect_package(package, signatures_only=False, dmg=None):
         sparkle['check_bundle'](app)
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         blockers.append('Sparkle integration: ' + str(error))
+    try:
+        status_activity['check_bundle'](app)
+    except (OSError, ValueError, KeyError) as error:
+        blockers.append('Status Live Activity: ' + str(error))
     if controls.exists(): blockers.append('Deferred Control Center extension is embedded')
     blockers += [name + ': stapled ticket ' + check['status'] for name, check in staples.items() if not check['verified']]
     return {
         'checked_utc': datetime.now(timezone.utc).isoformat(),
         'package': str(package),
-        'scope': 'App, battery helper, native HUD, Sparkle framework and nested tools, LDAC transport/audio helpers, HAL driver and embedded installer/uninstaller, separately packaged panes and optional DMG. No notarization upload or installed-app modification.',
+        'scope': 'App, Status Live Activity, battery helper, native HUD, Sparkle framework and nested tools, LDAC transport/audio helpers, HAL driver and embedded installer/uninstaller, separately packaged panes and optional DMG. No notarization upload or installed-app modification.',
         'signing_team': team,
         'signing_prerequisites_pass': all(all(checks.values()) for checks in code.values()) and all(installer.values()) and all(uninstaller.values()),
         'stapled_tickets_verified': bool(staples) and all(check['verified'] for check in staples.values()),

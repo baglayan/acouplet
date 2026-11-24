@@ -23,7 +23,7 @@ if name == 'PlistBuddy':
     value = plistlib.loads(Path(args[2]).read_bytes())
     for key in args[1].removeprefix('Print :').split(':'):
         value = value[int(key)] if isinstance(value, list) else value[key]
-    print(value)
+    print(str(value).lower() if isinstance(value, bool) else value)
 elif name == 'ditto':
     shutil.copytree(args[0], args[1])
 elif name == 'codesign':
@@ -399,13 +399,19 @@ for scenario in ('success', 'orphan-service', 'unexpected-agent', 'unexpected-lo
         assert (root / 'Preferences/dev.baglayan.Acouplet.plist').read_text() == 'preserve'
         print('uninstall-' + scenario + ': passed')
 
-for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-stage-changed', 'local-hud-check-changed', 'local-ldac-media-changed', 'local-audio-capture-changed', 'local-output-driver-changed', 'local-output-driver-info-changed', 'local-driver-installer-changed', 'local-driver-uninstaller-changed', 'local-resource-seal-changed'):
+for scenario in ('running', 'local-stopped', 'local-old-sdk', 'local-status-changed', 'local-status-missing', 'local-status-receipt-missing', 'local-release-changed', 'local-stage-changed', 'local-hud-check-changed', 'local-ldac-media-changed', 'local-audio-capture-changed', 'local-output-driver-changed', 'local-output-driver-info-changed', 'local-driver-installer-changed', 'local-driver-uninstaller-changed', 'local-resource-seal-changed'):
     with tempfile.TemporaryDirectory(prefix='acouplet-local-install-check-') as directory:
         root = Path(directory)
         mode = 'success' if scenario == 'running' else 'inactive-update'
         _, initial_state = fixture(root, mode)
         source = root / 'package/Acouplet.app'
         binaries = ('Contents/MacOS/Acouplet', 'Contents/Helpers/Acouplet Battery Publisher', 'Contents/Frameworks/SonyNativeHUD.dylib', 'Contents/Helpers/SonyNativeHUDCheck', 'Contents/Resources/Assets.car', 'Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle', 'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate', 'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater', 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer', 'Contents/Helpers/LDACSignaling', 'Contents/Helpers/LDACMediaTransport', 'Contents/Helpers/SonyAudioConnection', 'Contents/Helpers/LDACLogObserver', 'Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput', 'Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist', 'Contents/Resources/Acouplet LDAC Output.pkg', 'Contents/Resources/Acouplet LDAC Removal.pkg', 'Contents/_CodeSignature/CodeResources')
+        status_binary = 'Contents/PlugIns/Acouplet Status.appex/Contents/MacOS/Acouplet Status'
+        if scenario != 'local-old-sdk':
+            binaries += (status_binary,)
+        if scenario not in ('local-old-sdk', 'local-status-missing'):
+            info = source / 'Contents/Info.plist'
+            info.write_bytes(plistlib.dumps({**plistlib.loads(info.read_bytes()), 'NSSupportsLiveActivities': True}))
         for relative in binaries[1:]:
             binary = source / relative
             binary.parent.mkdir(parents=True, exist_ok=True)
@@ -414,7 +420,10 @@ for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-sta
         shutil.copytree(source, release)
         lines = ['Prepared UTC: 2026-09-27T00:00:00Z', 'Revision: fixture', 'Worktree: dirty', 'Release app: ' + str(release)]
         lines += ['SHA256\t' + hashlib.sha256((source / relative).read_bytes()).hexdigest() + '\t' + relative for relative in binaries]
+        if scenario == 'local-status-receipt-missing': lines.pop()
         (root / 'package/Local Build Receipt.txt').write_text('\n'.join(lines) + '\n')
+        if scenario == 'local-status-changed': (source / status_binary).write_text('changed widget')
+        if scenario == 'local-status-missing': (source / status_binary).unlink()
         if scenario == 'local-release-changed': (release / binaries[0]).write_text('later build')
         if scenario == 'local-stage-changed': (source / binaries[1]).write_text('changed stage')
         if scenario == 'local-hud-check-changed': (source / 'Contents/Helpers/SonyNativeHUDCheck').write_text('changed probe')
@@ -430,7 +439,7 @@ for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-sta
         assert not any(command[0] == 'osascript' for command in commands), commands
         receipts = list(root.glob('Local Install-*.txt'))
         installed = root / 'Applications/Acouplet.app'
-        if scenario == 'local-stopped':
+        if scenario in ('local-stopped', 'local-old-sdk'):
             assert result.returncode == 0, result.stdout + result.stderr
             assert len(receipts) == 1
             assert 'Release/staged/installed identity and strict signature verification: passed' in receipts[0].read_text()
@@ -440,6 +449,9 @@ for scenario in ('running', 'local-stopped', 'local-release-changed', 'local-sta
         else:
             assert result.returncode != 0, result.stdout + result.stderr
             assert not receipts
+            if scenario.startswith('local-status-'):
+                error = 'local build receipt is incomplete' if scenario == 'local-status-receipt-missing' else 'Release or staged app changed'
+                assert error in result.stderr and not any(command[0] == 'ditto' for command in commands)
             assert (installed / 'version').read_text() == 'old'
             assert json.loads((root / 'state.json').read_text()) == initial_state
         assert (root / 'Preferences/dev.baglayan.Acouplet.plist').read_text() == 'preserve'

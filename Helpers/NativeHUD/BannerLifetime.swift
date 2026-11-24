@@ -2,6 +2,7 @@ import Foundation
 
 @MainActor
 final class BannerLifetime {
+    static let duration: TimeInterval = 4
     var onExpire: () -> Void = {}
     private(set) var timer: Timer?
     private var isPresented = false
@@ -30,7 +31,7 @@ final class BannerLifetime {
         timer?.invalidate()
         timer = nil
         guard !isKeptAlive else { return }
-        let scheduled = Timer(fire: Date().addingTimeInterval(4), interval: 0, repeats: false) { [weak self] fired in
+        let scheduled = Timer(fire: Date().addingTimeInterval(Self.duration), interval: 0, repeats: false) { [weak self] fired in
             let identifier = ObjectIdentifier(fired)
             MainActor.assumeIsolated {
                 guard let self, self.timer.map(ObjectIdentifier.init) == identifier else { return }

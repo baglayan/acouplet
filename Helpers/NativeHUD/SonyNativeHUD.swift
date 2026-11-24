@@ -326,7 +326,7 @@ final class SonyNativeHUD {
             nativeWindowSize = panel.frame.size
             self.panel = panel
         }
-        let placement = BannerPlacement.current(anchorView: anchorView)
+        let placement = BannerPlacement.current(anchorView: anchorView)?.placement
         position(placement)
         #if DEBUG
         logGeometry("before present: \(mode)")

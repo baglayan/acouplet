@@ -143,6 +143,11 @@ fi
 if [[ "$verify_local_update" == true ]]; then
     local_release_app="$(/usr/bin/sed -n 's/^Release app: //p' "$local_receipt")"
     local_binaries=("Contents/MacOS/Acouplet" "Contents/Helpers/Acouplet Battery Publisher" "Contents/Frameworks/SonyNativeHUD.dylib" "Contents/Helpers/SonyNativeHUDCheck" "Contents/Resources/Assets.car" "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater" "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer" "Contents/Helpers/LDACSignaling" "Contents/Helpers/LDACMediaTransport" "Contents/Helpers/SonyAudioConnection" "Contents/Helpers/LDACLogObserver" "Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist" "Contents/Resources/Acouplet LDAC Output.pkg" "Contents/Resources/Acouplet LDAC Removal.pkg" "Contents/_CodeSignature/CodeResources")
+    status_binary="Contents/PlugIns/Acouplet Status.appex/Contents/MacOS/Acouplet Status"
+    if [[ "$(/usr/libexec/PlistBuddy -c 'Print :NSSupportsLiveActivities' "$source_app/Contents/Info.plist" 2>/dev/null)" == true ]] ||
+       /usr/bin/awk -F '\t' -v target="$status_binary" '$1 == "SHA256" && $3 == target { found = 1 } END { exit !found }' "$local_receipt"; then
+        local_binaries+=("$status_binary")
+    fi
     for relative in "$local_binaries[@]"; do
         expected="$(/usr/bin/awk -F '\t' -v target="$relative" '$1 == "SHA256" && $3 == target { print $2 }' "$local_receipt")"
         if [[ ! "$expected" =~ '^[0-9a-f]{64}$' ]]; then

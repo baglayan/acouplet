@@ -1,9 +1,16 @@
 # Development
 
-Use Xcode 27.0 with the macOS 27.0 SDK. The deployment target is macOS 15.4.
-The native HUD is checked at launch and falls back when unavailable.
+Use Xcode 27.3 or later for direct releases. The Dynamic Island widget requires
+the macOS 27.3 SDK. Local builds with Xcode 27.0 through 27.2 use the regular
+status flyouts. The app's deployment target is macOS 15.4.
+On a Mac's built-in touchscreen with a Dynamic Island, Acouplet requests a transient Live Activity for
+headphone events. macOS 27.3 beta 2 accepts the request while a settings window is
+visible, even when another app has focus. With just the menu-bar icon visible,
+macOS declines the request and Acouplet shows the regular flyout.
+
 Select Xcode under Xcode > Settings > Locations > Command Line Tools before
-running the commands below.
+running the commands below. To use a side-by-side Xcode for the build and
+packaging scripts, set `DEVELOPER_DIR` to that Xcode's `Contents/Developer`.
 
 ## Build
 

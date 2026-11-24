@@ -72,6 +72,8 @@ for name in ['Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUD
 check('non-mach-main', lambda artifact, app, names: (app / 'Contents/MacOS/Acouplet').write_bytes(b'placeholder'), rejects=True)
 check('updater-link', lambda artifact, app, names: (b'@rpath/Sparkle.framework/Versions/B/Sparkle', b''), rejects=True)
 check('updater-symbol', lambda artifact, app, names: (b'', b'OBJC_CLASS_$_SPUUpdater'), rejects=True)
+check('live-activities-declared', lambda artifact, app, names: (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable': 'Acouplet', 'NSSupportsLiveActivities': True})), rejects=True)
+check('status-extension', lambda artifact, app, names: (app / 'Contents/PlugIns/Acouplet Status.appex').mkdir(parents=True), rejects=True)
 check('updater-info', lambda artifact, app, names: (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable': 'Acouplet', 'SUFeedURL': 'https://baglayan.dev/updates/appcast.xml'})), rejects=True)
 
 

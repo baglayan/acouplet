@@ -117,6 +117,7 @@ for notice in LICENSE NOTICE; do
         exit 1
     fi
 done
+/usr/bin/python3 "$repo_root/Packaging/check-status-bundle.py" "$build_app"
 /usr/bin/python3 "$repo_root/Packaging/check-sparkle-bundle.py" "$build_app"
 /usr/bin/codesign --verify --deep --strict "$build_app"
 signing_team="${DEVELOPMENT_TEAM:-}"
@@ -133,7 +134,14 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ldac_driver/Co
     exit 1
 fi
 ldac_codes=("$build_app/Contents/Helpers/LDACSignaling" "$build_app/Contents/Helpers/LDACMediaTransport" "$build_app/Contents/Helpers/SonyAudioConnection" "$build_app/Contents/Helpers/LDACLogObserver" "$ldac_audio" "$ldac_driver")
-for signed_bundle in "$build_app" "$helper" "$hud" "$hud_check" "$sparkle/Versions/B/XPCServices/Installer.xpc" "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app" "$sparkle" "${ldac_codes[@]}"; do
+status_extension="$build_app/Contents/PlugIns/Acouplet Status.appex"
+status_code=()
+status_files=()
+if [[ -d "$status_extension" ]]; then
+    status_code=("$status_extension")
+    status_files=("Contents/PlugIns/Acouplet Status.appex/Contents/MacOS/Acouplet Status")
+fi
+for signed_bundle in "$build_app" "$helper" "$hud" "$hud_check" "$sparkle/Versions/B/XPCServices/Installer.xpc" "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app" "$sparkle" "${ldac_codes[@]}" "${status_code[@]}"; do
     signature="$(/usr/bin/codesign --display --verbose=2 "$signed_bundle" 2>&1)"
     signature_flags="$(print -r -- "$signature" | /usr/bin/sed -n 's/^CodeDirectory .*flags=[^(]*(\([^)]*\)).*/\1/p')"
     if [[ ",$signature_flags," != *,runtime,* ]]; then
@@ -148,6 +156,10 @@ for signed_bundle in "$build_app" "$helper" "$hud" "$hud_check" "$sparkle/Versio
     fi
     if [[ "$signed_bundle" == "$build_app" ]] && print -r -- "$entitlements" | /usr/bin/plutil -extract 'com\.apple\.security\.app-sandbox' raw -o - - >/dev/null 2>&1; then
         print -u2 "The direct app must omit the sandbox entitlement so LDAC can use its signaling helper. The previous package was kept."
+        exit 1
+    fi
+    if [[ "$signed_bundle" == "$status_extension" && "$(print -r -- "$entitlements" | /usr/bin/plutil -extract 'com\.apple\.security\.app-sandbox' raw -o - -)" != true ]]; then
+        print -u2 "Acouplet Status must be sandboxed. The previous package was kept."
         exit 1
     fi
     if [[ "$signed_bundle" == "$helper" ]]; then
@@ -221,7 +233,7 @@ if [[ "$local_update" == true ]]; then receipt="$package_dir/Local Build Receipt
     else
         print "Release app: Acouplet.app"
     fi
-    for relative in "Contents/MacOS/Acouplet" "Contents/Helpers/Acouplet Battery Publisher" "Contents/Frameworks/SonyNativeHUD.dylib" "Contents/Helpers/SonyNativeHUDCheck" "Contents/Resources/Assets.car" "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater" "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer" "Contents/Helpers/LDACSignaling" "Contents/Helpers/LDACMediaTransport" "Contents/Helpers/SonyAudioConnection" "Contents/Helpers/LDACLogObserver" "Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist" "Contents/Resources/Acouplet LDAC Output.pkg" "Contents/Resources/Acouplet LDAC Removal.pkg" "Contents/_CodeSignature/CodeResources"; do
+    for relative in "Contents/MacOS/Acouplet" "Contents/Helpers/Acouplet Battery Publisher" "Contents/Frameworks/SonyNativeHUD.dylib" "Contents/Helpers/SonyNativeHUDCheck" "Contents/Resources/Assets.car" "Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" "Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" "Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater" "Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer" "Contents/Helpers/LDACSignaling" "Contents/Helpers/LDACMediaTransport" "Contents/Helpers/SonyAudioConnection" "Contents/Helpers/LDACLogObserver" "Contents/Helpers/Acouplet Audio.app/Contents/MacOS/AcoupletAudio" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/MacOS/AcoupletVirtualOutput" "Contents/Helpers/AcoupletLDACOutput.driver/Contents/Info.plist" "Contents/Resources/Acouplet LDAC Output.pkg" "Contents/Resources/Acouplet LDAC Removal.pkg" "Contents/_CodeSignature/CodeResources" "${status_files[@]}"; do
         /usr/bin/cmp "$build_app/$relative" "$package_dir/Acouplet.app/$relative"
         digest="$(/usr/bin/shasum -a 256 "$build_app/$relative" | /usr/bin/awk '{print $1}')"
         print -r -- $'SHA256\t'"$digest"$'\t'"$relative"

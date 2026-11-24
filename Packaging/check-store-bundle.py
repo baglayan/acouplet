@@ -19,6 +19,8 @@ mach_headers = {b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b
 def check_bundle(artifact):
     app = artifact / 'Products/Applications/Acouplet.app' if artifact.suffix == '.xcarchive' else artifact
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+    if info.get('NSSupportsLiveActivities'):
+        raise ValueError('Live Activities declared in App Store Info.plist without a widget extension')
     if any(key.startswith('SU') for key in info):
         raise ValueError('Sparkle updater settings in App Store Info.plist')
     executable = app / 'Contents/MacOS' / info['CFBundleExecutable']

@@ -62,7 +62,17 @@ elif name == 'xcrun':
     (sparkle / 'Resources/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString': '2.10.0'}))
     team = settings.get('DEVELOPMENT_TEAM', 'ABCDE12345')
     adhoc = settings['CODE_SIGN_IDENTITY'] == '-'
-    for bundle in (app, helper, hud, hud_check, *sparkle_codes, *ldac_codes):
+    status_extension = app / 'Contents/PlugIns/Acouplet Status.appex'
+    status_codes = [] if mode in ('old-sdk', 'missing-status') else [status_extension]
+    if status_codes:
+        binary = status_extension / 'Contents/MacOS/Acouplet Status'
+        binary.parent.mkdir(parents=True)
+        binary.write_text('status')
+        (status_extension / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+            'CFBundleIdentifier': 'dev.baglayan.Acouplet.status', 'CFBundleExecutable': binary.name,
+            'CFBundleVersion': settings['CURRENT_PROJECT_VERSION'], 'CFBundleShortVersionString': settings['MARKETING_VERSION'],
+            'NSExtension': {'NSExtensionPointIdentifier': 'com.apple.widgetkit-extension'}}))
+    for bundle in (app, helper, hud, hud_check, *sparkle_codes, *ldac_codes, *status_codes):
         metadata = {'apple': not adhoc, 'team': 'not set' if adhoc else team,
                     'developer_id': settings['CODE_SIGN_IDENTITY'].startswith('Developer ID Application') or bool(re.fullmatch(r'[0-9A-Fa-f]{40}', settings['CODE_SIGN_IDENTITY'])),
                     'runtime': settings.get('ENABLE_HARDENED_RUNTIME') == 'YES',
@@ -113,6 +123,8 @@ elif name == 'xcrun':
         if bundle == app:
             (bundle / 'Contents').mkdir(exist_ok=True)
             (bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleVersion': metadata['build'], 'CFBundleExecutable': 'Acouplet',
+                'CFBundleIdentifier': 'dev.baglayan.Acouplet', 'CFBundleShortVersionString': settings['MARKETING_VERSION'],
+                'DTSDKName': 'macosx27.0' if mode == 'old-sdk' else 'macosx27.3', 'NSSupportsLiveActivities': mode != 'old-sdk',
                 'AcoupletDistribution': settings['ACOUPLET_DISTRIBUTION'] if mode != 'wrong-distribution' else ('production' if settings['ACOUPLET_DISTRIBUTION'] == 'development' else 'development'),
                 'SUFeedURL': 'https://baglayan.dev/updates/appcast.xml', 'SUPublicEDKey': 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
                 'SUVerifyUpdateBeforeExtraction': True, 'SURequireSignedFeed': True, 'SUSignedFeedFailureExpirationInterval': 0,
@@ -142,6 +154,7 @@ elif name == 'codesign':
     if args[0] == '--display':
         if '--entitlements' in args:
             entitlements = {}
+            if target.name == 'Acouplet Status.appex' and mode != 'unsandboxed-status': entitlements['com.apple.security.app-sandbox'] = True
             if metadata['helper']:
                 if mode in ('sandboxed-helper', 'inherited-helper'): entitlements['com.apple.security.app-sandbox'] = True
                 if mode == 'inherited-helper': entitlements['com.apple.security.inherit'] = True
@@ -223,6 +236,7 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
         (scripts / 'build-ldac-output-installer.sh').write_text(builder)
         shutil.copytree(packaging / 'LDACOutputInstaller', scripts / 'LDACOutputInstaller')
         shutil.copytree(packaging / 'LDACOutputUninstaller', scripts / 'LDACOutputUninstaller')
+        shutil.copy2(packaging / 'check-status-bundle.py', scripts / 'check-status-bundle.py')
         (scripts / 'fetch-sparkle.sh').write_text('exit 0\n')
         (scripts / 'check-sparkle-bundle.py').write_text((packaging / 'check-sparkle-bundle.py').read_text().replace('/usr/bin/otool', str(stubs / 'otool')))
         for filename in ('LICENSE', 'THIRD-PARTY-NOTICES.md'):
@@ -305,7 +319,7 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
             assert '-allowProvisioningUpdates' not in builds[0], builds[0]
             if succeeds and identity != '-':
                 checks = [command for command in commands if '--test-requirement==anchor apple generic' in command]
-                assert [Path(command[-1]).name for command in checks] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], checks
+                assert [Path(command[-1]).name for command in checks] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'] + ([] if mode == 'old-sdk' else ['Acouplet Status.appex']), checks
                 developer_id_checks = [command for command in commands if any('field.1.2.840.113635.100.6.1.13' in arg for arg in command)]
                 assert [Path(command[-1]).name for command in developer_id_checks] == ([] if local else [Path(command[-1]).name for command in checks]), developer_id_checks
                 assert all('--all-architectures' in command for command in developer_id_checks), developer_id_checks
@@ -315,7 +329,7 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
             for notice in ('LICENSE', 'THIRD-PARTY-NOTICES.md'):
                 assert (root / '.build/Build/Products/Release/Acouplet.app/Contents/Resources' / notice).read_bytes() == (root / notice).read_bytes()
             entitlements = [command for command in commands if '--entitlements' in command]
-            assert [Path(command[-1]).name for command in entitlements] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'], entitlements
+            assert [Path(command[-1]).name for command in entitlements] == ['Acouplet.app', 'Acouplet Battery Publisher', 'SonyNativeHUD.dylib', 'SonyNativeHUDCheck', 'Installer.xpc', 'Autoupdate', 'Updater.app', 'Sparkle.framework', 'LDACSignaling', 'LDACMediaTransport', 'SonyAudioConnection', 'LDACLogObserver', 'Acouplet Audio.app', 'AcoupletLDACOutput.driver'] + ([] if mode == 'old-sdk' else ['Acouplet Status.appex']), entitlements
             if local:
                 assert previous.read_text() == 'previous package'
                 assert archive.read_text() == 'previous archive'
@@ -349,7 +363,7 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
                 if not line.startswith('SHA256\t'): continue
                 _, digest, relative = line.split('\t')
                 assert hashlib.sha256((package / 'Acouplet.app' / relative).read_bytes()).hexdigest() == digest
-            assert receipt.count('SHA256\t') == 19
+            assert receipt.count('SHA256\t') == (19 if mode == 'old-sdk' else 20)
             assert not (package / 'Acouplet LDAC Output.pkg').exists()
             assert not (package / 'Acouplet LDAC Removal.pkg').exists()
             assert (package / 'Acouplet.app/Contents/Resources/Acouplet LDAC Removal.pkg').read_text() == 'driver-only uninstaller'
@@ -379,6 +393,10 @@ def check(name, signing, mode='success', succeeds=True, local=False, panes=False
 
 
 check('default-developer-id', {})
+check('old-sdk-local-fallback', {}, 'old-sdk', local=True)
+check('old-sdk-production-rejected', {}, 'old-sdk', succeeds=False)
+check('missing-status-extension', {}, 'missing-status', succeeds=False)
+check('unsandboxed-status-extension', {}, 'unsandboxed-status', succeeds=False)
 check('production-rejects-dirty-source-before-build', {}, 'source-dirty', False)
 check('production-rejects-source-drift-before-staging', {}, 'source-drift', False)
 check('production-rejects-source-drift-before-archive-replacement', {}, 'source-drift-archive', False)

@@ -7,27 +7,41 @@ enum BannerPlacement {
     case desktop(screen: NSRect, visibleFrame: NSRect, anchor: (frame: NSRect, windowBottom: CGFloat)?)
     case fullScreen(screen: NSRect, menuBarHeight: CGFloat)
 
-    static func current(anchorView: NSView?) -> BannerPlacement? {
-        if let screen = activeFullScreen?() {
+    static func current(anchorView: NSView?) -> (screen: NSScreen, placement: BannerPlacement, isActiveDisplay: Bool)? {
+        let active = activeDisplay?()
+        let screen: NSScreen
+        let placement: BannerPlacement
+        if let fullScreen = active?.fullScreen {
+            screen = fullScreen
             let key = "_revealedMenuBarHeight"
             let revealedHeight = screen.responds(to: NSSelectorFromString(key)) ? screen.value(forKey: key) as? CGFloat : nil
             let height = revealedHeight ?? NSStatusBar.system.thickness
-            return .fullScreen(screen: screen.frame, menuBarHeight: max(height, screen.safeAreaInsets.top))
-        }
-        if let anchorView, !anchorView.isHiddenOrHasHiddenAncestor,
-           let window = anchorView.window, window.isVisible, let screen = window.screen {
+            placement = .fullScreen(screen: screen.frame, menuBarHeight: max(height, screen.safeAreaInsets.top))
+        } else if let anchorView, !anchorView.isHiddenOrHasHiddenAncestor,
+                  let window = anchorView.window, window.isVisible, let anchorScreen = window.screen {
+            screen = anchorScreen
             let frame = window.convertToScreen(anchorView.convert(anchorView.bounds, to: nil))
-            return .desktop(screen: screen.frame, visibleFrame: screen.visibleFrame, anchor: (frame, window.frame.minY))
+            placement = .desktop(screen: screen.frame, visibleFrame: screen.visibleFrame, anchor: (frame, window.frame.minY))
+        } else {
+            guard let fallback = NSScreen.main ?? NSScreen.screens.first else { return nil }
+            screen = fallback
+            placement = .desktop(screen: screen.frame, visibleFrame: screen.visibleFrame, anchor: nil)
         }
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return nil }
-        return .desktop(screen: screen.frame, visibleFrame: screen.visibleFrame, anchor: nil)
+        let isActive = isActiveDisplay(displayID(of: screen), activeID: active?.id, displayCount: NSScreen.screens.count)
+        return (screen, placement, isActive)
     }
 
     private static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {
         screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
     }
 
-    private static let activeFullScreen: (() -> NSScreen?)? = {
+    static func isActiveDisplay(_ targetID: CGDirectDisplayID?, activeID: CGDirectDisplayID?, displayCount: Int) -> Bool {
+        if displayCount == 1 { return true }
+        guard let activeID else { return false }
+        return targetID == activeID
+    }
+
+    private static let activeDisplay: (() -> (id: CGDirectDisplayID?, fullScreen: NSScreen?)?)? = {
         guard let framework = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW | RTLD_LOCAL),
               let connection = dlsym(framework, "SLSMainConnectionID"),
               let activeMenuBar = dlsym(framework, "SLSCopyActiveMenuBarDisplayIdentifier"),
@@ -40,9 +54,9 @@ enum BannerPlacement {
             guard let display = copyActiveDisplay(cid)?.takeRetainedValue() as String? else { return nil }
             let id = display == "Main" ? nil : CGDisplayGetDisplayIDFromUUID(CFUUIDCreateFromString(nil, display as CFString))
             guard let spaces = copyDisplaySpaces(cid)?.takeRetainedValue() as? [[String: Any]],
-                  isFullScreen(activeDisplay: display, separateSpaces: NSScreen.screensHaveSeparateSpaces, displays: spaces) else { return nil }
-            if let id { return NSScreen.screens.first { displayID(of: $0) == id } }
-            return NSScreen.main ?? NSScreen.screens.first
+                  isFullScreen(activeDisplay: display, separateSpaces: NSScreen.screensHaveSeparateSpaces, displays: spaces) else { return (id, nil) }
+            if let id { return (id, NSScreen.screens.first { displayID(of: $0) == id }) }
+            return (nil, NSScreen.main ?? NSScreen.screens.first)
         }
     }()
 

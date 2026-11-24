@@ -28,6 +28,16 @@ struct SonyNoiseModeChange: Equatable {
 }
 
 #if !ACOUPLET_PUBLIC_APIS_ONLY
+extension NSScreen {
+    var hasAcoupletDynamicIsland: Bool {
+        let key = "_centerHUDHardwareFrame"
+        guard #available(macOS 27.3, *), let displayID = cgDirectDisplayID, CGDisplayIsBuiltin(displayID) != 0,
+              touchCapabilities.contains(.multiTouch),
+              responds(to: NSSelectorFromString(key)), let frame = value(forKey: key) as? NSRect else { return false }
+        return !frame.isEmpty && !frame.isInfinite
+    }
+}
+
 @MainActor
 final class SonyNativeHUDProbe {
     static let shared = SonyNativeHUDProbe(executableURL:
@@ -111,6 +121,9 @@ final class SonyNoiseModeHUD {
     private weak var anchorView: NSView?
     private weak var headphones: SonyHeadphonesController?
     private var nativeHUD: NativeHUD?
+    private var showingNativeHUD = false
+    private let statusActivity: SonyStatusActivity?
+    private var pendingNoiseChange: SonyNoiseModeChange?
     private var fallbackPanel: NSPanel?
     private let fallbackLifetime = BannerLifetime()
     private var attemptedLoad = false
@@ -118,7 +131,16 @@ final class SonyNoiseModeHUD {
     private var menuVisible = false
     var onAvailable: () -> Void = {}
 
-    init() {
+    init(statusActivity: SonyStatusActivity? = SonyStatusActivity.system()) {
+        self.statusActivity = statusActivity
+        statusActivity?.onAvailable = { [weak self] in
+            guard let self, !menuVisible else { return }
+            if let change = pendingNoiseChange {
+                pendingNoiseChange = nil
+                if let headphones { show(change, headphones: headphones) }
+            }
+            onAvailable()
+        }
         fallbackLifetime.onExpire = { [weak self] in self?.dismissFallback() }
         #if arch(arm64)
         guard SonyNativeHUDProbe.supports(version: ProcessInfo.processInfo.operatingSystemVersion) else { return }
@@ -140,7 +162,7 @@ final class SonyNoiseModeHUD {
     }
 
     func show(_ change: SonyNoiseModeChange, headphones: SonyHeadphonesController) {
-        guard headphones.isReady, headphones.isDeviceConnected,
+        guard !menuVisible, headphones.isReady, headphones.isDeviceConnected,
               change.matches(deviceID: SonyBLEIdentity.normalizedAddress(headphones.address),
                              session: headphones.notificationSession) else { return }
         let title: String
@@ -149,6 +171,15 @@ final class SonyNoiseModeHUD {
         case .ambient: title = String(localized: "Ambient Sound")
         case .off: title = String(localized: "Noise Control Off")
         case .wind: title = change.mode.title
+        }
+        switch showActivity(title: title, detail: change.deviceName, symbol: change.mode.symbol,
+                            headphones: headphones, replacing: true) {
+        case .accepted: return
+        case .busy:
+            pendingNoiseChange = change
+            self.headphones = headphones
+            return
+        case .unavailable: break
         }
         guard let nativeHUD = prepareNativeHUD() else {
             if showFallback(title: title, symbol: change.mode.symbol, replacing: true) { self.headphones = headphones }
@@ -160,6 +191,7 @@ final class SonyNoiseModeHUD {
             }
         }
         if accepted {
+            showingNativeHUD = true
             self.headphones = headphones
             logger.info("Native mode indicator accepted; mode=\(change.mode.rawValue, privacy: .public), \(self.anchorDescription, privacy: .public)")
         } else {
@@ -186,7 +218,7 @@ final class SonyNoiseModeHUD {
         case .right: title = String(localized: "Right Earbud Battery Low")
         case .caseBattery: title = String(localized: "Case Battery Low")
         }
-        return showNotice(title: title, detail: nil, image: image, headphones: headphones,
+        return showNotice(title: title, detail: nil, image: image, symbol: "battery.25percent", headphones: headphones,
                           batteryLevel: warning.reading.level)
     }
 
@@ -197,7 +229,7 @@ final class SonyNoiseModeHUD {
                                           leftConnected: headphones.leftConnected,
                                           rightConnected: headphones.rightConnected)
         return showNotice(title: String(localized: "Audio source: \(source.name)"), detail: nil,
-                          image: image, headphones: headphones)
+                          image: image, symbol: source.symbolName, headphones: headphones)
     }
 
     func showFirmware(version: String, headphones: SonyHeadphonesController) -> Bool {
@@ -206,12 +238,12 @@ final class SonyNoiseModeHUD {
                                            leftConnected: headphones.leftConnected,
                                            rightConnected: headphones.rightConnected)
         return showNotice(title: String(localized: "Firmware \(version) Available"), detail: String(localized: "Update in Sony | Sound Connect."),
-                          image: image, headphones: headphones)
+                          image: image, symbol: "arrow.down.circle", headphones: headphones)
     }
 
     #if DEBUG
     func showNoticePreview(title: String, detail: String?, image: NSImage, headphones: SonyHeadphonesController) -> Bool {
-        showNotice(title: title, detail: detail, image: image, headphones: headphones)
+        showNotice(title: title, detail: detail, image: image, symbol: headphones.deviceModel.systemSymbol, headphones: headphones)
     }
 
     func showLowBatteryPreview(warning: SonyLowBatteryPolicy.Warning, readings: [SonyLowBatteryPolicy.Reading],
@@ -254,8 +286,27 @@ final class SonyNoiseModeHUD {
         return NSImage(systemSymbolName: model.systemSymbol, accessibilityDescription: model.name)
     }
 
-    private func showNotice(title: String, detail: String?, image: NSImage, headphones: SonyHeadphonesController,
+    private func showActivity(title: String, detail: String?, symbol: String, headphones: SonyHeadphonesController,
+                              batteryLevel: Int? = nil, replacing: Bool = false) -> SonyStatusActivity.Presentation {
+        guard let statusActivity, !showingNativeHUD, fallbackPanel?.isVisible != true else { return .unavailable }
+        #if DEBUG
+        if CommandLine.arguments.contains("--fallback-hud-preview") { return .unavailable }
+        #endif
+        let state = AcoupletStatusAttributes.ContentState(title: title, subtitle: detail, systemImage: symbol, percent: batteryLevel)
+        let result = statusActivity.present(state, anchorView: anchorView, replacing: replacing)
+        if result == .accepted { self.headphones = headphones }
+        return result
+    }
+
+    private func showNotice(title: String, detail: String?, image: NSImage, symbol: String, headphones: SonyHeadphonesController,
                             batteryLevel: Int? = nil) -> Bool {
+        guard !menuVisible else { return false }
+        switch showActivity(title: title, detail: detail ?? headphones.deviceName, symbol: symbol,
+                            headphones: headphones, batteryLevel: batteryLevel) {
+        case .accepted: return true
+        case .busy: return false
+        case .unavailable: break
+        }
         guard let nativeHUD = prepareNativeHUD() else {
             let accepted = showFallback(title: title, detail: detail, image: image, batteryLevel: batteryLevel)
             if accepted { self.headphones = headphones }
@@ -275,7 +326,10 @@ final class SonyNoiseModeHUD {
             return nativeHUD.showNotice(nativeHUD.context, title, nil, Unmanaged.passUnretained(image).toOpaque(),
                                         anchorView.map { Unmanaged.passUnretained($0).toOpaque() })
         }
-        if accepted { self.headphones = headphones }
+        if accepted {
+            showingNativeHUD = true
+            self.headphones = headphones
+        }
         return accepted
     }
 
@@ -289,8 +343,9 @@ final class SonyNoiseModeHUD {
             attemptedLoad = true
             nativeHUD = loadNativeHUD()
             nativeHUD?.onAvailable = { [weak self] in
-                guard let self, !menuVisible else { return }
-                onAvailable()
+                guard let self else { return }
+                showingNativeHUD = false
+                if !menuVisible { onAvailable() }
             }
         }
         return nativeHUD
@@ -333,7 +388,9 @@ final class SonyNoiseModeHUD {
     }
 
     func dismiss() {
+        pendingNoiseChange = nil
         headphones = nil
+        statusActivity?.dismiss()
         if let nativeHUD { nativeHUD.dismiss(nativeHUD.context) }
         dismissFallback()
     }
@@ -341,7 +398,7 @@ final class SonyNoiseModeHUD {
     private func showFallback(title: String, symbol: String = "", detail: String? = nil, image: NSImage? = nil,
                               batteryLevel: Int? = nil, replacing: Bool = false) -> Bool {
         guard !menuVisible, replacing || fallbackPanel?.isVisible != true else { return false }
-        guard let placement = BannerPlacement.current(anchorView: anchorView) else { return false }
+        guard let placement = BannerPlacement.current(anchorView: anchorView)?.placement else { return false }
         var useGlass = true
         #if DEBUG
         if CommandLine.arguments.contains("-ui-testing"), CommandLine.arguments.contains("--material-hud-preview") { useGlass = false }

@@ -190,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if backgroundServiceMigrationError == nil { environment.updater.start() }
         #endif
         #if !ACOUPLET_PUBLIC_APIS_ONLY
+        SonyStatusActivity.endInterruptedActivities()
         environment.notifications.start()
         environment.settings.$experimentalLDACEnabled
             .removeDuplicates()

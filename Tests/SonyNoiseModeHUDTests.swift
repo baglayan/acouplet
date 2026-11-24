@@ -37,6 +37,151 @@ final class SonyNoiseModeHUDTests: XCTestCase {
 
     #if !ACOUPLET_PUBLIC_APIS_ONLY
     @MainActor
+    func testDynamicIslandRequiresTouchAndAHardwareFrameOnTheBuiltInDisplay() throws {
+        guard #available(macOS 27.3, *) else { throw XCTSkip("Mac Live Activities require macOS 27.3") }
+        let screen = IslandTestScreen()
+        let displays = NSScreen.screens.compactMap(\.cgDirectDisplayID)
+        screen.hardwareFrame = NSRect(x: 800, y: 1120, width: 80, height: 20)
+        screen.testDisplayID = displays.first { CGDisplayIsBuiltin($0) == 0 } ?? kCGNullDirectDisplay
+        XCTAssertFalse(screen.hasAcoupletDynamicIsland)
+        guard let builtIn = displays.first(where: { CGDisplayIsBuiltin($0) != 0 }) else {
+            throw XCTSkip("A built-in display is required to exercise the hardware-frame query")
+        }
+        screen.testDisplayID = builtIn
+        screen.testTouchCapabilities = []
+        XCTAssertFalse(screen.hasAcoupletDynamicIsland)
+        screen.testTouchCapabilities = .multiTouch
+        XCTAssertTrue(screen.hasAcoupletDynamicIsland)
+        screen.hasHardwareFrameSelector = false
+        XCTAssertFalse(screen.hasAcoupletDynamicIsland)
+        screen.hasHardwareFrameSelector = true
+        screen.hardwareFrame = .zero
+        XCTAssertGreaterThan(screen.safeAreaInsets.top, 0)
+        XCTAssertFalse(screen.hasAcoupletDynamicIsland)
+    }
+
+    @MainActor
+    func testStatusActivityCoalescesReplacementsAndEndsBeforePendingNoticesRetry() async throws {
+        let lifetime = BannerLifetime()
+        let updated = expectation(description: "Latest mode delivered")
+        let available = expectation(description: "Ended activity released")
+        var events: [String] = []
+        let activity = SonyStatusActivity(lifetime: lifetime, canPresent: { _ in true }) { state in
+            events.append(state.title)
+            return .init(isActive: { true }, update: { state in
+                events.append(state.title)
+                updated.fulfill()
+            }, end: { events.append("ended") })
+        }
+        activity.onAvailable = { available.fulfill() }
+        func present(_ title: String, replacing: Bool = false) -> SonyStatusActivity.Presentation {
+            activity.present(.init(title: title, subtitle: nil, systemImage: "headphones", percent: nil),
+                             anchorView: nil, replacing: replacing)
+        }
+        XCTAssertEqual(present("Low Battery"), .accepted)
+        let first = try XCTUnwrap(lifetime.timer)
+        XCTAssertEqual(present("Firmware"), .busy)
+        XCTAssertTrue(lifetime.timer === first)
+        XCTAssertEqual(present("Ambient", replacing: true), .accepted)
+        XCTAssertEqual(present("Off", replacing: true), .accepted)
+        XCTAssertFalse(first.isValid)
+        await fulfillment(of: [updated], timeout: 2)
+        XCTAssertEqual(events, ["Low Battery", "Off"])
+        try XCTUnwrap(lifetime.timer).fire()
+        XCTAssertEqual(present("Firmware"), .busy)
+        activity.dismiss()
+        await fulfillment(of: [available], timeout: 2)
+        XCTAssertEqual(events, ["Low Battery", "Off", "ended"])
+        XCTAssertNil(lifetime.timer)
+    }
+
+    @MainActor
+    func testNoiseChangesDuringActivityDismissalPresentTheLatestModeForTheSameSession() async throws {
+        let owner = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        owner.simulateDeviceConnection(named: "WF-1000XM5")
+        defer { owner.simulateControlLoss() }
+        let address = try XCTUnwrap(SonyBLEIdentity.normalizedAddress(owner.address))
+        let replayed = expectation(description: "Latest noise change presented after dismissal")
+        var symbols: [String] = []
+        let activity = SonyStatusActivity(canPresent: { _ in true }) { state in
+            symbols.append(state.systemImage)
+            if symbols.count == 2 { replayed.fulfill() }
+            return .init(isActive: { true }, update: { _ in XCTFail("Updated a dismissed activity") }, end: {})
+        }
+        let hud = SonyNoiseModeHUD(statusActivity: activity)
+        func show(_ mode: NoiseControlMode) {
+            let event = SonyNoiseModeChange(deviceID: address, session: owner.notificationSession, deviceName: owner.deviceName,
+                                            previousMode: .wind, mode: mode, isUnsolicited: true, hasLocalCommand: false)!
+            hud.show(event, headphones: owner)
+        }
+        show(.ambient)
+        hud.dismiss()
+        show(.anc)
+        show(.off)
+        await fulfillment(of: [replayed], timeout: 2)
+        XCTAssertEqual(symbols, [NoiseControlMode.ambient.symbol, NoiseControlMode.off.symbol])
+        hud.dismiss()
+    }
+
+    #if DEBUG
+    @MainActor
+    func testActivityRequestDenialAndIneligibleDisplayUseTheExistingFallback() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let image = NSImage(size: NSSize(width: 20, height: 20))
+        for eligible in [false, true] {
+            var attempts = 0
+            let activity = SonyStatusActivity(canPresent: { _ in eligible }) { _ in
+                attempts += 1
+                return nil
+            }
+            let hud = SonyNoiseModeHUD(statusActivity: activity)
+            let title = "Status activity fallback"
+            XCTAssertTrue(hud.showNoticePreview(title: title, detail: nil, image: image, headphones: controller))
+            XCTAssertEqual(attempts, eligible ? 1 : 0)
+            XCTAssertTrue(NSApp.windows.contains { $0.title == title && $0.isVisible })
+            XCTAssertFalse(hud.showNoticePreview(title: title, detail: nil, image: image, headphones: controller))
+            hud.dismiss()
+            XCTAssertFalse(NSApp.windows.contains { $0.title == title && $0.isVisible })
+        }
+    }
+
+    @MainActor
+    func testStatusActivityKeepsControllerOwnershipAndMenuSuppression() async {
+        let owner = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let other = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let image = NSImage(size: NSSize(width: 20, height: 20))
+        let removed = expectation(description: "Owner removed")
+        let available = expectation(description: "Pending notices may retry")
+        let opened = expectation(description: "Menu opened")
+        var states: [AcoupletStatusAttributes.ContentState] = []
+        let activity = SonyStatusActivity(canPresent: { _ in true }) { state in
+            states.append(state)
+            let ended = states.count == 1 ? removed : opened
+            return .init(isActive: { true }, update: { _ in XCTFail("Unexpected replacement") },
+                         end: { ended.fulfill() })
+        }
+        let hud = SonyNoiseModeHUD(statusActivity: activity)
+        hud.onAvailable = { available.fulfill() }
+        func present() -> Bool {
+            hud.showNoticePreview(title: "Firmware", detail: "Open Sound Connect", image: image, headphones: owner)
+        }
+        XCTAssertTrue(present())
+        XCTAssertFalse(NSApp.windows.contains { $0.title == "Firmware" && $0.isVisible })
+        hud.dismiss(for: other)
+        hud.dismissIfControllerRemoved(from: [owner])
+        XCTAssertFalse(present())
+        hud.dismissIfControllerRemoved(from: [other])
+        await fulfillment(of: [removed, available], timeout: 2)
+        XCTAssertTrue(present())
+        hud.setMenuVisible(true)
+        XCTAssertFalse(present())
+        await fulfillment(of: [opened], timeout: 2)
+        XCTAssertEqual(states.count, 2)
+        XCTAssertEqual(states.last?.subtitle, "Open Sound Connect")
+    }
+    #endif
+
+    @MainActor
     func testNativeHUDProbeAllowsFutureSystemVersionsAboveItsDeploymentTarget() {
         for version in [OperatingSystemVersion(majorVersion: 27, minorVersion: 2, patchVersion: 0),
                         OperatingSystemVersion(majorVersion: 27, minorVersion: 2, patchVersion: 1),
@@ -142,6 +287,15 @@ final class SonyNoiseModeHUDTests: XCTestCase {
         XCTAssertEqual(centered.maxY, screen.maxY - 8)
         let small = NSRect(x: 100, y: 200, width: 300, height: 40)
         XCTAssertEqual(BannerPlacement.desktop(screen: small, visibleFrame: small, anchor: nil).fallbackFrame(size: size), small)
+    }
+
+    @MainActor
+    func testPresentationMatchesTheFocusedDisplayWithMultipleScreens() {
+        XCTAssertTrue(BannerPlacement.isActiveDisplay(2, activeID: 2, displayCount: 2))
+        XCTAssertFalse(BannerPlacement.isActiveDisplay(1, activeID: 2, displayCount: 2))
+        XCTAssertFalse(BannerPlacement.isActiveDisplay(2, activeID: nil, displayCount: 2))
+        XCTAssertFalse(BannerPlacement.isActiveDisplay(nil, activeID: nil, displayCount: 2))
+        XCTAssertTrue(BannerPlacement.isActiveDisplay(2, activeID: nil, displayCount: 1))
     }
 
     @MainActor
@@ -295,3 +449,21 @@ final class SonyNoiseModeHUDTests: XCTestCase {
     }
     #endif
 }
+
+#if !ACOUPLET_PUBLIC_APIS_ONLY
+@available(macOS 27.3, *)
+private final class IslandTestScreen: NSScreen {
+    var testDisplayID = kCGNullDirectDisplay
+    var testTouchCapabilities: NSScreen.TouchCapabilities = .multiTouch
+    var hasHardwareFrameSelector = true
+    @objc(_centerHUDHardwareFrame) var hardwareFrame = NSRect.zero
+    override var __cgDirectDisplayID: CGDirectDisplayID { testDisplayID }
+    override var touchCapabilities: NSScreen.TouchCapabilities { testTouchCapabilities }
+    override var safeAreaInsets: NSEdgeInsets { NSEdgeInsets(top: 38, left: 0, bottom: 0, right: 0) }
+
+    override func responds(to selector: Selector!) -> Bool {
+        if selector == NSSelectorFromString("_centerHUDHardwareFrame") { return hasHardwareFrameSelector }
+        return super.responds(to: selector)
+    }
+}
+#endif
