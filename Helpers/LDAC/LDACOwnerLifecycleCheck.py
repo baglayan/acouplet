@@ -16,6 +16,7 @@ events = native[native.index('    enum Event:'):native.index('    let id: UUID')
 volume = output[output.index('struct LDACNativeVolume:'):output.index('@MainActor\nfinal class LDACNativeOutput')]
 restoration = output[output.index('    @discardableResult\n    func silence('):output.index('    private func applyControls(')]
 selectors = output[output.index('    private var handoffSelectors:'):output.index('    init(id:')]
+phone_routing = output[output.index('    func parkForPhone()'):output.index('    func validateForRecovery()')]
 fixture = r'''
 import Foundation
 import Darwin
@@ -71,24 +72,32 @@ final class LDACNativeOutput {
     var device: AudioObjectID = 5
     let address: String
     var model = ""
+    var sampleRate = LDACSampleRate.hz48000
     var controls = LDACNativeVolume(scalar: 0.4, muted: false)
     var expected = LDACNativeVolume(scalar: 0.4, muted: true)
     var savedDefaults: [UInt32: String] = [:]
     var ready = false
     var restoring = false
     var isSelected = false
+    var isParkedForPhone = false
+    var partialSourceResumeSelection = false
     var ownsLease = false
     var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
     var renewTask: Task<Void, Never>?
     var leaseActivity: NSObjectProtocol?
     __SELECTORS__
     init(id: UUID, address: String, changed: @escaping (Result<LDACNativeVolume, Error>) -> Void) { self.address = address }
-    func claim(model: String, targetAddress: String, sampleRate: LDACSampleRate, recovering: LDACRouteRecovery? = nil) async throws {
+    func claim(model: String, targetAddress: String, sampleRate: LDACSampleRate,
+               recovering: LDACRouteRecovery? = nil, requiresIdlePriority: Bool = false,
+               expectedDefaultOutputUID: String? = nil) async throws {
         self.model = model
+        self.sampleRate = sampleRate
         restoringOwner = recovering != nil
         Self.missing = model == "missing"
         ownsLease = true
-        savedDefaults = [Self.defaultSelectors[0]: "headphones", Self.defaultSelectors[1]: "speakers"]
+        let phoneFallback = model.hasPrefix("phone-") && model != "phone-no-fallback"
+        savedDefaults = [Self.defaultSelectors[0]: phoneFallback ? "speakers" : "headphones",
+                         Self.defaultSelectors[1]: phoneFallback ? "headphones" : "speakers"]
         if let recovering {
             savedDefaults = recovering.defaults
             controls = recovering.controls
@@ -96,11 +105,13 @@ final class LDACNativeOutput {
             SwiftRecord("owner-recovery")
         }
         SwiftRecord("claim \(getpid()) \(sampleRate.rawValue)")
+        if requiresIdlePriority { SwiftRecord("idle-priority-preflight") }
         FileHandle.standardError.write(Data("fixture diagnostic on stderr\n".utf8))
         if model == "slow" { try await Task.sleep(for: .seconds(10)) }
     }
+    func nativeClockControl() throws -> LDACNativeClockControl? { nil }
     var routeRecovery: LDACRouteRecovery {
-        .init(address: address, model: model, sampleRate: .hz48000, defaults: savedDefaults, controls: controls, selected: isSelected)
+        .init(address: address, model: model, sampleRate: sampleRate, defaults: savedDefaults, controls: controls, selected: isSelected)
     }
     func configure(volume: Int, range: ClosedRange<Int>, preservingUserChange: Bool = false) throws {
         if model == "delayed" || model == "hung" || model == "parent-hung" || model == "ordering" {
@@ -117,8 +128,16 @@ final class LDACNativeOutput {
         SwiftRecord("handoff")
     }
     func validateForRecovery() throws {}
+    func verifyRoute() throws {
+        guard ownsLease else { throw LDACOutputDeselectedError() }
+        for selector in handoffSelectors {
+            if isParkedForPhone { try verifyPhoneFallback(for: selector) }
+            else if isSelected, Self.routes[selector] != device { throw LDACOutputDeselectedError() }
+        }
+    }
     func prepareForReconnect() throws -> LDACPriorityControl { try priorityControl() }
     func finishPreparation() throws { ready = true }
+    __PHONE_ROUTING__
     __RESTORATION__
     func leaseIsOwned() throws -> Bool { ownsLease }
     func setLease(_ claim: Bool) throws {
@@ -131,6 +150,7 @@ final class LDACNativeOutput {
     static func resolve(_ uid: String) throws -> UInt32? { uid == "headphones" ? (missing ? nil : 6) : 8 }
     static func isAliveOutput(_ object: UInt32) throws -> Bool { true }
     nonisolated static func canTransferControls(uid: String, transport: UInt32, address: String) -> Bool { uid == "headphones" }
+    nonisolated static func isTargetOutput(uid: String, address: String) -> Bool { uid == "headphones" }
     static func setMute(_ object: UInt32, muted: Bool) throws { muteWrites.append(object) }
     static func readString(_ object: UInt32, selector: UInt32) throws -> String {
         if object == 5 { return uid }
@@ -142,7 +162,13 @@ final class LDACNativeOutput {
     }
     static func write<T>(_ object: UInt32, selector: UInt32, scope: UInt32 = kAudioObjectPropertyScopeGlobal,
                          value: T, requiringLease: Bool = false) throws {
-        if object == system { routes[selector] = value as? UInt32; SwiftRecord("route-write") }
+        if object == system {
+            routes[selector] = value as? UInt32
+            SwiftRecord("route-write")
+            if value as? UInt32 == 5, ProcessInfo.processInfo.environment["OWNER_MODE"] == "phone-reclaim-crash" {
+                kill(getpid(), SIGKILL)
+            }
+        }
     }
 }
 
@@ -157,22 +183,35 @@ final class LDACNativeSession: @unchecked Sendable {
     private let receive: @MainActor @Sendable (Event) -> Void
     private let configuration: LDACConfiguration
     private let restoringOnly: Bool
+    private let capturePermissionMode: CapturePermissionMode
     private var children: [LDACNativeChild] = []
     private var stopped = false
-    init(id: UUID, address: String, helpers: Helpers, gain: Double, outputDeviceUID: String? = nil,
+    init(id: UUID, address: String, helpers: Helpers, gain: Double, outputDeviceUID: String? = nil, outputSampleRate: LDACSampleRate? = nil, clock: LDACNativeClockControl? = nil,
          priority: LDACPriorityControl? = nil, configuration: LDACConfiguration = LDACConfiguration(),
          recoveryAttempt: Bool = false, restoringOnly: Bool = false,
+         capturePermissionMode: CapturePermissionMode = .check,
          receive: @escaping @MainActor @Sendable (Event) -> Void) {
         self.id = id
         self.receive = receive
         self.configuration = configuration
         self.restoringOnly = restoringOnly
+        self.capturePermissionMode = capturePermissionMode
     }
     @MainActor
     func start() {
         if restoringOnly {
             SwiftRecord("native-restored-after-gap")
             receive(.finished(.init(message: nil, canRetry: false, requiresAttention: false, targetDisconnected: false, waitForReconnect: false)))
+            return
+        }
+        if capturePermissionMode != .verified { SwiftRecord("targeted-permission-check \(configuration.sampleRate.rawValue)") }
+        if capturePermissionMode == .checkOnly {
+            let mode = ProcessInfo.processInfo.environment["OWNER_MODE"]
+            if mode == "permission-cancelled" { return }
+            let denied = mode == "permission-denied"
+            receive(.finished(.init(message: denied ? LDACAudioCaptureAccess.permissionGuidance : nil,
+                canRetry: false, requiresAttention: denied, targetDisconnected: false, waitForReconnect: false,
+                captureAccess: denied ? .permissionRequired : .ready)))
             return
         }
         for role in ["capture", "logger"] {
@@ -204,9 +243,12 @@ final class LDACNativeSession: @unchecked Sendable {
     func recoverConnection(reason: String) {}
     func verifyConnectionLoss(reason: String) {}
     func allowHandoff() {}
+    func park() {}
+    func resumeParkedStream() {}
+    func allowParkedStart(_ authorization: UUID) {}
     func updateGain(_ gain: Double) {}
     @MainActor
-    func updateQuality(_ quality: LDACQuality) { SwiftRecord("quality \(quality.rawValue)") }
+    func updateConfiguration(_ configuration: LDACConfiguration) { SwiftRecord("quality \(configuration.quality.rawValue)") }
 }
 
 __CHILD__
@@ -254,6 +296,36 @@ enum Check {
                 precondition(returned == configuration && returned.helperArguments == configuration.helperArguments)
             }
         }
+        if mode.hasPrefix("phone-") {
+            let output = LDACOwnerOutput(id: UUID(), address: "02:00:00:00:00:01") { _ in }
+            try await output.claim(model: mode, targetAddress: "02:00:00:00:00:01", sampleRate: .hz48000)
+            try await output.selectForHandoff()
+            let parked = try await output.parkForPhone()
+            let music = LDACNativeOutput.defaultSelectors[0]
+            precondition(parked == (mode != "phone-no-fallback"))
+            precondition(LDACNativeOutput.routes[music] == (parked ? 8 : 5))
+            if mode == "phone-parked-crash" {
+                kill(output.ownerPID, SIGKILL)
+            } else if mode == "phone-reclaim-crash" {
+                do { try await output.resumeFromPhone(); preconditionFailure("Reclaim survived the owner crash") }
+                catch { }
+                precondition(LDACNativeOutput.routes[music] == 5)
+            } else if parked {
+                try await output.resumeFromPhone()
+                precondition(LDACNativeOutput.routes[music] == 5)
+                let parkedAgain = try await output.parkForPhone()
+                precondition(parkedAgain)
+                precondition(LDACNativeOutput.routes[music] == 8)
+            }
+            let crashed = mode.hasSuffix("-crash")
+            if crashed {
+                while !output.ownerEnded { try await Task.sleep(for: .milliseconds(5)) }
+            }
+            let result = await output.restoreAndRelease(restoreHeadphoneOutput: crashed)
+            precondition((result != nil) == crashed)
+            SwiftRecord("app-complete")
+            return
+        }
         if mode == "dropped" {
             var output: LDACOwnerOutput? = LDACOwnerOutput(id: UUID(), address: "02:00:00:00:00:01") { _ in }
             try await output!.claim(model: mode, targetAddress: "02:00:00:00:00:01", sampleRate: .hz48000)
@@ -292,10 +364,37 @@ enum Check {
         var active = false
         var completed = false
         let output = LDACOwnerOutput(id: UUID(), address: "02:00:00:00:00:01") { _ in }
-        try await output.claim(model: mode, targetAddress: "02:00:00:00:00:01", sampleRate: .hz96000)
+        try await output.claim(model: mode, targetAddress: "02:00:00:00:00:01", sampleRate: .hz96000,
+                               requiresIdlePriority: mode == "claimed")
         if mode == "claimed" {
             SwiftRecord("app-claimed")
             while true { try await Task.sleep(for: .seconds(1)) }
+        }
+        if mode == "permission-cancelled" {
+            let pending = Task { try await output.checkCapturePermission(at: .hz96000) }
+            let file = URL(fileURLWithPath: ProcessInfo.processInfo.environment["OWNER_CHECK"]!).appendingPathComponent("events")
+            while !(try String(contentsOf: file, encoding: .utf8)).contains("targeted-permission-check ") {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            pending.cancel()
+            do { try await pending.value; fatalError("Cancelled permission check succeeded") }
+            catch is CancellationError {}
+            let result = await output.restoreAndRelease()
+            precondition(result == nil)
+            SwiftRecord("app-complete")
+            return
+        }
+        if mode.hasPrefix("permission-") {
+            do { try await output.checkCapturePermission(at: .hz96000) }
+            catch let error as LDACOwnerError {
+                precondition(mode == "permission-denied" && error.captureAccess == .permissionRequired
+                             && error.message == LDACAudioCaptureAccess.permissionGuidance)
+                let result = await output.restoreAndRelease()
+                precondition(result == nil)
+                SwiftRecord("app-complete")
+                return
+            }
+            precondition(mode != "permission-denied")
         }
         try await output.priorityControl()
         if mode == "ordering" {
@@ -327,7 +426,7 @@ enum Check {
         session.start()
         while !active { try await Task.sleep(for: .milliseconds(5)) }
         SwiftRecord("app-active")
-        if mode == "normal" { session.updateQuality(.quality) }
+        if mode == "normal" { session.updateConfiguration(.init(quality: .quality)) }
         if mode == "parent-hung" {
             _ = Task { try await output.configure(volume: 10, range: 0...30) }
             while true { try await Task.sleep(for: .seconds(1)) }
@@ -392,6 +491,7 @@ enum Check {
 }
 '''
 fixture = fixture.replace('__TYPES__', types).replace('__VOLUME__', volume).replace('__SELECTORS__', selectors)
+fixture = fixture.replace('__PHONE_ROUTING__', phone_routing)
 fixture = fixture.replace('__RESTORATION__', restoration).replace('__EVENTS__', events).replace('__CHILD__', child).replace('__OWNER__', owner)
 fixture = fixture.replace('timeout: TimeInterval = 10', 'timeout: TimeInterval = 0.2').replace('shutdownDeadline = .now() + 120', 'shutdownDeadline = .now() + 1').replace('asyncAfter(deadline: .now() + 120)', 'asyncAfter(deadline: .now() + 5)')
 fixture = fixture.replace('precondition(await output.restoreAndRelease() == nil)', 'let result = await output.restoreAndRelease()\n        precondition(result == nil)')
@@ -423,6 +523,39 @@ with tempfile.TemporaryDirectory(prefix='acouplet-owner-check-') as temporary:
     rejected = subprocess.run([str(binary), '--ldac-owner'], capture_output=True, timeout=5)
     assert rejected.returncode != 0, 'A foreign parent invoked the signed owner entry point'
     print('PASS actual owner parent-signature check rejects direct foreign invocation')
+    for mode, route_writes in [('phone-fallback', 3), ('phone-no-fallback', 0), ('phone-parked-crash', 1), ('phone-reclaim-crash', 3)]:
+        run = directory / mode
+        run.mkdir()
+        events = run / 'events'
+        events.write_text('')
+        environment = dict(os.environ, OWNER_MODE=mode, OWNER_CHECK=str(run))
+        subprocess.run([str(binary)], env=environment, check=True, timeout=8)
+        lines = events.read_text().splitlines()
+        state = json.loads((run / 'state').read_text())
+        assert not state['lease'] and not state['mutes'], state
+        assert sorted(state['routes'].values()) == ([5, 8] if mode == 'phone-no-fallback' else [8, 8]), state
+        assert lines.count('route-write') == route_writes, lines
+        assert ('owner-recovery' in lines) == mode.endswith('-crash'), lines
+        assert 'app-complete' in lines
+        print('PASS actual owner parks, reclaims and releases output mode=' + mode)
+    for mode in ['permission-allowed', 'permission-denied', 'permission-cancelled']:
+        run = directory / mode
+        run.mkdir()
+        events = run / 'events'
+        events.write_text('')
+        environment = dict(os.environ, OWNER_MODE=mode, OWNER_CHECK=str(run))
+        subprocess.run([str(binary)], env=environment, check=True, timeout=8)
+        lines = events.read_text().splitlines()
+        assert [line for line in lines if line.startswith('targeted-permission-check ')] == ['targeted-permission-check 96000'], lines
+        if mode == 'permission-allowed':
+            assert lines.index('targeted-permission-check 96000') < lines.index('start 96000 auto'), lines
+        else:
+            assert not any(line.startswith(('start ', 'handoff', 'route-write')) for line in lines), lines
+        state = json.loads((run / 'state').read_text())
+        assert state['lease'] is False, state
+        if mode != 'permission-allowed':
+            assert sorted(state['routes'].values()) == [6, 8] and state['mutes'] == [], state
+        print('PASS actual owner targeted permission ordering mode=' + mode)
     for mode in ['normal', 'crash', 'inherited', 'slow', 'early', 'cancel', 'dropped', 'claimed', 'missing', 'changed', 'gap', 'owner-crash', 'owner-term', 'malformed', 'oversized', 'eof', 'delayed', 'hung', 'parent-hung', 'ordering']:
         run = directory / ('run-' + mode + '-' + str(time.monotonic_ns()))
         run.mkdir()
@@ -438,6 +571,7 @@ with tempfile.TemporaryDirectory(prefix='acouplet-owner-check-') as temporary:
             wait_for(lambda: marker in events.read_text() or process.poll() is not None)
             assert process.poll() is None or mode in ['normal', 'early', 'cancel', 'dropped', 'delayed', 'malformed', 'oversized', 'eof', 'hung', 'ordering'], process.communicate(timeout=1)
             lines = events.read_text().splitlines()
+            assert ('idle-priority-preflight' in lines) == (mode == 'claimed'), lines
             owner_pid = int(next(line.split()[1] for line in lines if line.startswith(('claim ', 'spawned '))))
             helpers = [int(line.split()[1]) for line in lines if line.startswith('child ')]
             if mode == 'inherited':

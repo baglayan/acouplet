@@ -10961,19 +10961,19 @@
         }
       }
     },
-    "These headphones offer LDAC only when multipoint is off. Turning it off restarts them and disconnects any other device.": {
+    "These headphones offer LDAC only when multipoint is off. Turning it off can disconnect the headphones and any other connected device.": {
       "extractionState": "manual",
       "localizations": {
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bu kulaklıklar LDAC'yi yalnızca çoklu bağlantı kapalıyken sunar. Kapatmak kulaklıkları yeniden başlatır ve diğer cihazların bağlantısını keser."
+            "value": "Bu kulaklıklar LDAC'yi yalnızca çoklu bağlantı kapalıyken sunar. Çoklu bağlantıyı kapatmak kulaklıkların ve onlara bağlı diğer cihazların bağlantısını kesebilir."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "These headphones offer LDAC only when multipoint is off. Turning it off restarts them and disconnects any other device."
+            "value": "These headphones offer LDAC only when multipoint is off. Turning it off can disconnect the headphones and any other connected device."
           }
         }
       }
@@ -18914,6 +18914,23 @@
         }
       }
     },
+    "Waiting for this Mac…": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bu Mac’in seçilmesi bekleniyor…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for this Mac…"
+          }
+        }
+      }
+    },
     "Waiting to send…": {
       "extractionState": "manual",
       "localizations": {
@@ -19352,6 +19369,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "LDAC ses sürücüsünün güncellenmesi gerekiyor. Güncellemeyi yükleyin, ardından Mac’inizi yeniden başlatın."
+          }
+        }
+      }
+    },
+    "An LDAC audio driver update is available. Install it, then restart your Mac.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "An LDAC audio driver update is available. Install it, then restart your Mac."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC ses sürücüsü için bir güncelleme mevcut. Güncellemeyi yükleyin, ardından Mac’inizi yeniden başlatın."
           }
         }
       }
@@ -21107,6 +21141,91 @@
         }
       }
     },
+    "Active LDAC Rate": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Active LDAC Rate"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Etkin LDAC Örnekleme Hızı"
+          }
+        }
+      }
+    },
+    "Mac Audio Capture Rate": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac Audio Capture Rate"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac Ses Yakalama Örnekleme Hızı"
+          }
+        }
+      }
+    },
+    "Too much audio is buffered to change the sample rate. LDAC is using %@.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too much audio is buffered to change the sample rate. LDAC is using %@."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Arabellekte çok fazla ses biriktiği için örnekleme hızı değiştirilemedi. LDAC %@ hızını kullanıyor."
+          }
+        }
+      }
+    },
+    "The headphones declined %@. LDAC is using %@.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The headphones declined %@. LDAC is using %@."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kulaklık %@ hızını kabul etmedi. LDAC %@ hızını kullanıyor."
+          }
+        }
+      }
+    },
+    "Mac PCM %@ kHz": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac PCM %@ kHz"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac PCM %@ kHz"
+          }
+        }
+      }
+    },
     " · %lld channels": {
       "extractionState": "manual",
       "localizations": {
@@ -21205,6 +21324,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "LDAC’i başlatmadan önce kulaklığın ses kaynağı olarak bu Mac’i seçin."
+          }
+        }
+      }
+    },
+    "Turn off multipoint before starting LDAC.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn off multipoint before starting LDAC."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LDAC’i başlatmadan önce çok noktalı bağlantıyı kapatın."
           }
         }
       }
@@ -21511,6 +21647,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Kulaklık ön ayar değişikliğini reddetti."
+          }
+        }
+      }
+    },
+    "The previous Mac audio output is unavailable.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previous Mac audio output is unavailable."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac’in önceki ses çıkışı kullanılamıyor."
           }
         }
       }

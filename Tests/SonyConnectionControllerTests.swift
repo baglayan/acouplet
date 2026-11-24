@@ -6,6 +6,102 @@ import SwiftUI
 final class SonyConnectionControllerTests: XCTestCase {
     #if !ACOUPLET_PUBLIC_APIS_ONLY
     @MainActor
+    func testRenderedMenuBarControlsAreVisibleButDisabledDuringLDACHandoff() async throws {
+        let suite = "AcoupletTests.LDACHandoffMenu.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = SettingsStore(defaults: defaults, preferencesDomain: suite)
+
+        for model in [SonyDeviceModel.wfXM5, .whXM3] {
+            let headphones = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            headphones.simulateGalleryDevice(model: model)
+            let sourceButtons = headphones.multipoint.devices.filter(\.isConnected).map { "multipoint.sourcePicker.\($0.id)" }
+            let batteryIDs = model.isEarbuds ? ["battery.left", "battery.right", "battery.case"] : ["battery.battery"]
+            var commands = ["noiseControl.off", "noiseControl.anc", "noiseControl.ambient",
+                            String(localized: "Focus"), String(localized: "Office"), String(localized: "Aware"),
+                            String(localized: "Ambient sound level"), String(localized: "Focus on Voice"),
+                            "equalizer.preset", "audio.dsee", String(localized: "Refresh headphone status")]
+            if model == .wfXM5 {
+                XCTAssertEqual(sourceButtons.count, 2)
+                commands += ["multipoint.open"] + sourceButtons
+            } else {
+                commands += ["audio.surround", "audio.soundPosition"]
+            }
+            if headphones.canSetBassBoost { commands.append("audio.clearBass") }
+            let devices = SonyDeviceCoordinator(controller: headphones)
+            let ldac = LDACController(devices: devices, inspectDriver: { _ in .current },
+                                      isClassicConnected: { _ in headphones.isDeviceConnected },
+                                      localBluetoothAddress: { "02:00:00:00:00:01" })
+            let content = MenuBarView(showSettings: {}, initialScreenHeight: 2_000)
+                .environmentObject(headphones)
+                .environmentObject(devices)
+                .environmentObject(settings)
+                .environmentObject(ldac)
+                #if canImport(Sparkle)
+                .environmentObject(AppUpdater())
+                #endif
+            let host = NSHostingView(rootView: content)
+            let window = NSPanel(contentRect: NSRect(origin: .zero, size: host.fittingSize),
+                                 styleMask: [.titled, .nonactivatingPanel], backing: .buffered, defer: false)
+            let title = "\(suite).\(model.rawValue)"
+            window.title = title
+            window.alphaValue = 0
+            window.ignoresMouseEvents = true
+            window.contentView = host
+            window.orderBack(nil)
+            XCTAssertFalse(window.isKeyWindow)
+            defer {
+                window.orderOut(nil)
+                headphones.simulateControlLoss()
+            }
+
+            let before = await renderedMenuElements(in: title)
+            ldac.simulateRecoverySession(headphones)
+            XCTAssertTrue(headphones.canChangeNoiseControl)
+            let starting = await renderedMenuElements(in: title, pressing: ["noiseControl.anc"] + sourceButtons)
+            XCTAssertNil(headphones.pendingChanges[.noiseControl])
+            XCTAssertNil(headphones.sourceTransition)
+            headphones.simulateControlLoss(deviceConnected: false)
+            XCTAssertFalse(headphones.isReady)
+            let during = await renderedMenuElements(in: title)
+            await withCheckedContinuation { continuation in
+                ldac.stop { continuation.resume() }
+            }
+            headphones.simulateGalleryDevice(model: model)
+            if model == .wfXM5 {
+                XCTAssertTrue(headphones.multipoint.supportsSourceControl)
+                XCTAssertEqual(headphones.multipoint.devices.filter(\.isConnected).map { "multipoint.sourcePicker.\($0.id)" }, sourceButtons)
+                XCTAssertNil(headphones.sourceControlUnavailableReason)
+            }
+            var after = await renderedMenuElements(in: title)
+            let deadline = ContinuousClock.now + .seconds(1)
+            while !commands.allSatisfy({ command in
+                after.contains { ($0.identifier ?? $0.label) == command && $0.role != kAXStaticTextRole && $0.enabled == true }
+            }) && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+                after = await renderedMenuElements(in: title)
+            }
+            for (phase, elements, enabled) in [("before", before, true), ("starting", starting, false),
+                                                ("lost controls", during, false), ("after", after, true)] {
+                XCTAssertTrue(elements.contains { $0.identifier == "headphones.dashboard" }, "\(phase) \(model)")
+                for command in commands {
+                    let item = elements.first { ($0.identifier ?? $0.label) == command && $0.role != kAXStaticTextRole }
+                    XCTAssertEqual(item?.enabled, enabled, "\(model) \(phase) \(command)")
+                }
+                XCTAssertEqual(elements.first { $0.identifier == "menu.settings" }?.enabled, true, "\(phase) \(model)")
+                for id in batteryIDs {
+                    let label = try XCTUnwrap(before.first { $0.identifier == id }?.label)
+                    XCTAssertEqual(elements.first { $0.identifier == id }?.label, label, "\(model) \(phase) \(id)")
+                }
+                if !enabled {
+                    XCTAssertEqual(elements.first { $0.identifier == "audio.ldac" }?.enabled, true, "\(phase) \(model)")
+                    XCTAssertEqual(elements.first { $0.identifier == "audio.ldacSettings" }?.enabled, false, "\(phase) \(model)")
+                }
+            }
+        }
+    }
+
+    @MainActor
     func testRenderedSettingsShowsDeviceReportedAssistantSetupWithoutSelection() async throws {
         let suite = "AcoupletTests.AssistantSetupSettings.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -71,10 +167,11 @@ final class SonyConnectionControllerTests: XCTestCase {
         let identifier: String?
         let label: String?
         let role: String?
+        let enabled: Bool?
     }
 
     @MainActor
-    private func renderedMenuElements(in windowTitle: String) async -> [MenuElement] {
+    private func renderedMenuElements(in windowTitle: String, pressing commands: [String] = []) async -> [MenuElement] {
         await Task.yield()
         func attribute(_ element: AXUIElement, _ name: String) -> Any? {
             var value: CFTypeRef?
@@ -85,13 +182,93 @@ final class SonyConnectionControllerTests: XCTestCase {
                                    label: attribute(element, kAXDescriptionAttribute) as? String
                                        ?? attribute(element, kAXValueAttribute) as? String
                                        ?? attribute(element, kAXTitleAttribute) as? String,
-                                   role: attribute(element, kAXRoleAttribute) as? String)
+                                   role: attribute(element, kAXRoleAttribute) as? String,
+                                   enabled: attribute(element, kAXEnabledAttribute) as? Bool)
+            if let identifier = item.identifier, commands.contains(identifier) {
+                _ = AXUIElementPerformAction(element, kAXPressAction as CFString)
+            }
             let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
             return [item] + children.flatMap { elements(in: $0) }
         }
         let app = AXUIElementCreateApplication(ProcessInfo.processInfo.processIdentifier)
         let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
         return windows.first { (attribute($0, kAXTitleAttribute) as? String) == windowTitle }.map(elements) ?? []
+    }
+
+    @MainActor
+    func testLDACKeepsOnlyTheTargetHeadphonesControlsDuringHandoff() async throws {
+        let address = "02:53:4F:4E:59:01"
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true, pinnedAddress: address)
+        let ldac = LDACController(inspectDriver: { _ in .current })
+        ldac.simulateRecoverySession(controller)
+        XCTAssertNil(ldac.retainedMenuBarHeadphoneControls(for: controller))
+
+        controller.simulateGalleryDevice(model: .whXM3)
+        let live = MenuBarHeadphoneControls(controller)
+        ldac.simulateRecoverySession(controller)
+        XCTAssertTrue(ldac.locksMenuBarHeadphoneControls(for: controller))
+        controller.simulateControlLoss(deviceConnected: false)
+        XCTAssertFalse(controller.isReady)
+        XCTAssertFalse(controller.equalizer.isSupported)
+        XCTAssertFalse(controller.legacySurround.isSupported)
+
+        let retained = try XCTUnwrap(ldac.retainedMenuBarHeadphoneControls(for: controller))
+        XCTAssertEqual(retained.noiseModes, live.noiseModes)
+        XCTAssertEqual(retained.noiseMode, .ambient)
+        XCTAssertEqual(retained.ambientLevel, live.ambientLevel)
+        XCTAssertEqual(retained.batteries, live.batteries)
+        XCTAssertTrue(retained.equalizer.isSupported)
+        XCTAssertTrue(retained.legacySurround.isSupported)
+        XCTAssertTrue(retained.legacySoundPosition.isSupported)
+        XCTAssertNotNil(retained.dsee)
+
+        controller.simulateDeviceConnection(named: "WH-1000XM3")
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.legacySurround.isSupported)
+        XCTAssertTrue(ldac.locksMenuBarHeadphoneControls(for: controller))
+        XCTAssertTrue(ldac.retainedMenuBarHeadphoneControls(for: controller)?.legacySurround.isSupported == true)
+        controller.simulateControlLoss(deviceConnected: false)
+        XCTAssertFalse(controller.lastReadyMenuBarControls?.legacySurround.isSupported ?? true)
+        XCTAssertTrue(ldac.retainedMenuBarHeadphoneControls(for: controller)?.legacySurround.isSupported == true)
+
+        let replacement = SonyHeadphonesController(startAutomatically: false, simulated: true, pinnedAddress: address)
+        replacement.simulateGalleryDevice(model: .whXM3)
+        replacement.simulateControlLoss()
+        XCTAssertNil(ldac.retainedMenuBarHeadphoneControls(for: replacement))
+        let other = SonyHeadphonesController(startAutomatically: false, simulated: true, pinnedAddress: "02:53:4F:4E:59:02")
+        other.simulateGalleryDevice(model: .whXM3)
+        XCTAssertFalse(ldac.locksMenuBarHeadphoneControls(for: other))
+
+        await withCheckedContinuation { continuation in
+            ldac.stop { continuation.resume() }
+        }
+        XCTAssertFalse(ldac.locksMenuBarHeadphoneControls(for: controller))
+        XCTAssertNil(ldac.retainedMenuBarHeadphoneControls(for: controller))
+
+        ldac.simulateRecoverySession(controller)
+        XCTAssertNil(ldac.retainedMenuBarHeadphoneControls(for: controller))
+    }
+
+    @MainActor
+    func testAutomaticLDACSourcePreparationKeepsThePopoversCurrentControls() throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        let mac = try XCTUnwrap(controller.multipoint.devices.last)
+        let devices = SonyDeviceCoordinator(controller: controller)
+        let ldac = LDACController(devices: devices, inspectDriver: { _ in .current }, localBluetoothAddress: { mac.address })
+        defer { ldac.stop(); controller.simulateControlLoss() }
+        XCTAssertEqual(controller.ldacPreparationIssue(for: mac.address), .selectMac(mac))
+        ldac.setEnabled(true, forAddress: controller.address)
+        XCTAssertEqual(ldac.state, .requested)
+        XCTAssertTrue(ldac.locksMenuBarHeadphoneControls(for: controller))
+        let visible = try XCTUnwrap(ldac.retainedMenuBarHeadphoneControls(for: controller))
+        XCTAssertTrue(visible.showsMultipoint)
+
+        controller.simulateControlLoss(deviceConnected: false)
+        XCTAssertTrue(ldac.keepsMenuBarVisible(forAddress: controller.address))
+        XCTAssertTrue(ldac.locksMenuBarHeadphoneControls(for: controller))
+        XCTAssertEqual(ldac.retainedMenuBarHeadphoneControls(for: controller)?.multipoint, visible.multipoint)
+        XCTAssertEqual(ldac.retainedMenuBarHeadphoneControls(for: controller)?.equalizer, visible.equalizer)
     }
     #endif
 

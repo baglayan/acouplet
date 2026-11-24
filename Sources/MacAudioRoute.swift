@@ -91,10 +91,21 @@ final class MacAudioRouteObserver: ObservableObject {
         return output + "\nCoreAudio issue: \(error ?? "None")"
     }
 
+    func isDefaultOutput(_ uid: String, transport: UInt32? = nil) -> Bool {
+        guard let deviceID = try? defaultOutputID(), deviceID != kAudioObjectUnknown else { return false }
+        guard (try? readString(deviceID, selector: kAudioDevicePropertyDeviceUID)) == uid else { return false }
+        guard let transport else { return true }
+        return (try? read(deviceID, selector: kAudioDevicePropertyTransportType, initial: UInt32(0))) == transport
+    }
+
+    private func defaultOutputID() throws -> AudioObjectID {
+        try read(AudioObjectID(kAudioObjectSystemObject), selector: kAudioHardwarePropertyDefaultOutputDevice, initial: AudioObjectID(kAudioObjectUnknown))
+    }
+
     func refresh() {
         var errors = systemListenerErrors
         do {
-            let deviceID = try read(AudioObjectID(kAudioObjectSystemObject), selector: kAudioHardwarePropertyDefaultOutputDevice, initial: AudioObjectID(kAudioObjectUnknown))
+            let deviceID = try defaultOutputID()
             observeDevice(deviceID)
             errors += deviceListenerErrors
             if deviceID == kAudioObjectUnknown {

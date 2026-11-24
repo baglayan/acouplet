@@ -21,6 +21,7 @@ struct SettingsView: View {
     @EnvironmentObject private var headphones: SonyHeadphonesController
     @EnvironmentObject private var devices: SonyDeviceCoordinator
     @EnvironmentObject private var audioRoute: MacAudioRouteObserver
+    private var selectMultipointSource = MultipointSourceSelection()
     #if !ACOUPLET_PUBLIC_APIS_ONLY
     @EnvironmentObject private var ldac: LDACController
     @State private var showsDriverRemovalConfirmation = false
@@ -190,6 +191,16 @@ struct SettingsView: View {
                     }
                     .disabled(!ldac.canChangeConfiguration)
                     .accessibilityIdentifier("ldac.sampleRate")
+                    if case let .active(format) = ldac.state, let activeRate = LDACSampleRate(rawValue: format.sampleRateHz) {
+                        LabeledContent("Active LDAC Rate", value: activeRate.displayName)
+                        if let sourceRate = format.sourceSampleRateHz.flatMap(LDACSampleRate.init(rawValue:)),
+                           sourceRate.rawValue != format.sampleRateHz {
+                            LabeledContent("Mac Audio Capture Rate", value: sourceRate.displayName)
+                        }
+                    }
+                    if let error = ldac.sampleRateChangeError {
+                        Text(error).font(.caption)
+                    }
                     Picker("Playback Quality", selection: $settings.ldacConfiguration.quality) {
                         ForEach(LDACQuality.allCases, id: \.self) { quality in
                             let configuration = LDACConfiguration(sampleRate: settings.ldacConfiguration.sampleRate, quality: quality)
@@ -263,7 +274,7 @@ struct SettingsView: View {
     #if !ACOUPLET_PUBLIC_APIS_ONLY
     private var hasInstalledLDACDriver: Bool {
         switch ldac.driverState {
-        case .current, .outdated, .restartRequired: true
+        case .current, .outdated, .updateAvailable, .restartRequired: true
         case .missing, .unavailable: false
         }
     }
@@ -509,7 +520,7 @@ struct SettingsView: View {
                 Section("Devices") {
                     MultipointSettingControl()
                     if MultipointControls.isVisible(for: headphones.multipoint) {
-                        MultipointControls()
+                        MultipointControls { selectMultipointSource($0, on: headphones) }
                     }
                     if headphones.multipoint.supportsMusicHandover {
                         if let enabled = headphones.multipoint.musicHandoverEnabled {
@@ -2549,9 +2560,10 @@ struct BassBoostControl: View {
 
 struct LegacySoundEffectControl: View {
     let kind: SonyLegacySoundEffect.Kind
+    var displayedEffect: SonyLegacySoundEffect? = nil
     @EnvironmentObject private var headphones: SonyHeadphonesController
 
-    private var effect: SonyLegacySoundEffect { headphones.legacySoundEffect(kind) }
+    private var effect: SonyLegacySoundEffect { displayedEffect ?? headphones.legacySoundEffect(kind) }
     private var setting: SonyHeadphonesController.Setting { .legacySoundEffect(kind) }
 
     var body: some View {
@@ -2614,9 +2626,10 @@ struct DSEEControl: View {
         }
     }
 
+    var presentation: Presentation? = nil
     @EnvironmentObject private var headphones: SonyHeadphonesController
 
-    private var state: Presentation { Presentation(headphones) }
+    private var state: Presentation { presentation ?? Presentation(headphones) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -4359,8 +4372,24 @@ private struct SidetoneControl: View {
     }
 }
 
+@MainActor
+struct MultipointSourceSelection: DynamicProperty {
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    @EnvironmentObject private var ldac: LDACController
+    #endif
+
+    func callAsFunction(_ device: SonyMultipointDevice, on headphones: SonyHeadphonesController) {
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        ldac.selectAudioSource(device, on: headphones)
+        #else
+        headphones.selectAudioSource(device)
+        #endif
+    }
+}
+
 struct MultipointControls: View {
     var compact = false
+    let selectSource: @MainActor (SonyMultipointDevice) -> Void
     @EnvironmentObject private var headphones: SonyHeadphonesController
 
     var body: some View {
@@ -4451,7 +4480,7 @@ struct MultipointControls: View {
                     .fontWeight(.semibold)
                     .foregroundStyle(Color(nsColor: .secondaryLabelColor))
                 ForEach(devices) { device in
-                    MultipointDeviceRow(device: device)
+                    MultipointDeviceRow(device: device, selectSource: selectSource)
                 }
             }
         }
@@ -4465,6 +4494,7 @@ struct MultipointControls: View {
 
 private struct MultipointDeviceRow: View {
     let device: SonyMultipointDevice
+    let selectSource: @MainActor (SonyMultipointDevice) -> Void
     @EnvironmentObject private var headphones: SonyHeadphonesController
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var hovered = false
@@ -4504,7 +4534,7 @@ private struct MultipointDeviceRow: View {
     var body: some View {
         HStack(spacing: 8) {
             if device.isConnected, headphones.multipoint.supportsSourceControl {
-                Button { headphones.selectAudioSource(device) } label: { deviceLabel }
+                Button { selectSource(device) } label: { deviceLabel }
                     .buttonStyle(.plain)
                     .focused($sourceFocused)
                     .focusEffectDisabled()
@@ -4614,10 +4644,12 @@ private struct MultipointDeviceRow: View {
 }
 
 struct MultipointSourcePicker: View {
+    var displayedMultipoint: SonyMultipoint? = nil
+    let selectSource: @MainActor (SonyMultipointDevice) -> Void
     @EnvironmentObject private var headphones: SonyHeadphonesController
 
     var body: some View {
-        let state = headphones.multipoint
+        let state = displayedMultipoint ?? headphones.multipoint
         let connected = state.devices.filter(\.isConnected)
         let selectedID = state.inventoryIsStale ? nil : state.selectedSource?.id
         if state.supportsSourceControl, connected.count >= 2 {
@@ -4625,7 +4657,7 @@ struct MultipointSourcePicker: View {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible())], spacing: 8) {
                     ForEach(connected) { device in
                         let selected = selectedID == device.id
-                        Button { headphones.selectAudioSource(device) } label: {
+                        Button { selectSource(device) } label: {
                             Text(Self.title(for: device, among: connected))
                                 .font(.body)
                                 .lineLimit(1)

@@ -3,6 +3,8 @@ import XCTest
 @testable import Acouplet
 
 #if !ACOUPLET_PUBLIC_APIS_ONLY
+private let ldacFixtureMacAddress = "02:00:00:00:00:01"
+
 @MainActor
 final class LDACDriverInstallerTests: XCTestCase {
     func testInstallationDoesNotClaimLoadedDriverIsUpdated() {
@@ -116,7 +118,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
     func testFinderDefersOwnedRestorationUntilStopIsConfirmed() async throws {
         for phase in [EarbudFindingSession.Phase.connecting, .starting, .ringing, .stopping, .unconfirmed] {
             let (coordinator, headphones, finder, request) = try preparedFinder()
-            let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+            let ldac = preferenceController(devices: coordinator)
             defer { finish(headphones) }
             finder.play(.left)
             if phase != .connecting { await openUnwornEarbud(finder, headphones: headphones) }
@@ -158,7 +160,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
 
     func testFinderDoesNotRetainSupersededConnectionPreferenceOwnership() async throws {
         let (coordinator, headphones, finder, _) = try preparedFinder()
-        let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+        let ldac = preferenceController(devices: coordinator)
         defer { finish(headphones) }
         finder.play(.left)
         await openUnwornEarbud(finder, headphones: headphones)
@@ -175,7 +177,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
     func testStopWaitsForRunningPreferenceRestorationAndCompletesEveryHandlerOnce() async throws {
         for action in [SonyConnectionAlertAction.positive, .negative] {
             let (coordinator, headphones, finder, request) = try preparedFinder()
-            let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+            let ldac = preferenceController(devices: coordinator)
             defer { finish(headphones) }
             finder.play(.left)
             let error = await ldac.simulateConnectionPreferenceRestoration(headphones, request: request)
@@ -210,7 +212,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
 
     func testStopDoesNotStartDeferredRestorationWhileFinderSoundIsUnconfirmed() async throws {
         let (coordinator, headphones, finder, request) = try preparedFinder()
-        let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current })
+        let ldac = preferenceController(devices: coordinator)
         defer { finish(headphones) }
         finder.play(.left)
         await openUnwornEarbud(finder, headphones: headphones)
@@ -239,7 +241,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
         headphones.setConnectionMode(.stableConnection)
         headphones.respondToConnectionAlert(try XCTUnwrap(headphones.connectionTransition?.alert), action: .positive)
         XCTAssertEqual(headphones.connectionMode, .stableConnection)
-        var ldac: LDACController? = LDACController(devices: coordinator, defaults: defaults, inspectDriver: { _ in .current })
+        var ldac: LDACController? = preferenceController(devices: coordinator, defaults: defaults)
         ldac?.simulateRecoverySession(headphones)
         let preparation = Task { try await ldac?.simulateConnectionPreferencePreparation(headphones) }
         for _ in 0..<20 { await Task.yield() }
@@ -256,7 +258,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
 
         let (nextCoordinator, nextHeadphones) = try preparedHeadphones()
         defer { finish(nextHeadphones) }
-        let relaunched = LDACController(devices: nextCoordinator, defaults: defaults, inspectDriver: { _ in .current })
+        let relaunched = preferenceController(devices: nextCoordinator, defaults: defaults)
         nextCoordinator.objectWillChange.send()
         for _ in 0..<20 { await Task.yield() }
         XCTAssertTrue(relaunched.hasPendingConnectionPreferenceRestoration(forAddress: nextHeadphones.address))
@@ -286,7 +288,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
         defer { finish(headphones) }
         let otherAddress = "02:53:4F:4E:59:02"
         defaults.set([headphones.address: UUID().uuidString, otherAddress: UUID().uuidString], forKey: "ldac.pendingConnectionPreferences")
-        let ldac = LDACController(devices: coordinator, defaults: defaults, inspectDriver: { _ in .current })
+        let ldac = preferenceController(devices: coordinator, defaults: defaults)
 
         headphones.simulateProtocolMessage([0xE9, 5, 1, 0])
         for _ in 0..<20 { await Task.yield() }
@@ -312,7 +314,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
             let (coordinator, headphones) = try preparedHeadphones()
             defer { finish(headphones) }
             defaults.set([headphones.address: UUID().uuidString], forKey: "ldac.pendingConnectionPreferences")
-            let ldac = LDACController(devices: coordinator, defaults: defaults, inspectDriver: { _ in .current })
+            let ldac = preferenceController(devices: coordinator, defaults: defaults)
             if explicitRestore { ldac.restorePendingConnectionPreference(forAddress: headphones.address) }
             else { headphones.setConnectionMode(.stableConnection) }
             let request = headphones.lastConnectionModeChangeID
@@ -337,7 +339,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
         defaults.set([headphones.address: UUID().uuidString, otherAddress: UUID().uuidString,
                       "not-an-address": UUID().uuidString, "02:53:4F:4E:59:03": "not-a-request"],
                      forKey: "ldac.pendingConnectionPreferences")
-        let ldac = LDACController(devices: coordinator, defaults: defaults, inspectDriver: { _ in .current })
+        let ldac = preferenceController(devices: coordinator, defaults: defaults)
         XCTAssertFalse(ldac.hasPendingConnectionPreferenceRestoration(forAddress: "not-an-address"))
         XCTAssertFalse(ldac.hasPendingConnectionPreferenceRestoration(forAddress: "02:53:4F:4E:59:03"))
         ldac.keepConnectionPreference(forAddress: headphones.address)
@@ -346,6 +348,11 @@ final class LDACConnectionPreferenceTests: XCTestCase {
         XCTAssertNil(headphones.lastConnectionModeChangeID)
         XCTAssertEqual(headphones.connectionMode, .soundQuality)
         XCTAssertNil(defaults.dictionary(forKey: "ldac.pendingConnectionPreferences")?[headphones.address])
+    }
+
+    private func preferenceController(devices: SonyDeviceCoordinator, defaults: UserDefaults? = nil) -> LDACController {
+        LDACController(devices: devices, defaults: defaults, inspectDriver: { _ in .current },
+                       localBluetoothAddress: { ldacFixtureMacAddress })
     }
 
     private func preparedHeadphones() throws -> (SonyDeviceCoordinator, SonyHeadphonesController) {
@@ -359,6 +366,7 @@ final class LDACConnectionPreferenceTests: XCTestCase {
         }
         coordinator.reconcileConnectedDevices([try XCTUnwrap(SonyConnectedDevice(address: address, name: "WF-1000XM5", model: .wfXM5))])
         let headphones = try XCTUnwrap(coordinator.controller(for: address))
+        XCTAssertEqual(headphones.multipoint.selectedSource?.address, ldacFixtureMacAddress)
         let firmware = Array("6.1.0".utf8)
         headphones.simulateProtocolMessage([0x05, 2, UInt8(firmware.count)] + firmware)
         return (coordinator, headphones)
@@ -523,13 +531,12 @@ final class LDACRecoveryTests: XCTestCase {
         XCTAssertEqual(ldac.simulatedRequestedAddress, headphones.address)
     }
 
-    func testPhoneSourceSuspensionRestoresOrdinaryAudioWhileSleepDoesNot() async throws {
+    func testSuspensionHonorsOrdinaryAudioRestorationRequest() async throws {
         for restoreAudio in [true, false] {
             let (ldac, headphones) = try preparedRecovery()
             defer { headphones.simulateControlLoss() }
 
-            if restoreAudio { ldac.suspend(restoreAudio: true, reason: "another headphone music source is active") }
-            else { ldac.suspend() }
+            ldac.suspend(restoreAudio: restoreAudio, reason: "Fixture suspension")
             for _ in 0..<20 { await Task.yield() }
 
             XCTAssertEqual(ldac.simulatedRestoresAudioOnStop, restoreAudio)
@@ -546,7 +553,7 @@ final class LDACRecoveryTests: XCTestCase {
         for _ in 0..<20 { await Task.yield() }
         XCTAssertEqual(ldac.state, .waitingForDevice)
         XCTAssertEqual(ldac.simulatedRequestedAddress, headphones.address)
-        XCTAssertTrue(ldac.simulatedRestoresAudioOnStop)
+        XCTAssertFalse(ldac.simulatedRestoresAudioOnStop)
         XCTAssertFalse(ldac.isSessionRunning)
     }
 
@@ -577,7 +584,8 @@ final class LDACRecoveryTests: XCTestCase {
         coordinator.reconcileConnectedDevices([try XCTUnwrap(SonyConnectedDevice(address: address, name: "WF-1000XM5", model: .wfXM5))])
         let headphones = try XCTUnwrap(coordinator.controller(for: address))
         let ldac = LDACController(devices: coordinator, inspectDriver: { _ in .current },
-                                  isClassicConnected: isClassicConnected ?? { _ in headphones.isDeviceConnected })
+                                  isClassicConnected: isClassicConnected ?? { _ in headphones.isDeviceConnected },
+                                  localBluetoothAddress: { ldacFixtureMacAddress })
         ldac.simulateRecoverySession(headphones)
         return (ldac, headphones)
     }

@@ -4,11 +4,14 @@ import Foundation
 import Security
 
 private enum LDACOwnerCommand: Codable, Sendable {
-    case claim(UUID, String, String, LDACSampleRate)
+    case claim(UUID, String, String, LDACSampleRate, requiresIdlePriority: Bool, expectedDefaultOutputUID: String?)
     case cancelStart
+    case checkCapturePermission(LDACSampleRate)
     case configure(Int, ClosedRange<Int>, Bool)
     case priority
     case handoff
+    case parkOutput
+    case resumeParkedOutput
     case validate
     case reconnect
     case prepared
@@ -18,10 +21,13 @@ private enum LDACOwnerCommand: Codable, Sendable {
     case recover(String)
     case verify(String)
     case allowHandoff
+    case park
+    case resumeParkedStream
+    case allowParkedStart(UUID)
     case gain(Double)
-    case quality(LDACQuality)
-    case release(Bool)
-    case restore(LDACRouteRecovery)
+    case configuration(LDACConfiguration)
+    case release(disconnected: Bool, restoreHeadphoneOutput: Bool)
+    case restore(LDACRouteRecovery, restoreHeadphoneOutput: Bool)
 }
 
 private struct LDACOwnerRequest: Codable, Sendable {
@@ -43,12 +49,16 @@ struct LDACOwnerError: LocalizedError, Codable, Sendable {
     let diagnostic: LDACNativeSession.Diagnostic?
     let ownerID: UUID?
     var outputDeselected: Bool = false
+    var noSafePhoneFallback: Bool = false
+    let captureAccess: LDACAudioCaptureAccess?
     var errorDescription: String? { message }
 
-    init(message: String, diagnostic: LDACNativeSession.Diagnostic? = nil, ownerID: UUID? = nil) {
+    init(message: String, diagnostic: LDACNativeSession.Diagnostic? = nil, ownerID: UUID? = nil,
+         captureAccess: LDACAudioCaptureAccess? = nil) {
         self.message = message
         self.diagnostic = diagnostic
         self.ownerID = ownerID
+        self.captureAccess = captureAccess
     }
 
     @MainActor
@@ -57,6 +67,7 @@ struct LDACOwnerError: LocalizedError, Codable, Sendable {
                   diagnostic: .init(stage: "native output", detail: LDACNativeOutput.diagnosticDescription(error), isFailure: !(error is CancellationError)),
                   ownerID: ownerID)
         outputDeselected = error is LDACOutputDeselectedError
+        noSafePhoneFallback = error is LDACPhoneFallbackUnavailableError
     }
 }
 
@@ -119,19 +130,19 @@ private final class LDACOwnerChannel: @unchecked Sendable {
         return controls
     }
 
-    func finish(disconnected: Bool) throws {
+    func finish(disconnected: Bool, restoreHeadphoneOutput: Bool) throws {
         lock.lock()
         closing = true
         lock.unlock()
-        _ = try request(.release(disconnected), timeout: 120)
+        _ = try request(.release(disconnected: disconnected, restoreHeadphoneOutput: restoreHeadphoneOutput), timeout: 120)
         guard exited.wait(timeout: .now() + 3) == .success else {
             throw LDACOwnerError(message: String(localized: "LDAC did not stop completely."))
         }
     }
 
-    func restore(_ recovery: LDACRouteRecovery) throws {
+    func restore(_ recovery: LDACRouteRecovery, restoreHeadphoneOutput: Bool) throws {
         lock.withLock { closing = true }
-        _ = try request(.restore(recovery), timeout: 65)
+        _ = try request(.restore(recovery, restoreHeadphoneOutput: restoreHeadphoneOutput), timeout: 65)
         guard exited.wait(timeout: .now() + 3) == .success else {
             throw LDACOwnerError(message: String(localized: "LDAC did not stop completely."))
         }
@@ -211,18 +222,23 @@ final class LDACOwnerOutput {
     private var channel: LDACOwnerChannel?
     fileprivate var sessionReceiver: (UUID, (LDACNativeSession.Event) -> Void)?
     private(set) var controls = LDACNativeVolume(scalar: 0, muted: true)
+    var savedDefaultOutputUID: String? { channel?.recoveryState?.defaultOutputUID }
 
     init(id: UUID, address: String, changed: @escaping (Result<LDACNativeVolume, Error>) -> Void) {
         self.id = id
         self.changed = changed
     }
 
-    func claim(model: String, targetAddress: String, sampleRate: LDACSampleRate = .hz48000) async throws {
+    func claim(model: String, targetAddress: String, sampleRate: LDACSampleRate = .hz48000,
+               requiresIdlePriority: Bool = false, expectedDefaultOutputUID: String? = nil) async throws {
         let channel = try LDACOwnerChannel { [weak self] message in self?.receive(message) }
         self.channel = channel
         do {
             let controls = try await withTaskCancellationHandler {
-                try await Task.detached { try channel.request(.claim(self.id, targetAddress, model, sampleRate), timeout: 65) }.value
+                try await Task.detached {
+                    try channel.request(.claim(self.id, targetAddress, model, sampleRate, requiresIdlePriority: requiresIdlePriority,
+                        expectedDefaultOutputUID: expectedDefaultOutputUID), timeout: 65)
+                }.value
             } onCancel: {
                 try? channel.send(.cancelStart)
             }
@@ -238,8 +254,32 @@ final class LDACOwnerOutput {
         try await request(.configure(volume, range, preservingUserChange))
     }
 
+    func checkCapturePermission(at sampleRate: LDACSampleRate) async throws {
+        guard let channel else { throw LDACOwnerError(message: String(localized: "LDAC playback stopped unexpectedly. Try again.")) }
+        try await withTaskCancellationHandler {
+            do {
+                _ = try await Task.detached { try channel.request(.checkCapturePermission(sampleRate), timeout: 100) }.value
+            } catch {
+                try Task.checkCancellation()
+                throw error
+            }
+            try Task.checkCancellation()
+        } onCancel: {
+            try? channel.send(.cancelStart)
+        }
+    }
+
     func priorityControl() async throws { try await request(.priority) }
     func selectForHandoff() async throws { try await request(.handoff) }
+    func parkForPhone() async throws -> Bool {
+        do {
+            try await request(.parkOutput)
+            return true
+        } catch let error as LDACOwnerError where error.noSafePhoneFallback {
+            return false
+        }
+    }
+    func resumeFromPhone() async throws { try await request(.resumeParkedOutput) }
     func validateForRecovery() async throws { try await request(.validate) }
     func prepareForReconnect() async throws { try await request(.reconnect) }
     func finishPreparation() async throws { try await request(.prepared) }
@@ -249,12 +289,14 @@ final class LDACOwnerOutput {
         catch { changed(.failure(error)) }
     }
 
-    func restoreAndRelease(targetDisconnected: Bool = false) async -> String? {
+    func restoreAndRelease(targetDisconnected: Bool = false, restoreHeadphoneOutput: Bool = true) async -> String? {
         guard let channel else { return nil }
         defer { self.channel = nil }
         if channel.hasEnded && channel.cleaned { return nil }
         do {
-            try await Task.detached { try channel.finish(disconnected: targetDisconnected) }.value
+            try await Task.detached {
+                try channel.finish(disconnected: targetDisconnected, restoreHeadphoneOutput: restoreHeadphoneOutput)
+            }.value
             return nil
         } catch {
             channel.close()
@@ -262,7 +304,7 @@ final class LDACOwnerOutput {
                 do {
                     let replacement = try LDACOwnerChannel { _ in }
                     defer { replacement.close() }
-                    try await Task.detached { try replacement.restore(recovery) }.value
+                    try await Task.detached { try replacement.restore(recovery, restoreHeadphoneOutput: restoreHeadphoneOutput) }.value
                 } catch { return error.localizedDescription }
             }
             return error.localizedDescription
@@ -341,8 +383,11 @@ final class LDACOwnerSession {
     func recoverConnection(reason: String) { output.send(.recover(reason)) }
     func verifyConnectionLoss(reason: String) { output.send(.verify(reason)) }
     func allowHandoff() { output.send(.allowHandoff) }
+    func park() { output.send(.park) }
+    func resumeParkedStream() { output.send(.resumeParkedStream) }
+    func allowParkedStart(_ authorization: UUID) { output.send(.allowParkedStart(authorization)) }
     func updateGain(_ gain: Double) { output.send(.gain(gain)) }
-    func updateQuality(_ quality: LDACQuality) { output.send(.quality(quality)) }
+    func updateConfiguration(_ configuration: LDACConfiguration) { output.send(.configuration(configuration)) }
 }
 
 @MainActor
@@ -380,6 +425,8 @@ enum LDACOwnerWorker {
         private var priority: LDACPriorityControl?
         private var session: LDACNativeSession?
         private var claimTask: Task<Void, Never>?
+        private var permissionCheck: LDACNativeSession?
+        private var verifiedCaptureRate: LDACSampleRate?
         private var startCancelled = false
         private var parentEnded = false
         private var releasing = false
@@ -443,9 +490,10 @@ enum LDACOwnerWorker {
             } catch { scheduleParentExit() }
         }
 
-        private func reply(_ request: LDACOwnerRequest, error: String? = nil, diagnostic: LDACNativeSession.Diagnostic? = nil) {
+        private func reply(_ request: LDACOwnerRequest, error: String? = nil, diagnostic: LDACNativeSession.Diagnostic? = nil,
+                           captureAccess: LDACAudioCaptureAccess? = nil) {
             if let output { send(.recovery(output.routeRecovery)) }
-            let failure = error.map { LDACOwnerError(message: $0, diagnostic: diagnostic, ownerID: outputID) }
+            let failure = error.map { LDACOwnerError(message: $0, diagnostic: diagnostic, ownerID: outputID, captureAccess: captureAccess) }
             if let id = request.id { send(.reply(id, output?.controls, failure)) }
             else if let failure { send(.outputFailure(failure, false)) }
         }
@@ -461,7 +509,7 @@ enum LDACOwnerWorker {
             guard !parentEnded, !releasing else { return }
             do {
                 switch request.command {
-                case let .claim(id, address, model, sampleRate):
+                case let .claim(id, address, model, sampleRate, requiresIdlePriority, expectedDefaultOutputUID):
                     if startCancelled { throw CancellationError() }
                     guard output == nil else { throw LDACOwnerError(message: String(localized: "LDAC playback stopped unexpectedly. Try again.")) }
                     outputID = id
@@ -477,7 +525,8 @@ enum LDACOwnerWorker {
                     self.address = address
                     claimTask = Task {
                         do {
-                            try await output.claim(model: model, targetAddress: address, sampleRate: sampleRate)
+                            try await output.claim(model: model, targetAddress: address, sampleRate: sampleRate,
+                                requiresIdlePriority: requiresIdlePriority, expectedDefaultOutputUID: expectedDefaultOutputUID)
                             try Task.checkCancellation()
                             reply(request)
                         } catch { reply(request, failure: error) }
@@ -485,7 +534,35 @@ enum LDACOwnerWorker {
                         if parentEnded { await restoreAfterParentExit() }
                     }
                     return
-                case .cancelStart: startCancelled = true; claimTask?.cancel()
+                case .cancelStart:
+                    startCancelled = true
+                    claimTask?.cancel()
+                    permissionCheck?.stop(restoreAudio: false)
+                case let .checkCapturePermission(rate):
+                    if startCancelled { throw CancellationError() }
+                    guard let output, let address, claimTask == nil, permissionCheck == nil, session == nil,
+                          output.routeRecovery.sampleRate == rate else {
+                        throw LDACOwnerError(message: String(localized: "System audio recording could not be checked. Try LDAC again."))
+                    }
+                    let id = UUID()
+                    let probe = LDACNativeSession(id: id, address: address, helpers: .init(bundle: .main), gain: 0,
+                        outputDeviceUID: LDACNativeOutput.uid, outputSampleRate: rate,
+                        configuration: .init(sampleRate: rate), capturePermissionMode: .checkOnly) { [weak self] event in
+                        guard let self, self.permissionCheck?.id == id, case let .finished(completion) = event else { return }
+                        self.permissionCheck = nil
+                        if self.startCancelled || self.parentEnded { self.reply(request, failure: CancellationError()) }
+                        else if completion.captureAccess == .ready {
+                            self.verifiedCaptureRate = rate
+                            self.reply(request)
+                        } else {
+                            self.reply(request, error: completion.message ?? String(localized: "System audio recording could not be checked. Try LDAC again."),
+                                       captureAccess: completion.captureAccess)
+                        }
+                        if self.parentEnded { Task { await self.restoreAfterParentExit() } }
+                    }
+                    permissionCheck = probe
+                    probe.start()
+                    return
                 case let .configure(volume, range, preserve): try output?.configure(volume: volume, range: range, preservingUserChange: preserve)
                 case .priority: priority = try output?.priorityControl()
                 case .handoff:
@@ -496,15 +573,33 @@ enum LDACOwnerWorker {
                         try output.selectForHandoff()
                     }
                 case .validate: try output?.validateForRecovery()
+                case .parkOutput:
+                    guard let output else { throw LDACOutputDeselectedError() }
+                    guard try output.parkForPhone() else { throw LDACPhoneFallbackUnavailableError() }
+                case .resumeParkedOutput:
+                    guard let output, output.isParkedForPhone, !output.routeRecovery.selected else { throw LDACOutputDeselectedError() }
+                    try output.validateForRecovery()
+                    let state = output.routeRecovery
+                    send(.recovery(.init(address: state.address, model: state.model, sampleRate: state.sampleRate,
+                        defaults: state.defaults, controls: state.controls, selected: true)))
+                    try output.resumeFromPhone()
                 case .reconnect: priority = try output?.prepareForReconnect()
                 case .prepared: try output?.finishPreparation()
                 case .silence: output?.silence()
                 case let .start(id, configuration, recovery, restore):
-                    guard session == nil, let address, claimTask == nil else { throw LDACOwnerError(message: String(localized: "LDAC did not stop completely.")) }
+                    guard session == nil, let address, claimTask == nil, permissionCheck == nil else { throw LDACOwnerError(message: String(localized: "LDAC did not stop completely.")) }
+                    let capturePermissionMode: LDACNativeSession.CapturePermissionMode =
+                        verifiedCaptureRate == configuration.sampleRate ? .verified : .check
+                    verifiedCaptureRate = nil
+                    let clock = restore ? nil : try output?.nativeClockControl()
                     let session = LDACNativeSession(id: id, address: address, helpers: .init(bundle: .main), gain: 0,
-                        outputDeviceUID: LDACNativeOutput.uid, priority: restore ? nil : priority, configuration: configuration,
-                        recoveryAttempt: recovery, restoringOnly: restore) { [weak self] event in
+                        outputDeviceUID: LDACNativeOutput.uid, outputSampleRate: output?.routeRecovery.sampleRate, clock: clock,
+                        priority: restore ? nil : priority, configuration: configuration,
+                        recoveryAttempt: recovery, restoringOnly: restore, capturePermissionMode: capturePermissionMode) { [weak self] event in
                         guard let self, self.session?.id == id else { return }
+                        if case .formatChanged = event, let output = self.output {
+                            self.send(.recovery(output.routeRecovery))
+                        }
                         if case let .finished(completion) = event {
                             self.session = nil
                             self.restoreAfterSession = completion.canRetry && !completion.waitForReconnect
@@ -515,13 +610,18 @@ enum LDACOwnerWorker {
                     }
                     self.session = session
                     session.start()
-                case let .stop(restore): stoppingRestore = stoppingRestore && restore; session?.stop(restoreAudio: stoppingRestore)
+                case let .stop(restore):
+                    stoppingRestore = stoppingRestore && restore
+                    session?.stop(restoreAudio: stoppingRestore && output?.isParkedForPhone != true)
                 case let .recover(reason): session?.recoverConnection(reason: reason)
                 case let .verify(reason): session?.verifyConnectionLoss(reason: reason)
                 case .allowHandoff: session?.allowHandoff()
+                case .park: session?.park()
+                case .resumeParkedStream: session?.resumeParkedStream()
+                case let .allowParkedStart(authorization): session?.allowParkedStart(authorization)
                 case let .gain(gain): session?.updateGain(gain)
-                case let .quality(quality): session?.updateQuality(quality)
-                case let .restore(recovery):
+                case let .configuration(configuration): session?.updateConfiguration(configuration)
+                case let .restore(recovery, restoreHeadphoneOutput):
                     guard output == nil else { throw LDACOwnerError(message: String(localized: "LDAC did not stop completely.")) }
                     let output = LDACNativeOutput(id: UUID(), address: recovery.address) { _ in }
                     self.output = output
@@ -535,15 +635,15 @@ enum LDACOwnerWorker {
                             failure = error.localizedDescription
                             diagnostic = LDACOwnerError(error).diagnostic
                         }
-                        let restoreError = await output.restoreAndRelease()
+                        let restoreError = await output.restoreAndRelease(restoreHeadphoneOutput: restoreHeadphoneOutput)
                         reply(request, error: failure ?? restoreError, diagnostic: diagnostic)
                         exit(failure == nil && restoreError == nil ? EXIT_SUCCESS : EXIT_FAILURE)
                     }
                     return
-                case let .release(disconnected):
-                    guard session == nil, claimTask == nil else { throw LDACOwnerError(message: String(localized: "LDAC did not stop completely.")) }
+                case let .release(disconnected, restoreHeadphoneOutput):
+                    guard session == nil, claimTask == nil, permissionCheck == nil else { throw LDACOwnerError(message: String(localized: "LDAC did not stop completely.")) }
                     parentEnded = true
-                    Task { await release(disconnected: disconnected, request: request) }
+                    Task { await release(disconnected: disconnected, restoreHeadphoneOutput: restoreHeadphoneOutput, request: request) }
                     return
                 }
                 reply(request)
@@ -560,12 +660,13 @@ enum LDACOwnerWorker {
             parentEnded = true
             claimTask?.cancel()
             output?.silence()
-            if let session { session.stop(restoreAudio: stoppingRestore) }
+            if let session { session.stop(restoreAudio: stoppingRestore && output?.isParkedForPhone != true) }
+            else if let permissionCheck { permissionCheck.stop(restoreAudio: false) }
             else if claimTask == nil { Task { await restoreAfterParentExit() } }
         }
 
         private func restoreAfterParentExit() async {
-            if restoreAfterSession, stoppingRestore, let address {
+            if restoreAfterSession, stoppingRestore, output?.isParkedForPhone != true, let address {
                 restoreAfterSession = false
                 let id = UUID()
                 let session = LDACNativeSession(id: id, address: address, helpers: .init(bundle: .main), gain: 0,
@@ -581,10 +682,11 @@ enum LDACOwnerWorker {
             } else { await release(disconnected: targetDisconnected) }
         }
 
-        private func release(disconnected: Bool, request: LDACOwnerRequest? = nil) async {
+        private func release(disconnected: Bool, restoreHeadphoneOutput: Bool = true, request: LDACOwnerRequest? = nil) async {
             guard !releasing else { return }
             releasing = true
-            let error = await output?.restoreAndRelease(targetDisconnected: disconnected)
+            let error = await output?.restoreAndRelease(targetDisconnected: disconnected,
+                restoreHeadphoneOutput: restoreHeadphoneOutput && stoppingRestore && !disconnected && output?.isParkedForPhone != true)
             if let request { reply(request, error: error) }
             exit(error == nil ? EXIT_SUCCESS : EXIT_FAILURE)
         }

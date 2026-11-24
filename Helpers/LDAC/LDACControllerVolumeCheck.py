@@ -9,6 +9,8 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / "Sources/LDACController.swift").read_text()
 output_source = (root / "Sources/LDACNativeOutput.swift").read_text()
+installer = (root / "Sources/LDACDriverInstaller.swift").read_text()
+driver_states = installer[installer.index("    enum State:"):installer.index("    private static let minimumStreamingRevision")]
 
 
 def member(name):
@@ -18,9 +20,11 @@ def member(name):
 
 
 volume = output_source[output_source.index("struct LDACNativeVolume:"):output_source.index("\nstruct LDACRouteRecovery")]
+transfer = output_source[output_source.index("    nonisolated static func canTransferControls("):output_source.index("    func claim(")]
 fixture = r'''
 import Foundation
 import Combine
+import CoreAudio
 
 func check(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "Fixture assertion failed") {
     if !condition() {
@@ -32,13 +36,21 @@ func check(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> S
 enum Generation { case v1, v2 }
 enum Model { case unknown, wfXM3, whCH720N, whXM4, wfXM5; var name: String { "fixture" } }
 struct LDACFormat: Equatable { var value = 1 }
-enum LDACState: Equatable { case off, requested, waitingForDevice, connecting, active(LDACFormat), stopping, failed(String) }
+enum LDACState: Equatable { case off, requested, waitingForDevice, waitingForMac, connecting, active(LDACFormat), stopping, failed(String) }
 enum LDACAudioCaptureAccess { case unchecked, checking, ready, permissionRequired }
 enum LDACQuality { case connection, balanced, quality, adaptive }
+typealias LDACSampleRate = Int
+extension LDACSampleRate { var displayName: String { String(self) } }
 struct LDACConfiguration: Equatable { var sampleRate = 48000; var quality = LDACQuality.connection }
 struct LDACPriorityControl {}
 struct LDACPriorityCleanupError: Error {}
-struct LDACOwnerError: Error { var outputDeselected = false }
+struct LDACOwnerError: Error {
+    var outputDeselected = false
+    var captureAccess: LDACAudioCaptureAccess? = nil
+}
+extension LDACOwnerError {
+    init(_ error: LDACOutputDeselectedError) { self.init(outputDeselected: true) }
+}
 enum SonyBLEIdentity { static func normalizedAddress(_ address: String) -> String? { address.uppercased() } }
 struct IOBluetoothDevice {
     init?(addressString: String) {}
@@ -64,14 +76,23 @@ struct EarbudFinder {
 @MainActor
 final class MacAudioRouteObserver {
     var route: Route? = Route(uid: "fixture-headphones")
+    var currentOutputUID: String?
+    var currentOutputTransport = kAudioDeviceTransportTypeBluetooth
+    func isDefaultOutput(_ uid: String, transport: UInt32? = nil) -> Bool {
+        (currentOutputUID ?? route?.uid) == uid && (transport == nil || transport == currentOutputTransport)
+    }
 }
 @MainActor
 enum LDACDriverInstaller {
-    enum State { case current }
+__DRIVER_STATES__
     static func inspect(bundle: Bundle) -> State { .current }
 }
 
 __VOLUME__
+
+struct MenuBarHeadphoneControls {
+    init(_ headphones: SonyHeadphonesController) {}
+}
 
 @MainActor
 final class SonyHeadphonesController: ObservableObject {
@@ -86,8 +107,18 @@ final class SonyHeadphonesController: ObservableObject {
         var musicMuted: Bool?
         var callMuted: Bool?
     }
-    struct Source { var address: String }
-    struct Multipoint { var selectedSource: Source? }
+    struct Source { var address: String; var isConnected = true }
+    struct Multipoint {
+        var selectedSource: Source?
+        var inventoryIsStale = false
+        var supportsInventory = true
+        var devices: [Source] = []
+        var keeping: Bool? = false
+        func sourceSwitchPayload(address: String) -> [UInt8]? {
+            guard !inventoryIsStale, keeping != nil, devices.contains(where: { $0.address == address && $0.isConnected }) else { return nil }
+            return [0x3C, 0x01] + Array(address.utf8)
+        }
+    }
     struct VolumeWrite { let volume: Int; let isCurrent: (() -> Bool)? }
     var deviceModel = Model.whXM4
     var address = "02:00:00:00:00:01"
@@ -95,9 +126,92 @@ final class SonyHeadphonesController: ObservableObject {
     var multipoint = Multipoint()
     var earbudFinder: EarbudFinder?
     var isReady = true
+    enum LinkState { case disconnected, opening, handshaking, ready, controlBusy }
+    var linkState = LinkState.ready
+    var hasCachedControlChannel = true
+    var coldControlReopens = 0
     var isDeviceConnected = true
+    var hasCurrentTable2Capabilities = true
     var supportsConnectionMode = true
     var ldacRequiresMultipointOff = false
+    enum PreparationIssue {
+        case selectMac(Source?)
+        var message: String { "Select this Mac" }
+    }
+    struct SourceTransition {
+        enum Phase { case queued, awaitingSelection, queuedReadback, verifying, complete, failed }
+        var phase = Phase.queued
+        var isFinished: Bool { phase == .complete || phase == .failed }
+        var requestID = UUID()
+        var session: UInt64
+        var targetAddress: String?
+        var failureMessage: String?
+    }
+    var preparationIssue: PreparationIssue?
+    var sourceControlUnavailableReason: String?
+    @Published var sourceTransition: SourceTransition?
+    var sourceRequests: [String] = []
+    var sourceUnlocks = 0
+    var defersSourceWrite = false
+    static var sourceSelectionTimeout: TimeInterval = 10
+    var pendingSourceWrite: (() -> Void)?
+    var playbackSourceGeneration: UInt64 = 0
+    let musicSourceConfirmations = PassthroughSubject<Source?, Never>()
+    func ldacPreparationIssue(for address: String?) -> PreparationIssue? { preparationIssue }
+    func selectAudioSource(_ source: Source, isCurrent: (() -> Bool)? = nil) {
+        let transition = SourceTransition(session: notificationSession, targetAddress: source.address)
+        sourceTransition = transition
+        if multipoint.keeping == true { sourceUnlocks += 1; return }
+        let write = { [weak self] in
+            guard let self, self.isQueuedAudioSourceSelection(transition.requestID) else { return }
+            guard isCurrent?() != false else {
+                self.sourceTransition?.phase = .failed
+                return
+            }
+            self.sourceRequests.append(source.address)
+            self.sourceTransition?.phase = .awaitingSelection
+        }
+        if defersSourceWrite { pendingSourceWrite = write }
+        else { write() }
+    }
+    func isQueuedAudioSourceSelection(_ request: UUID) -> Bool {
+        sourceTransition?.requestID == request && sourceTransition?.phase == .queued
+    }
+    func cancelQueuedAudioSourceSelection(_ request: UUID, expired: Bool) {
+        guard isQueuedAudioSourceSelection(request) else { return }
+        sourceTransition?.phase = .failed
+        sourceTransition?.failureMessage = expired ? "The source selection timed out" : "The source selection was cancelled"
+    }
+    func reportAudioSource(_ source: Source?) {
+        if multipoint.selectedSource?.address != source?.address { playbackSourceGeneration += 1 }
+        multipoint.selectedSource = source
+    }
+    func reportMusicSource(_ source: Source?) {
+        objectWillChange.send()
+        let changed = multipoint.selectedSource?.address != source?.address
+        reportAudioSource(source)
+        localSource = source?.address == "02:00:00:00:00:02"
+        if changed {
+            statusFresh = false
+            volumeFresh = false
+            musicStatusReadbackID = nil
+            musicVolumeReadbackID = nil
+        }
+    }
+    func confirmMusicSource(_ source: Source?) {
+        reportMusicSource(source)
+        if source != nil, source?.address == sourceRequests.last,
+           sourceTransition?.phase == .awaitingSelection || sourceTransition?.phase == .verifying {
+            sourceTransition?.phase = .complete
+        }
+        musicSourceConfirmations.send(source)
+    }
+    func confirmAudioSource(_ source: Source) {
+        reportAudioSource(source)
+        sourceTransition?.phase = .complete
+        preparationIssue = nil
+        localSource = true
+    }
     @Published var connectionMode: SonyConnectionMode? = .soundQuality
     @Published var connectionTransition: ConnectionTransition?
     var lastConnectionModeChangeID: UUID?
@@ -105,8 +219,10 @@ final class SonyHeadphonesController: ObservableObject {
     var connectionRequests: [SonyConnectionMode] = []
     var notificationSession: UInt64 = 1
     var capabilityFresh = true
+    var lastReadyMenuBarControls: MenuBarHeadphoneControls?
     var statusFresh = true
     var volumeFresh = true
+    var playbackAvailable = true
     var statusReadPending = false
     var volumeReadPending = false
     var localSource = true
@@ -124,7 +240,12 @@ final class SonyHeadphonesController: ObservableObject {
     var blocksPlaybackCommands = false
     var transmitted: [Int] = []
     var continuation: CheckedContinuation<Void, Error>?
-    var hasCurrentMusicVolumeControl: Bool { isReady && !requiredMusicVolumeReadTimedOut && capabilityFresh && statusFresh && volumeFresh && playback.volume != nil }
+    private var hasCurrentMusicVolumeData: Bool { isReady && !requiredMusicVolumeReadTimedOut && capabilityFresh && statusFresh && volumeFresh && playback.volume != nil }
+    var hasCurrentMusicVolumeRead: Bool { hasCurrentMusicVolumeData && !blocksPlaybackCommands && queuedWrite == nil }
+    var hasFreshReadableMusicVolumeReadback: Bool {
+        hasCurrentMusicVolumeRead && musicStatusReadbackID != nil && musicVolumeReadbackID != nil && !statusReadPending && !volumeReadPending
+    }
+    var hasCurrentMusicVolumeControl: Bool { hasCurrentMusicVolumeData && playbackAvailable }
     var hasFreshMusicVolumeReadback: Bool { hasCurrentMusicVolumeControl && canControlMusicVolume && !statusReadPending && !volumeReadPending }
     var canControlMusicVolume: Bool { hasCurrentMusicVolumeControl && !blocksPlaybackCommands && queuedWrite == nil }
     func hasCurrentMusicSourceContext(for address: String?) -> Bool { localSource }
@@ -142,6 +263,12 @@ final class SonyHeadphonesController: ObservableObject {
     }
     func canPerformConfirmedSettingChange(_ setting: Setting) -> Bool { isReady && !blocksPlaybackCommands && queuedWrite == nil }
     func refresh() { refreshes += 1 }
+    func retryControlsIfNeeded(forColdLDAC: Bool = false) -> Bool {
+        guard forColdLDAC, linkState == .disconnected || linkState == .controlBusy, hasCachedControlChannel else { return false }
+        coldControlReopens += 1
+        linkState = .opening
+        return true
+    }
     func requestCurrentSettings() { settingsRefreshes += 1; statusReadPending = true; volumeReadPending = true }
     func recoverMusicVolumeIfNeeded() -> Bool {
         volumeRecoveryAttempts += 1
@@ -205,6 +332,8 @@ final class SonyHeadphonesController: ObservableObject {
     }
 }
 
+typealias SonyMultipointDevice = SonyHeadphonesController.Source
+
 @MainActor
 final class SonyDeviceCoordinator: ObservableObject {
     var controllers: [String: SonyHeadphonesController] = [:]
@@ -219,6 +348,9 @@ final class LDACNativeOutput {
     var controls = LDACNativeVolume(scalar: 0.8, muted: false)
     var ready = false
     var selected = false
+    var selections = 0
+    var selectionError: Error?
+    var didSelect: (() -> Void)?
     var preparations = 0
     var silences = 0
     var configurations = 0
@@ -227,13 +359,47 @@ final class LDACNativeOutput {
     var configurationWaiter: CheckedContinuation<Void, Never>?
     var blocksPreparation = false
     var preparationWaiter: CheckedContinuation<Void, Never>?
+    var blocksClaim = false
+    var claimWaiter: CheckedContinuation<Void, Never>?
+    var claimError: Error?
+    var claims: [Bool] = []
+    var expectedDefaultOutputUIDs: [String?] = []
+    var savedDefaultOutputUID: String? = "fixture-headphones"
+    var permissionWaiter: CheckedContinuation<Void, Never>?
+    var permissionError: Error?
+    var blocksPermission = false
+    var permissionChecks: [Int] = []
+    var priorityRequests = 0
     var restores: [Bool] = []
+    var restoredHeadphoneOutputs: [Bool] = []
     var restoreError: String?
+    var parkRequests = 0
+    var resumeRequests = 0
+    var parkResult = true
+    var parkError: Error?
+    var blocksPark = false
+    var parkWaiter: CheckedContinuation<Void, Never>?
+    var didPark: (() -> Void)?
+    var didResume: (() -> Void)?
     let changed: (Result<LDACNativeVolume, Error>) -> Void
     init(id: UUID, address: String, changed: @escaping (Result<LDACNativeVolume, Error>) -> Void) { self.changed = changed }
     func simulateControls(_ controls: LDACNativeVolume) { self.controls = controls; changed(.success(controls)) }
-    func claim(model: String, targetAddress: String, sampleRate: Int) async throws {}
-    func priorityControl() async throws {}
+    __TRANSFER__
+    func claim(model: String, targetAddress: String, sampleRate: Int, requiresIdlePriority: Bool = false,
+               expectedDefaultOutputUID: String? = nil) async throws {
+        claims.append(requiresIdlePriority)
+        expectedDefaultOutputUIDs.append(expectedDefaultOutputUID)
+        if blocksClaim { await withCheckedContinuation { claimWaiter = $0 } }
+        try Task.checkCancellation()
+        if let claimError { throw claimError }
+    }
+    func checkCapturePermission(at sampleRate: Int) async throws {
+        permissionChecks.append(sampleRate)
+        if blocksPermission { await withCheckedContinuation { permissionWaiter = $0 } }
+        try Task.checkCancellation()
+        if let permissionError { throw permissionError }
+    }
+    func priorityControl() async throws { priorityRequests += 1 }
     func configure(volume: Int, range: ClosedRange<Int>, preservingUserChange: Bool = false) async throws {
         configurations += 1
         if blocksConfiguration { await withCheckedContinuation { configurationWaiter = $0 } }
@@ -241,14 +407,43 @@ final class LDACNativeOutput {
     }
     func validateForRecovery() async throws {}
     func prepareForReconnect() async throws { recoveryPreparations += 1 }
-    func selectForHandoff() async throws { selected = true }
+    func selectForHandoff() async throws {
+        if let selectionError { throw selectionError }
+        if selected { return }
+        selected = true
+        selections += 1
+        didSelect?()
+    }
+    func parkForPhone() async throws -> Bool {
+        parkRequests += 1
+        if blocksPark { await withCheckedContinuation { parkWaiter = $0 } }
+        try Task.checkCancellation()
+        if let parkError { throw parkError }
+        if parkResult {
+            ready = false
+            selected = false
+            didPark?()
+        }
+        return parkResult
+    }
+    func resumeFromPhone() async throws {
+        resumeRequests += 1
+        selected = true
+        didResume?()
+    }
     func finishPreparation() async throws {
         ready = true
         preparations += 1
         if blocksPreparation { await withCheckedContinuation { preparationWaiter = $0 } }
     }
     func silence() { ready = false; silences += 1 }
-    func restoreAndRelease(targetDisconnected: Bool = false) async -> String? { restores.append(targetDisconnected); ready = false; selected = false; return restoreError }
+    func restoreAndRelease(targetDisconnected: Bool = false, restoreHeadphoneOutput: Bool = true) async -> String? {
+        restores.append(targetDisconnected)
+        restoredHeadphoneOutputs.append(restoreHeadphoneOutput)
+        ready = false
+        selected = false
+        return restoreError
+    }
 }
 
 typealias LDACOwnerOutput = LDACNativeOutput
@@ -261,7 +456,9 @@ final class LDACNativeSession {
     struct Completion { var message: String?; var canRetry = false; var requiresAttention = false; var targetDisconnected = false; var waitForReconnect = false }
     enum Event {
         case diagnostic(Diagnostic)
-        case handoffReady, connecting, active(LDACFormat), formatChanged(LDACFormat), gainApplied(Double)
+        case handoffReady, connecting, ownedMediaReady, active(LDACFormat), warmHeld, warmCaptureReady(UUID), warmResumed(LDACFormat), formatChanged(LDACFormat), gainApplied(Double)
+        case sampleRateChangeRejected(requested: LDACSampleRate, active: LDACSampleRate)
+        case sampleRateChangeDeferred(requested: LDACConfiguration, active: LDACSampleRate)
         case audioCaptureAccess(LDACAudioCaptureAccess), failed(String), connectionLost(String), finished(Completion)
     }
     let id: UUID
@@ -269,11 +466,14 @@ final class LDACNativeSession {
     let restoringOnly: Bool
     let receive: (Event) -> Void
     var gains: [Double]
-    var qualities: [LDACQuality] = []
+    var configurations: [LDACConfiguration] = []
     var stops = 0
     var recoveries: [String] = []
     var audioRestorations: [Bool] = []
     var handoffs = 0
+    var parkRequests = 0
+    var resumeRequests = 0
+    var parkedStartAuthorizations: [UUID] = []
     init(id: UUID, address: String, helpers: Helpers, gain: Double, outputDeviceUID: String,
          priority: LDACPriorityControl?, configuration: LDACConfiguration, recoveryAttempt: Bool,
          restoringOnly: Bool, receive: @escaping (Event) -> Void) {
@@ -292,8 +492,11 @@ final class LDACNativeSession {
     func start() {}
     func emit(_ event: Event) { receive(event) }
     func allowHandoff() { handoffs += 1 }
+    func park() { parkRequests += 1 }
+    func resumeParkedStream() { resumeRequests += 1 }
+    func allowParkedStart(_ authorization: UUID) { parkedStartAuthorizations.append(authorization) }
     func updateGain(_ gain: Double) { gains.append(gain) }
-    func updateQuality(_ quality: LDACQuality) { qualities.append(quality) }
+    func updateConfiguration(_ configuration: LDACConfiguration) { configurations.append(configuration) }
     func stop(restoreAudio: Bool) { stops += 1; audioRestorations.append(restoreAudio) }
     func recoverConnection(reason: String) { recoveries.append(reason) }
     func verifyConnectionLoss(reason: String) {}
@@ -303,6 +506,8 @@ final class LDACNativeSession {
 final class Controller: ObservableObject {
     var state = LDACState.off
     var targetAddress: String?
+    var menuBarControlOrigin: (controller: ObjectIdentifier, session: UInt64)?
+    var menuBarControlsAtHandoff: MenuBarHeadphoneControls?
     var isSessionRunning = false
     var isRecovering = false
     var audioCaptureAccess = LDACAudioCaptureAccess.unchecked
@@ -311,7 +516,20 @@ final class Controller: ObservableObject {
     var requestedAddress: String?
     var requestedConfiguration = LDACConfiguration()
     var diagnosticAttempt = 0
-    var nativeOutput: LDACNativeOutput?
+    var nativeOutput: LDACNativeOutput? {
+        didSet {
+            nativeOutput?.didSelect = { [weak self] in self?.audioRoute?.currentOutputUID = LDACNativeOutput.uid }
+            nativeOutput?.didPark = { [weak self] in
+                let uid = self?.nativeOutput?.savedDefaultOutputUID
+                self?.audioRoute?.route = Route(uid: uid)
+                self?.audioRoute?.currentOutputUID = uid
+            }
+            nativeOutput?.didResume = { [weak self] in
+                self?.audioRoute?.route = Route(uid: LDACNativeOutput.uid)
+                self?.audioRoute?.currentOutputUID = LDACNativeOutput.uid
+            }
+        }
+    }
     var outputID: UUID?
     var headphones: SonyHeadphonesController?
     let bundle = Bundle.main
@@ -319,6 +537,7 @@ final class Controller: ObservableObject {
     var isClassicConnected: (String) -> Bool = { _ in true }
     var driverState = LDACDriverInstaller.State.current
     var audioRoute: MacAudioRouteObserver? = MacAudioRouteObserver()
+    let localBluetoothAddress = { IOBluetoothHostController.default()?.addressAsString() }
     var resumeOutputUID: String?
     var suspensionRequested = false
     var multipointConflictAddress: String?
@@ -326,6 +545,11 @@ final class Controller: ObservableObject {
     var multipointShutdownAddress: String?
     var multipointShutdownTask: Task<Void, Never>?
     var multipointShutdownRequestID: UUID?
+    var preparationTask: Task<Void, Never>?
+    var isPreparingSourceChange = false
+    var startupSourceReturn: (source: String, session: UInt64, generation: UInt64, request: UUID)?
+    var pendingStartupSourceSelection: (source: String, mac: String, session: UInt64, generation: UInt64,
+                                        request: UUID, deadline: ContinuousClock.Instant, outputDeselected: Bool)?
     func confirmPendingMultipointAlert() {}
     var pendingConnectionModes: [String: UUID] = [:]
     var deferredConnectionModes: [String: UUID] = [:]
@@ -333,6 +557,17 @@ final class Controller: ObservableObject {
     var connectionModeRestoreID: UUID?
     var connectionModeConfirmed = false
     var controlObservation: AnyCancellable?
+    enum PhoneHandoffPhase { case suspending, yieldingOutput, held, selectingOutput, restarting, confirmingVolume }
+    var phoneHandoff: (peer: String, session: UInt64, generation: UInt64, confirmed: Bool, returned: Bool, phase: PhoneHandoffPhase)?
+    var phoneSourceObservation: AnyCancellable?
+    var phoneHandoffTask: Task<Void, Never>?
+    var phoneVolumeWakeup: Task<Void, Never>?
+    var pendingPhoneSelection: SonyMultipointDevice?
+    var phoneSourceRequest: UUID?
+    var phoneSelectionAuthorization: (id: UUID, request: UUID?, output: String, deadline: ContinuousClock.Instant, isCurrent: () -> Bool)?
+    var deselectedSourceObservation: AnyCancellable?
+    var deselectedSourceReturn: (controller: ObjectIdentifier, session: UInt64, generation: UInt64)?
+    var sourceResumeOutputUID: String?
     var startTask: Task<Void, Never>?
     var readinessTask: Task<Void, Never>?
     var volumeTask: Task<Void, Never>?
@@ -355,6 +590,9 @@ final class Controller: ObservableObject {
     var usable = false
     var requestedOutputGain = 0.0
     var volumeError: String?
+    var sampleRateChangeError: String?
+    var restoredRates: [LDACSampleRate] = []
+    func restoreSampleRate(_ rate: LDACSampleRate) { restoredRates.append(rate) }
     var stopCompletions: [@MainActor () -> Void] = []
     let helpers = LDACNativeSession.Helpers()
     var devices: SonyDeviceCoordinator? = SonyDeviceCoordinator()
@@ -378,18 +616,23 @@ enum Check {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(5))
         }
-        preconditionFailure("Production controller did not reach the expected fixture state at line \(line)")
+        check(false, "Production controller did not reach the expected fixture state at line \(line)")
     }
 
     @MainActor
-    static func started(_ generation: Generation = .v1, supportsMute: Bool = false, musicMuted: Bool? = nil) async throws -> (Controller, SonyHeadphonesController, LDACNativeOutput, LDACNativeSession) {
+    static func started(_ generation: Generation = .v1, supportsMute: Bool = false, musicMuted: Bool? = nil,
+                        playbackAvailable: Bool = true, initialRouteUID: String = "fixture-headphones",
+                        initialSource: SonyMultipointDevice? = nil) async throws -> (Controller, SonyHeadphonesController, LDACNativeOutput, LDACNativeSession) {
         let controller = Controller()
         let headphones = SonyHeadphonesController()
         headphones.playback.generation = generation
         headphones.playback.supportsMute = supportsMute
         headphones.playback.musicMuted = musicMuted
+        headphones.playbackAvailable = playbackAvailable
         headphones.localSource = generation == .v2
+        headphones.multipoint.selectedSource = initialSource
         controller.devices?.controllers[headphones.address] = headphones
+        controller.audioRoute?.route = Route(uid: initialRouteUID)
         controller.requestedAddress = headphones.address
         controller.start(headphones.address)
         try await waitUntil { headphones.volumeRefreshes == 1 || headphones.refreshes != 0 }
@@ -401,6 +644,7 @@ enum Check {
         headphones.receiveStatus()
         try await waitUntil { controller.session != nil }
         headphones.volumeRefreshes = 0
+        controller.nativeOutput?.savedDefaultOutputUID = initialRouteUID
         return (controller, headphones, controller.nativeOutput!, controller.session!)
     }
 
@@ -412,8 +656,36 @@ enum Check {
     }
 
     @MainActor
-    static func active(_ generation: Generation) async throws -> (Controller, SonyHeadphonesController, LDACNativeOutput, LDACNativeSession) {
-        let (controller, headphones, output, raw) = try await started(generation)
+    static func startedWithSourceHandoff() async throws -> (Controller, SonyHeadphonesController, LDACNativeOutput, LDACNativeSession, SonyMultipointDevice) {
+        let controller = Controller()
+        let device = SonyHeadphonesController()
+        let mac = SonyMultipointDevice(address: "02:00:00:00:00:02")
+        let phone = SonyMultipointDevice(address: "02:00:00:00:00:03")
+        device.playback.generation = .v2
+        device.localSource = false
+        device.multipoint.selectedSource = phone
+        device.multipoint.devices = [mac, phone]
+        device.preparationIssue = .selectMac(mac)
+        controller.devices?.controllers[device.address] = device
+        controller.requestedAddress = device.address
+        controller.start(device.address, selectingSource: mac)
+        try await waitUntil { device.sourceRequests == [mac.address] }
+        device.confirmAudioSource(mac)
+        try await waitUntil { device.statusReadPending && device.volumeReadPending }
+        device.receiveStatus()
+        device.receiveVolume()
+        try await waitUntil { controller.session != nil }
+        let raw = controller.session!
+        raw.emit(.handoffReady)
+        try await waitUntil { raw.handoffs == 1 }
+        precondition(controller.startupSourceReturn?.source == phone.address)
+        return (controller, device, controller.nativeOutput!, raw, phone)
+    }
+
+    @MainActor
+    static func active(_ generation: Generation, initialRouteUID: String = "fixture-headphones",
+                       initialSource: SonyMultipointDevice? = nil) async throws -> (Controller, SonyHeadphonesController, LDACNativeOutput, LDACNativeSession) {
+        let (controller, headphones, output, raw) = try await started(generation, initialRouteUID: initialRouteUID, initialSource: initialSource)
         raw.emit(.handoffReady)
         try await waitUntil { raw.handoffs == 1 }
         raw.emit(.active(LDACFormat()))
@@ -430,8 +702,824 @@ enum Check {
     }
 
     @MainActor
+    static func checkPhoneHandoffs() async throws {
+        let mac = SonyMultipointDevice(address: "02:00:00:00:00:02")
+        let phone = SonyMultipointDevice(address: "02:00:00:00:00:03")
+        let other = SonyMultipointDevice(address: "02:00:00:00:00:04")
+        let original = "02:00:00:00:00:01:output"
+        func startedHandoff() async throws -> (Controller, SonyHeadphonesController, LDACNativeOutput, LDACNativeSession) {
+            let (controller, device, output, raw) = try await active(.v2, initialRouteUID: original, initialSource: mac)
+            device.multipoint.devices = [mac, phone, other]
+            precondition(raw.gains.last == 1 && output.selected && output.ready)
+            device.confirmMusicSource(phone)
+            precondition(raw.gains.last == 0 && !output.ready, "A confirmed phone selection did not synchronously mute LDAC")
+            try await waitUntil { raw.parkRequests == 1 }
+            precondition(raw.stops == 0 && raw.recoveries.isEmpty && output.parkRequests == 0,
+                         "A confirmed phone source tore down or moved the route before native suspension")
+            return (controller, device, output, raw)
+        }
+
+        for timing in ["held", "during HAL park", "before native hold"] {
+            let (controller, device, output, raw) = try await startedHandoff()
+            device.musicSourceConfirmations.send(phone)
+            precondition(raw.parkRequests == 1 && raw.resumeRequests == 0, "A duplicate phone notification restarted suspension")
+            let writes = device.transmitted
+            let claimed = output.claims
+            let unrestrictedGain = raw.gains.count
+            if timing == "before native hold" {
+                device.confirmMusicSource(mac)
+                precondition(raw.resumeRequests == 0 && output.resumeRequests == 0,
+                             "Returning Mac audio resumed before native suspension")
+            }
+            output.blocksPark = timing == "during HAL park"
+            raw.emit(.warmHeld)
+            if timing == "during HAL park" {
+                try await waitUntil { output.parkWaiter != nil }
+                device.confirmMusicSource(mac)
+                precondition(raw.resumeRequests == 0 && output.resumeRequests == 0,
+                             "Returning Mac audio resumed before the parked output yielded")
+                output.parkWaiter?.resume()
+            } else if timing == "held" {
+                try await waitUntil { controller.state == .waitingForMac && !output.selected }
+                try await Task.sleep(for: .seconds(5.2))
+                precondition(controller.state == .waitingForMac && controller.session === raw && controller.nativeOutput === output
+                             && raw.stops == 0 && output.restores.isEmpty && raw.resumeRequests == 0,
+                             "The controller expired a validated phone hold")
+                precondition(device.transmitted == writes && device.sourceRequests.isEmpty && device.connectionRequests.isEmpty
+                             && raw.recoveries.isEmpty && device.refreshes == 0,
+                             "Waiting for the Mac sent a Sony setting or initiated a connection")
+                device.confirmMusicSource(mac)
+            }
+            try await waitUntil { device.statusReadPending && device.volumeReadPending }
+            precondition(output.resumeRequests == 0 && raw.resumeRequests == 0,
+                         "Warm resume used volume cached before the Mac returned")
+            device.receiveStatus()
+            try await Task.sleep(for: .milliseconds(120))
+            precondition(output.resumeRequests == 0 && raw.resumeRequests == 0,
+                         "Warm resume started without a fresh readable volume")
+            device.receiveVolume()
+            try await waitUntil { output.resumeRequests == 1 && raw.resumeRequests == 1 }
+            precondition(controller.session === raw && controller.nativeOutput === output && output.claims == claimed,
+                         "The confirmed Mac return created a fresh owner instead of resuming the parked stream")
+            precondition(raw.gains.dropFirst(unrestrictedGain).allSatisfy { $0 == 0 },
+                         "Positive gain was sent before validated native resume")
+            let authorization = UUID()
+            raw.emit(.warmCaptureReady(authorization))
+            precondition(raw.parkedStartAuthorizations == [authorization] && raw.gains.last == 0,
+                         "Fresh warm prefill was not authorized at zero gain")
+            raw.emit(.warmResumed(LDACFormat()))
+            try await waitUntil { device.statusReadPending && device.volumeReadPending }
+            device.receiveStatus()
+            try await Task.sleep(for: .milliseconds(120))
+            precondition(raw.gains.last == 0 && !controller.usable, "Fresh status alone enabled LDAC audio on return")
+            device.blocksPlaybackCommands = true
+            device.receiveVolume()
+            try await Task.sleep(for: .milliseconds(120))
+            precondition(raw.gains.last == 0 && !controller.usable, "Readable but unwritable volume enabled LDAC audio on return")
+            device.blocksPlaybackCommands = false
+            device.objectWillChange.send()
+            try await waitUntil { controller.usable || device.queuedWrite != nil }
+            if device.queuedWrite != nil {
+                precondition(raw.gains.last == 0, "Gain preceded the resumed volume setter confirmation")
+                device.transmitVolume()
+                device.confirmVolume()
+            }
+            try await waitUntil { controller.usable && raw.gains.last == 1 }
+            precondition(controller.state == .active(LDACFormat()) && output.ready && raw.parkRequests == 1
+                         && raw.resumeRequests == 1 && device.sourceRequests.isEmpty && device.connectionRequests.isEmpty,
+                         "Warm resumption replayed source control or failed to return the same stream")
+            try await stop(controller)
+        }
+        print("PASS confirmed phone takeover waits with the validated owner, then resumes once with fresh writable Mac volume")
+
+        for accepted in [true, false] {
+            let (returning, returnDevice, returnOutput, returnRaw) = try await startedHandoff()
+            returnRaw.emit(.warmHeld)
+            try await waitUntil { returning.state == .waitingForMac }
+
+            returning.selectAudioSource(mac, on: returnDevice)
+            precondition(returnDevice.sourceRequests == [mac.address] && returnDevice.sourceTransition?.phase == .awaitingSelection)
+            returnDevice.reportMusicSource(mac)
+            try await Task.sleep(for: .milliseconds(120))
+            precondition(returning.state == .waitingForMac && returning.session === returnRaw && returnRaw.stops == 0,
+                         "The Sony picker's early Mac inventory stopped a valid warm hold")
+            precondition(returnRaw.resumeRequests == 0 && returnOutput.resumeRequests == 0 && returnRaw.gains.last == 0,
+                         "Mac inventory alone resumed the warm stream before the Sony picker confirmed its readback")
+            if accepted {
+                returnDevice.sourceTransition?.phase = .queuedReadback
+                returnDevice.sourceTransition?.phase = .verifying
+                try await Task.sleep(for: .milliseconds(120))
+                precondition(returnRaw.stops == 0 && returnRaw.resumeRequests == 0)
+                returnDevice.confirmMusicSource(mac)
+                try await waitUntil { returnDevice.statusReadPending && returnDevice.volumeReadPending }
+                precondition(returnRaw.resumeRequests == 0)
+                returnDevice.receiveStatus()
+                returnDevice.receiveVolume()
+                try await waitUntil { returnRaw.resumeRequests == 1 }
+                precondition(returnOutput.resumeRequests == 1 && returnRaw.stops == 0 && returnRaw.gains.last == 0)
+                try await stop(returning)
+            } else {
+                returnDevice.sourceTransition?.phase = .failed
+                try await waitUntil { returnRaw.stops == 1 }
+                precondition(returnRaw.resumeRequests == 0 && returnOutput.resumeRequests == 0 && returnRaw.audioRestorations == [false])
+                returnRaw.emit(.finished(.init(message: nil)))
+                try await waitUntil { returnOutput.restores.count == 1 && returning.nativeOutput !== returnOutput }
+                if returning.isSessionRunning { try await stop(returning) }
+            }
+        }
+        print("PASS early Mac inventory preserves the mute and lease until the Sony picker completes or fails its owned readback")
+
+        let (unwritten, unwrittenDevice, unwrittenOutput, unwrittenRaw) = try await startedHandoff()
+        unwrittenRaw.emit(.warmHeld)
+        try await waitUntil { unwritten.state == .waitingForMac }
+        unwrittenDevice.defersSourceWrite = true
+        unwritten.selectAudioSource(mac, on: unwrittenDevice)
+        precondition(unwrittenDevice.sourceTransition?.phase == .queued && unwrittenDevice.sourceRequests.isEmpty)
+        unwrittenDevice.reportMusicSource(mac)
+        try await waitUntil { unwrittenRaw.stops == 1 }
+        precondition(unwrittenRaw.resumeRequests == 0 && unwrittenOutput.resumeRequests == 0,
+                     "An untransmitted Mac selection authorized an early inventory change")
+        unwrittenRaw.emit(.finished(.init(message: nil)))
+        try await waitUntil { unwrittenOutput.restores.count == 1 && unwritten.nativeOutput !== unwrittenOutput }
+        if unwritten.isSessionRunning { try await stop(unwritten) }
+        print("PASS a queued local selection cannot keep a warm hold after an unconfirmed source change")
+
+        let (requested, requestDevice, requestOutput, requestRaw) = try await active(.v2, initialRouteUID: original, initialSource: mac)
+        requestDevice.multipoint.devices = [mac, phone]
+        requested.selectAudioSource(phone, on: requestDevice)
+        try await waitUntil { requestRaw.parkRequests == 1 }
+        precondition(requestDevice.sourceRequests.isEmpty && requestRaw.gains.last == 0 && !requestOutput.ready,
+                     "The source picker sent the Sony write before native pause")
+        requestRaw.emit(.warmHeld)
+        try await waitUntil { requestDevice.sourceRequests == [phone.address] }
+        requestDevice.confirmMusicSource(phone)
+        try await waitUntil { requested.state == .waitingForMac && !requestOutput.selected }
+        precondition(requestRaw.parkRequests == 1 && requestDevice.sourceRequests == [phone.address]
+                     && requestDevice.connectionRequests.isEmpty && requestRaw.recoveries.isEmpty)
+        try await stop(requested)
+        print("PASS normal source picker mutes and parks LDAC before its sole Sony phone request")
+
+        let (deferred, deferredDevice, _, deferredRaw) = try await active(.v2, initialRouteUID: original, initialSource: mac)
+        deferredDevice.multipoint.devices = [mac, phone]
+        deferredDevice.defersSourceWrite = true
+        deferred.selectAudioSource(phone, on: deferredDevice)
+        try await waitUntil { deferredRaw.parkRequests == 1 }
+        deferredRaw.emit(.warmHeld)
+        try await waitUntil { deferredDevice.pendingSourceWrite != nil }
+        precondition(deferredDevice.sourceRequests.isEmpty)
+        deferred.stop()
+        deferredDevice.pendingSourceWrite?()
+        precondition(deferredDevice.sourceRequests.isEmpty, "Off did not revoke a queued explicit Sony phone selection")
+        deferredRaw.emit(.finished(.init(message: nil)))
+        try await waitUntil { deferred.state == .off }
+        print("PASS Off revokes a phone selection already queued for Sony transmission")
+
+        for resolution in ["wire transmitted", "wire transmitted with error", "Off", "external output", "expired"] {
+            let (cold, coldDevice, coldOutput, coldRaw) = try await active(.v2, initialRouteUID: original, initialSource: mac)
+            coldDevice.multipoint.devices = [mac, phone]
+            coldDevice.defersSourceWrite = true
+            coldOutput.parkResult = false
+            if resolution == "expired" { SonyHeadphonesController.sourceSelectionTimeout = 0.8 }
+            defer { SonyHeadphonesController.sourceSelectionTimeout = 10 }
+            cold.selectAudioSource(phone, on: coldDevice)
+            try await waitUntil { coldRaw.parkRequests == 1 }
+            coldRaw.emit(.warmHeld)
+            try await waitUntil { coldRaw.stops == 1 && coldDevice.pendingSourceWrite != nil }
+            precondition(coldRaw.audioRestorations == [false] && coldRaw.gains.last == 0 && coldRaw.resumeRequests == 0)
+            let transportError = resolution == "wire transmitted with error" ? "Native transport cleanup failed" : nil
+            coldRaw.emit(.finished(.init(message: transportError, requiresAttention: transportError != nil)))
+            try await Task.sleep(for: .milliseconds(120))
+            precondition(cold.nativeOutput === coldOutput && coldOutput.restores.isEmpty && !coldOutput.ready
+                         && cold.audioRoute?.isDefaultOutput(LDACNativeOutput.uid) == true && coldDevice.sourceRequests.isEmpty,
+                         "Cold fallback released the muted output before its queued Sony selection reached the wire")
+            switch resolution {
+            case "Off": cold.stop()
+            case "expired":
+                try await waitUntil { coldDevice.sourceTransition?.phase == .failed }
+                precondition(coldDevice.sourceTransition?.failureMessage == "The source selection timed out")
+            case "external output":
+                cold.audioRoute?.route = Route(uid: "external-output")
+                cold.audioRoute?.currentOutputUID = "external-output"
+                coldOutput.changed(.failure(LDACOwnerError(outputDeselected: true)))
+            default: break
+            }
+            coldDevice.pendingSourceWrite?()
+            try await waitUntil { coldOutput.restores.count == 1 && cold.nativeOutput !== coldOutput }
+            if resolution != "expired" {
+                precondition(cold.nativeOutput == nil, "Cold fallback reacquired LDAC before Sony confirmed the source: \(resolution)")
+            }
+            precondition(coldDevice.sourceRequests == (resolution.hasPrefix("wire transmitted") ? [phone.address] : [])
+                         && coldDevice.multipoint.selectedSource?.address == mac.address && coldDevice.connectionRequests.isEmpty
+                         && coldOutput.restoredHeadphoneOutputs == [false],
+                         "Cold fallback mishandled the queued Sony selection: \(resolution)")
+            if resolution == "external output" {
+                precondition(cold.audioRoute?.isDefaultOutput("external-output") == true)
+            }
+            if let transportError {
+                precondition(cold.state == .failed(transportError), "Awaiting the Sony wire hid a raw cleanup error")
+            }
+            if cold.isSessionRunning { try await stop(cold) }
+        }
+        print("PASS cold fallback retains the muted owner through transmission, preserves raw errors, and cancels invalid writes")
+
+        let (prefill, prefillDevice, prefillOutput, prefillRaw) = try await startedHandoff()
+        prefillRaw.emit(.warmHeld)
+        try await waitUntil { prefill.state == .waitingForMac }
+        prefillDevice.confirmMusicSource(mac)
+        try await waitUntil { prefillDevice.volumeReadPending && prefillDevice.statusReadPending }
+        prefillDevice.receiveStatus()
+        prefillDevice.receiveVolume()
+        try await waitUntil { prefillRaw.resumeRequests == 1 }
+        prefill.audioRoute?.route = Route(uid: "external-output")
+        prefill.audioRoute?.currentOutputUID = "external-output"
+        prefillRaw.emit(.warmCaptureReady(UUID()))
+        try await waitUntil { prefillRaw.stops == 1 }
+        precondition(prefillRaw.parkedStartAuthorizations.isEmpty && prefillRaw.gains.last == 0
+                     && prefillRaw.audioRestorations == [false],
+                     "Warm prefill authorized START after the Mac route changed")
+        prefillRaw.emit(.finished(.init(message: nil)))
+        try await waitUntil { prefill.nativeOutput == nil }
+        precondition(prefillOutput.restoredHeadphoneOutputs == [false]
+                     && prefill.audioRoute?.isDefaultOutput("external-output") == true)
+        print("PASS warm PCM prefill is independently denied if the Mac output changes before START")
+
+        let (timeout, timeoutDevice, timeoutOutput, timeoutRaw) = try await startedHandoff()
+        timeoutRaw.emit(.warmHeld)
+        try await waitUntil { timeout.state == .waitingForMac }
+        timeoutDevice.confirmMusicSource(mac)
+        try await waitUntil { timeoutDevice.volumeReadPending && timeoutDevice.statusReadPending }
+        timeoutDevice.receiveStatus()
+        precondition(timeoutRaw.stops == 0 && timeoutRaw.resumeRequests == 0 && timeoutOutput.resumeRequests == 0)
+        try await Task.sleep(for: .seconds(15.2))
+        try await waitUntil { timeoutRaw.stops == 1 }
+        precondition(timeoutRaw.resumeRequests == 0 && timeoutRaw.parkedStartAuthorizations.isEmpty
+                     && timeoutRaw.audioRestorations == [false] && timeoutRaw.gains.last == 0,
+                     "Missing fresh Mac volume restarted or unmuted LDAC")
+        timeoutRaw.emit(.finished(.init(message: nil)))
+        try await waitUntil { timeoutOutput.restores.count == 1 && timeout.nativeOutput !== timeoutOutput }
+        if timeout.isSessionRunning { try await stop(timeout) }
+        print("PASS missing fresh Mac volume releases the held owner once the bounded return wait expires")
+
+        for scenario in ["Stop", "park declined", "park error", "native park failure", "route changed", "controls reset", "another peer"] {
+            let (controller, device, output, raw) = try await startedHandoff()
+            switch scenario {
+            case "park declined": output.parkResult = false
+            case "park error": output.parkError = LDACOwnerError()
+            case "Stop": output.blocksPark = true
+            default: break
+            }
+            if scenario == "native park failure" {
+                raw.emit(.failed("The peer did not suspend"))
+            } else {
+                raw.emit(.warmHeld)
+                if scenario == "Stop" {
+                    try await waitUntil { output.parkWaiter != nil }
+                    controller.stop()
+                    output.parkWaiter?.resume()
+                } else if !["park declined", "park error"].contains(scenario) {
+                    try await waitUntil { controller.state == .waitingForMac && !output.selected }
+                    switch scenario {
+                    case "route changed":
+                        controller.audioRoute?.route = Route(uid: "external-speakers")
+                        controller.audioRoute?.currentOutputUID = "external-speakers"
+                        output.changed(.failure(LDACOwnerError(outputDeselected: true)))
+                    case "controls reset":
+                        device.notificationSession += 1
+                        device.objectWillChange.send()
+                    case "another peer": device.confirmMusicSource(other)
+                    default: break
+                    }
+                }
+            }
+            try await waitUntil { raw.stops == 1 }
+            precondition(raw.audioRestorations == [false] && raw.resumeRequests == 0 && output.resumeRequests == 0,
+                         "Invalid warm handoff requested Mac audio or resumed: \(scenario)")
+            raw.emit(.finished(.init(message: nil)))
+            try await waitUntil { controller.nativeOutput == nil && controller.session == nil }
+            precondition(output.restores.count == 1 && output.restoredHeadphoneOutputs == [false]
+                         && device.sourceRequests.isEmpty && device.connectionRequests.isEmpty && raw.recoveries.isEmpty,
+                         "Invalid warm handoff left an owner or perturbed phone audio: \(scenario)")
+            if scenario == "Stop" { precondition(controller.state == .off && controller.requestedAddress == nil) }
+            precondition(raw.gains.last == 0)
+        }
+        print("PASS Stop, declined native or HAL parking, external routing, lost Sony controls and a superseding peer release the owner silently")
+    }
+
+    @MainActor
+    static func checkColdControlsOverlap() async throws {
+        for scenario in ["cold", "control busy after closure", "early failure", "opening", "handshaking", "no cached channel", "ready", "stale session",
+                         "other output", "other device", "other source", "Classic lost", "raw recovery"] {
+            let (controller, device, _, raw) = try await started(.v2)
+            raw.emit(.handoffReady)
+            try await waitUntil { raw.handoffs == 1 }
+            device.isReady = scenario == "ready"
+            switch scenario {
+            case "control busy after closure": device.linkState = .controlBusy
+            case "opening": device.linkState = .opening
+            case "handshaking": device.linkState = .handshaking
+            case "no cached channel": device.hasCachedControlChannel = false
+            case "stale session": controller.sessionID = UUID()
+            case "other output": controller.audioRoute?.currentOutputUID = "fixture-speakers"
+            case "other device": controller.devices?.selectedAddress = "02:00:00:00:00:04"
+            case "other source": device.reportAudioSource(.init(address: "02:00:00:00:00:03"))
+            case "Classic lost": controller.isClassicConnected = { _ in false }
+            case "raw recovery": controller.isRecovering = true
+            default: break
+            }
+            if !["control busy after closure", "opening", "handshaking", "ready"].contains(scenario) { device.linkState = .disconnected }
+            raw.emit(.ownedMediaReady)
+            raw.emit(.ownedMediaReady)
+            let expectEarly = ["cold", "control busy after closure", "early failure"].contains(scenario)
+            precondition(device.coldControlReopens == (expectEarly ? 1 : 0),
+                         "Wrong early Sony reopen count for \(scenario)")
+            precondition(device.refreshes == 0 && device.volumeRefreshes == 0 && raw.gains.last != 1
+                         && device.sourceRequests.isEmpty && device.connectionRequests.isEmpty && !controller.usable,
+                         "Owned-media readiness granted audio or changed Sony settings for \(scenario)")
+
+            switch scenario {
+            case "cold", "control busy after closure", "opening", "handshaking", "early failure", "no cached channel":
+                if scenario == "early failure" { device.linkState = .controlBusy }
+                raw.emit(.active(LDACFormat()))
+                let expectFallback = scenario == "early failure" || scenario == "no cached channel"
+                precondition(device.refreshes == (expectFallback ? 1 : 0),
+                             "Active admission duplicated a pending Sony open or missed its existing fallback for \(scenario)")
+            default: break
+            }
+            try await stop(controller)
+        }
+        print("PASS cold controls overlap: one current Sony open before active, pending discovery preserved, fallback retained and stale routes ignored")
+    }
+
+    @MainActor
     static func main() async throws {
         precondition(ProcessInfo.processInfo.environment["ACOUPLET_TESTING"] == "1")
+        if ProcessInfo.processInfo.arguments.contains("--check-cold-controls-overlap") || ProcessInfo.processInfo.arguments.count == 1 {
+            try await checkColdControlsOverlap()
+            if ProcessInfo.processInfo.arguments.contains("--check-cold-controls-overlap") { return }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--check-phone-handoff") || ProcessInfo.processInfo.arguments.count == 1 {
+            try await checkPhoneHandoffs()
+            if ProcessInfo.processInfo.arguments.contains("--check-phone-handoff") { return }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--check-output-deselection") || ProcessInfo.processInfo.arguments.count == 1 {
+            let (controller, device, output, raw) = try await started(.v2)
+            raw.emit(.handoffReady)
+            try await waitUntil { raw.handoffs == 1 }
+            output.changed(.failure(LDACOwnerError(outputDeselected: true)))
+            raw.emit(.finished(.init(message: nil)))
+            try await waitUntil { controller.state == .waitingForDevice }
+            for _ in 0..<20 { controller.resumeIfReady() }
+            precondition(controller.nativeOutput == nil && controller.session == nil && controller.diagnosticAttempt == 1
+                         && controller.requestedAddress == device.address && raw.audioRestorations == [false]
+                         && !output.selected && !output.ready && raw.gains == [0])
+
+            controller.audioRoute?.route = Route(uid: "fixture-speakers")
+            controller.isClassicConnected = { _ in false }
+            controller.resumeIfReady()
+            controller.isClassicConnected = { _ in true }
+            controller.resumeIfReady()
+            precondition(controller.state == .waitingForDevice && controller.nativeOutput == nil)
+            controller.audioRoute?.route = Route(uid: "fixture-headphones")
+            controller.resumeIfReady()
+            try await waitUntil { device.statusReadPending && device.volumeReadPending }
+            device.receiveStatus()
+            device.receiveVolume()
+            try await waitUntil { controller.session != nil }
+            precondition(controller.diagnosticAttempt == 2 && controller.session !== raw && controller.nativeOutput?.claims == [false])
+            try await stop(controller)
+            print("PASS output deselection: no immediate retry on the saved route; one new Bluetooth connection can resume on that route")
+            if ProcessInfo.processInfo.arguments.contains("--check-output-deselection") { return }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--check-route-first-source-return") || ProcessInfo.processInfo.arguments.count == 1 {
+            let target = "02:00:00:00:00:01:output"
+            let speakers = "fixture-speakers"
+            let mac = SonyMultipointDevice(address: "02:00:00:00:00:02")
+            let phone = SonyMultipointDevice(address: "02:00:00:00:00:03")
+            for scenario in ["same target", "later target", "other Bluetooth", "same speaker UID", "same UID different transport",
+                             "no cycle", "unowned peer", "unowned Mac", "different Sony session", "stale after return",
+                             "route changes during preparation", "source changes before native handoff"] {
+                let original = scenario == "same speaker UID" ? speakers : target
+                let (controller, device, output, raw) = try await active(.v2, initialRouteUID: original)
+                device.reportAudioSource(mac)
+                controller.audioRoute?.route = Route(uid: speakers)
+                controller.audioRoute?.currentOutputUID = speakers
+                output.changed(.failure(LDACOwnerError(outputDeselected: true)))
+                raw.emit(.finished(.init(message: nil)))
+                try await waitUntil { controller.state == .waitingForDevice }
+                precondition(controller.isClassicConnected(device.address) && output.restoredHeadphoneOutputs == [false] && !output.selected)
+                if scenario != "no cycle" {
+                    device.reportAudioSource(phone)
+                    device.localSource = false
+                    if scenario != "unowned peer" { device.musicSourceConfirmations.send(phone) }
+                }
+                if scenario == "different Sony session" { device.notificationSession += 1 }
+                if scenario == "same UID different transport" { controller.audioRoute?.currentOutputTransport = kAudioDeviceTransportTypeUSB }
+                let returnedOutput = scenario == "later target" ? speakers : scenario == "other Bluetooth" ? "02:00:00:00:00:09:output" : original
+                controller.audioRoute?.route = Route(uid: returnedOutput)
+                controller.audioRoute?.currentOutputUID = returnedOutput
+                if scenario == "route changes during preparation" { device.connectionMode = .stableConnection }
+                device.reportAudioSource(mac)
+                device.localSource = true
+                if scenario != "unowned Mac" { device.musicSourceConfirmations.send(mac) }
+                if scenario == "stale after return" { device.multipoint.inventoryIsStale = true }
+                controller.resumeIfReady()
+
+                if scenario == "same target" || scenario == "source changes before native handoff" {
+                    precondition(controller.diagnosticAttempt == 2,
+                                 "Fresh sourced return was not admitted: \(controller.state) receipt=\(controller.deselectedSourceReturn != nil) observer=\(controller.deselectedSourceObservation != nil)")
+                    try await waitUntil { device.statusReadPending && device.volumeReadPending }
+                    device.receiveStatus()
+                    device.receiveVolume()
+                    try await waitUntil { controller.session != nil }
+                    precondition(controller.diagnosticAttempt == 2 && controller.session !== raw && controller.nativeOutput?.expectedDefaultOutputUIDs == [target],
+                                 "Fresh same-session source return did not resume on the exact originally selected Bluetooth device")
+                    let resumed = controller.session!
+                    if scenario == "source changes before native handoff" {
+                        device.reportAudioSource(phone)
+                        device.reportAudioSource(mac)
+                        resumed.emit(.handoffReady)
+                        try await waitUntil { resumed.stops == 1 }
+                        precondition(resumed.handoffs == 0 && controller.nativeOutput?.selections == 0,
+                                     "A newer Sony source cycle was admitted by an older return witness")
+                    } else {
+                        resumed.emit(.handoffReady)
+                        try await waitUntil { resumed.handoffs == 1 }
+                    }
+                } else if scenario == "route changes during preparation" {
+                    try await waitUntil { device.connectionRequests == [.soundQuality] }
+                    let attemptedOutput = controller.nativeOutput
+                    controller.audioRoute?.currentOutputUID = speakers
+                    device.confirmConnectionMode(.soundQuality)
+                    try await waitUntil { controller.state == .waitingForDevice && controller.nativeOutput == nil }
+                    precondition(attemptedOutput?.claims.isEmpty == true && controller.session == nil && controller.audioRoute?.isDefaultOutput(speakers) == true,
+                                 "Asynchronous preparation overrode a new live speaker selection")
+                } else {
+                    if scenario == "later target" {
+                        controller.audioRoute?.route = Route(uid: original)
+                        controller.audioRoute?.currentOutputUID = original
+                        device.musicSourceConfirmations.send(mac)
+                    }
+                    if scenario == "stale after return" { device.multipoint.inventoryIsStale = false }
+                    for _ in 0..<10 {
+                        controller.resumeIfReady()
+                        try await Task.sleep(for: .milliseconds(5))
+                    }
+                    precondition(controller.diagnosticAttempt == 1 && controller.state == .waitingForDevice && controller.session == nil && controller.nativeOutput == nil,
+                                 "Route-first LDAC resumed without contemporaneous target route and fresh same-session source proof for \(scenario)")
+                }
+                precondition(device.sourceRequests.isEmpty, "Passive recovery issued a Sony source switch for \(scenario)")
+                try await stop(controller)
+            }
+            print("PASS active route-first source return: live exact Bluetooth target and fresh same-session Sony cycle required; later routing and in-flight selector changes preserve explicit outputs")
+            if ProcessInfo.processInfo.arguments.contains("--check-route-first-source-return") { return }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--check-startup-output-deselection") || ProcessInfo.processInfo.arguments.count == 1 {
+            for difference in ["return", "competing source", "ordinary stop", "sleep", "already active",
+                               "ordinary stop at transmit", "suspension at transmit", "source changed at transmit",
+                               "request superseded at transmit", "control session changed at transmit",
+                               "inventory stale at transmit", "phone unavailable at transmit"] {
+                let (controller, device, output, raw, phone) = try await startedWithSourceHandoff()
+                let mac = device.multipoint.selectedSource!.address
+                let preferenceRequest = UUID()
+                if difference == "return" {
+                    controller.connectionModeRestoreID = preferenceRequest
+                    device.lastConnectionModeChangeID = preferenceRequest
+                }
+                if difference == "already active" {
+                    raw.emit(.active(LDACFormat()))
+                    try await waitUntil { device.statusReadPending && device.volumeReadPending }
+                    device.receiveStatus()
+                    device.receiveVolume()
+                    try await waitUntil { device.queuedWrite != nil }
+                    device.transmitVolume()
+                    device.confirmVolume()
+                    try await waitUntil { controller.usable }
+                    precondition(controller.startupSourceReturn == nil)
+                }
+                controller.audioRoute?.route = Route(uid: "external-default")
+                if difference == "ordinary stop" {
+                    controller.stop(restoreAudio: false, reason: "ordinary suppression")
+                } else {
+                    output.changed(.failure(LDACOwnerError(outputDeselected: true)))
+                }
+                if difference == "competing source" { device.reportAudioSource(.init(address: "02:00:00:00:00:04")) }
+                if difference == "sleep" { controller.devices?.isSystemSleeping = true }
+                device.defersSourceWrite = difference.hasSuffix("at transmit")
+                raw.emit(.finished(.init(message: nil)))
+                if difference == "return" {
+                    try await waitUntil { device.sourceRequests == [mac, phone.address] }
+                    device.confirmAudioSource(phone)
+                    device.localSource = false
+                } else if device.defersSourceWrite {
+                    try await waitUntil { device.pendingSourceWrite != nil }
+                    switch difference {
+                    case "ordinary stop at transmit": controller.stop(restoreAudio: false, reason: "ordinary suppression")
+                    case "suspension at transmit": controller.suspend(restoreAudio: false, reason: "sleep request")
+                    case "source changed at transmit": device.reportAudioSource(.init(address: "02:00:00:00:00:04"))
+                    case "request superseded at transmit": device.sourceTransition = .init(phase: .complete, session: device.notificationSession)
+                    case "control session changed at transmit": device.notificationSession += 1
+                    case "inventory stale at transmit": device.multipoint.inventoryIsStale = true
+                    case "phone unavailable at transmit": device.multipoint.devices.removeAll { $0.address == phone.address }
+                    default: preconditionFailure()
+                    }
+                    device.pendingSourceWrite?()
+                }
+                try await waitUntil { controller.cleanupTask == nil }
+                for _ in 0..<3 { controller.resumeIfReady() }
+                precondition(device.sourceRequests == (difference == "return" ? [mac, phone.address] : [mac]), difference)
+                precondition(controller.audioRoute?.route?.uid == "external-default"
+                             && raw.audioRestorations == [false] && output.restoredHeadphoneOutputs == [false], difference)
+                precondition(controller.requestedAddress == (difference == "already active" ? device.address : nil)
+                             && controller.startupSourceReturn == nil
+                             && controller.session == nil && controller.diagnosticAttempt == 1, difference)
+                if difference == "return" {
+                    precondition(device.connectionRequests.isEmpty && controller.deferredConnectionModes[device.address] == preferenceRequest)
+                }
+            }
+            print("PASS startup output deselection: release external Mac output without retry; return Sony source only while still owned at transmit")
+            if ProcessInfo.processInfo.arguments.contains("--check-startup-output-deselection") { return }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--check-readable-handoff") || ProcessInfo.processInfo.arguments.count == 1 {
+            for generation in [Generation.v1, .v2] {
+                let (controller, device, output, raw) = try await started(generation)
+                raw.emit(.handoffReady)
+                try await waitUntil { raw.handoffs == 1 }
+                let configurations = output.configurations
+                raw.emit(.active(LDACFormat()))
+                try await waitUntil { device.statusReadPending && device.volumeReadPending }
+                device.receiveStatus()
+                device.receiveVolume(output.controls.volume(in: 0...30))
+                try await waitUntil { controller.usable }
+                precondition(output.ready && raw.gains.last == 1 && device.transmitted.isEmpty &&
+                             output.configurations == configurations,
+                             "Matching confirmed Mac and headphone volumes were configured again before admission")
+                try await stop(controller)
+            }
+            let (controller, device, output, raw) = try await started(.v2, playbackAvailable: false)
+            precondition(device.hasFreshReadableMusicVolumeReadback && !device.hasFreshMusicVolumeReadback
+                         && !controller.hasOwnedMusicContext && !output.selected && raw.gains == [0])
+            raw.emit(.handoffReady)
+            try await waitUntil { raw.handoffs == 1 }
+            precondition(output.selected && !output.ready && device.transmitted.isEmpty && raw.gains == [0])
+            raw.emit(.active(LDACFormat()))
+            try await waitUntil { device.volumeRefreshes == 1 }
+            device.receiveStatus()
+            device.receiveVolume(13)
+            try await Task.sleep(for: .milliseconds(120))
+            precondition(controller.state == .connecting && !controller.usable && !output.ready && device.transmitted.isEmpty
+                         && device.queuedWrite == nil && raw.gains == [0])
+            device.playbackAvailable = true
+            device.receiveStatus()
+            try await waitUntil { device.queuedWrite != nil }
+            device.transmitVolume()
+            precondition(!output.ready && raw.gains == [0])
+            device.confirmVolume()
+            try await waitUntil { controller.usable }
+            precondition(output.ready && raw.gains.last == 1)
+            try await stop(controller)
+            print("PASS readable startup: disabled playback allows silent handoff and stays muted until writable post-transport volume confirms")
+            if ProcessInfo.processInfo.arguments.contains("--check-readable-handoff") { return }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--check-source-preflight") || ProcessInfo.processInfo.arguments.count == 1 {
+            for result in ["claim denied", "claim cancelled", "permission denied", "permission failed", "permission cancelled",
+                           "source changed", "source changed and returned", "queued source changed and returned",
+                           "request changed", "Mac route changed", "output selection rejected", "output replaced before transmit",
+                           "keeping changed during output selection", "keeping changed before transmit",
+                           "rate changed", "accepted"] {
+                let controller = Controller()
+                let device = SonyHeadphonesController()
+                let mac = SonyMultipointDevice(address: "02:00:00:00:00:02")
+                let phone = SonyMultipointDevice(address: "02:00:00:00:00:03")
+                let other = SonyMultipointDevice(address: "02:00:00:00:00:04")
+                device.playback.generation = .v2
+                device.localSource = false
+                device.preparationIssue = .selectMac(mac)
+                device.multipoint.selectedSource = phone
+                device.multipoint.devices = [mac, phone, other]
+                device.defersSourceWrite = result == "queued source changed and returned" || result.hasSuffix("before transmit")
+                if result != "accepted" { device.connectionMode = .stableConnection }
+                controller.devices?.controllers[device.address] = device
+                controller.requestedAddress = device.address
+                controller.start(device.address, selectingSource: mac)
+                let output = controller.nativeOutput!
+                if result == "keeping changed during output selection" {
+                    let markSelected = output.didSelect
+                    output.didSelect = { markSelected?(); device.multipoint.keeping = true }
+                }
+                output.blocksClaim = true
+                output.blocksPermission = true
+                try await waitUntil { output.claimWaiter != nil }
+                precondition(output.claims == [true] && output.priorityRequests == 0 && !output.selected
+                             && output.configurations == 0 && controller.session == nil && device.sourceRequests.isEmpty
+                             && device.multipoint.selectedSource?.address == phone.address && device.transmitted.isEmpty
+                             && output.permissionChecks.isEmpty)
+                if result == "claim denied" { output.claimError = LDACOwnerError() }
+                if result == "claim cancelled" { controller.stop(reason: "User cancelled") }
+                output.claimWaiter?.resume()
+                output.claimWaiter = nil
+                if !result.hasPrefix("claim ") {
+                    try await waitUntil {
+                        precondition(device.sourceRequests.isEmpty, "Sony source changed before capture permission was verified")
+                        return output.permissionWaiter != nil
+                    }
+                    precondition(output.permissionChecks == [48000] && controller.audioCaptureAccess == .checking
+                                 && output.priorityRequests == 0 && !output.selected && controller.session == nil
+                                 && device.sourceRequests.isEmpty && device.multipoint.selectedSource?.address == phone.address)
+                    switch result {
+                    case "permission denied": output.permissionError = LDACOwnerError(captureAccess: .permissionRequired)
+                    case "permission failed": output.permissionError = LDACOwnerError()
+                    case "permission cancelled": controller.stop(reason: "User cancelled")
+                    case "source changed": device.reportAudioSource(other)
+                    case "source changed and returned":
+                        device.reportAudioSource(other)
+                        device.reportAudioSource(phone)
+                    case "request changed": device.sourceTransition = .init(phase: .complete, session: device.notificationSession)
+                    case "Mac route changed": controller.audioRoute?.route = Route(uid: "fixture-speakers")
+                    case "output selection rejected": output.selectionError = LDACOwnerError(outputDeselected: true)
+                    case "rate changed": controller.updateConfiguration(.init(sampleRate: 44100))
+                    default: break
+                    }
+                    output.permissionWaiter?.resume()
+                    output.permissionWaiter = nil
+                }
+                if result == "queued source changed and returned" {
+                    try await waitUntil { device.pendingSourceWrite != nil }
+                    device.reportAudioSource(other)
+                    device.reportAudioSource(phone)
+                    let write = device.pendingSourceWrite
+                    device.pendingSourceWrite = nil
+                    write?()
+                }
+                if result == "output replaced before transmit" {
+                    try await waitUntil { device.pendingSourceWrite != nil }
+                    controller.audioRoute?.route = Route(uid: LDACNativeOutput.uid)
+                    controller.audioRoute?.currentOutputUID = "fixture-speakers"
+                    device.pendingSourceWrite?()
+                }
+                if result == "keeping changed before transmit" {
+                    try await waitUntil { device.pendingSourceWrite != nil }
+                    device.multipoint.keeping = true
+                    device.pendingSourceWrite?()
+                }
+                if result == "accepted" {
+                    try await waitUntil { device.sourceRequests == [mac.address] }
+                    precondition(output.selected && output.priorityRequests == 1 && controller.session == nil
+                                 && controller.audioCaptureAccess == .ready && output.permissionChecks == [48000])
+                    device.confirmAudioSource(mac)
+                    try await waitUntil { device.volumeReadPending }
+                    device.receiveStatus()
+                    device.receiveVolume()
+                    try await waitUntil { controller.session != nil }
+                    precondition(output.claims == [true] && output.priorityRequests == 1 && output.selected
+                                 && controller.audioCaptureAccess == .ready && output.permissionChecks == [48000])
+                    controller.session?.emit(.handoffReady)
+                    try await waitUntil { controller.session?.handoffs == 1 }
+                    precondition(output.selections == 1 && device.sourceRequests == [mac.address])
+                    try await stop(controller)
+                } else {
+                    try await waitUntil {
+                        precondition(device.sourceRequests.isEmpty, "A superseded Sony source request reached the wire")
+                        precondition(device.sourceUnlocks == 0, "LDAC attempted to change source keeping")
+                        return !controller.isSessionRunning
+                    }
+                    let reachedSelection = device.defersSourceWrite || result == "keeping changed during output selection"
+                    precondition(device.sourceRequests.isEmpty && device.transmitted.isEmpty && !output.selected
+                                 && device.connectionRequests.isEmpty && output.priorityRequests == (reachedSelection ? 1 : 0)
+                                 && output.configurations == 0 && output.restores.count == 1)
+                    precondition(device.multipoint.selectedSource?.address ==
+                                 (result == "source changed" ? other.address : phone.address))
+                    if result.hasSuffix("cancelled") { precondition(controller.state == .off) }
+                    if result == "permission denied" { precondition(controller.audioCaptureAccess == .permissionRequired) }
+                }
+                precondition(device.sourceUnlocks == 0, "LDAC attempted to change source keeping")
+            }
+            print("PASS source preparation: verified Mac output, one route selection, and no unlock or source write after rejection, replacement, or a source keeping change")
+            if ProcessInfo.processInfo.arguments.contains("--check-source-preflight") { return }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--check-pending-source-return") || ProcessInfo.processInfo.arguments.count == 1 {
+            for outcome in ["return", "confirmed before cancellation", "rejected", "expired", "superseded",
+                            "changed twice", "new session", "untouched queue", "sleep while pending", "ordinary suppression"] {
+                let controller = Controller()
+                let device = SonyHeadphonesController()
+                let mac = SonyMultipointDevice(address: "02:00:00:00:00:02")
+                let phone = SonyMultipointDevice(address: "02:00:00:00:00:03")
+                let other = SonyMultipointDevice(address: "02:00:00:00:00:04")
+                device.playback.generation = .v2
+                device.localSource = false
+                device.multipoint.selectedSource = phone
+                device.multipoint.devices = [mac, phone, other]
+                device.preparationIssue = .selectMac(mac)
+                device.defersSourceWrite = outcome == "untouched queue"
+                controller.devices?.controllers[device.address] = device
+                controller.requestedAddress = device.address
+                controller.start(device.address, selectingSource: mac)
+                let output = controller.nativeOutput!
+                try await waitUntil {
+                    outcome == "untouched queue" ? device.pendingSourceWrite != nil : device.sourceRequests == [mac.address]
+                }
+                precondition(controller.pendingStartupSourceSelection?.request == device.sourceTransition?.requestID
+                             && controller.startupSourceReturn == nil && controller.session == nil)
+                if outcome == "confirmed before cancellation" { device.confirmAudioSource(mac) }
+                if outcome == "expired" { controller.pendingStartupSourceSelection?.deadline = .now }
+                controller.audioRoute?.route = Route(uid: "external-default")
+                controller.audioRoute?.currentOutputUID = "external-default"
+                if outcome == "ordinary suppression" { controller.stop(restoreAudio: false, reason: "fixture ordinary stop") }
+                else { output.changed(.failure(LDACOwnerError(outputDeselected: true))) }
+                try await waitUntil { output.restores == [false] }
+                let shouldReturn = outcome == "return" || outcome == "confirmed before cancellation"
+                switch outcome {
+                case "return":
+                    precondition(controller.isSessionRunning && device.sourceRequests == [mac.address],
+                                 "Output release abandoned the transmitted Sony request before its confirmation")
+                    device.confirmAudioSource(mac)
+                case "rejected": device.sourceTransition?.phase = .failed
+                case "superseded":
+                    device.sourceTransition = .init(session: device.notificationSession)
+                    device.confirmAudioSource(mac)
+                case "changed twice":
+                    device.reportAudioSource(other)
+                    device.confirmAudioSource(mac)
+                case "new session":
+                    device.notificationSession += 1
+                    device.confirmAudioSource(mac)
+                case "untouched queue": device.pendingSourceWrite?()
+                case "sleep while pending": controller.devices?.isSystemSleeping = true
+                default: break
+                }
+                if shouldReturn {
+                    try await waitUntil { device.sourceRequests == [mac.address, phone.address] }
+                    device.confirmAudioSource(phone)
+                }
+                try await waitUntil { !controller.isSessionRunning }
+                if ["expired", "sleep while pending", "ordinary suppression"].contains(outcome) { device.confirmAudioSource(mac) }
+                let expected = shouldReturn ? [mac.address, phone.address] : outcome == "untouched queue" ? [] : [mac.address]
+                precondition(device.sourceRequests == expected && device.sourceUnlocks == 0, outcome)
+                precondition(controller.state == .off && controller.requestedAddress == nil && controller.session == nil
+                             && controller.startupSourceReturn == nil && controller.pendingStartupSourceSelection == nil
+                             && output.restoredHeadphoneOutputs == [false]
+                             && controller.audioRoute?.currentOutputUID == "external-default", outcome)
+            }
+            print("PASS in-flight deselection: release output before awaiting exact Sony confirmation; reject expired, superseded, untransmitted or rejected transfers")
+            if ProcessInfo.processInfo.arguments.contains("--check-pending-source-return") { return }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--check-source-return") || ProcessInfo.processInfo.arguments.count == 1 {
+            for outcome in ["return", "transient no source", "source changed before confirmation",
+                            "phone disconnected", "source changed twice", "different request",
+                            "new session", "keeping enabled"] {
+                let controller = Controller()
+                let device = SonyHeadphonesController()
+                let mac = SonyMultipointDevice(address: "02:00:00:00:00:02")
+                let phone = SonyMultipointDevice(address: "02:00:00:00:00:03")
+                device.playback.generation = .v2
+                device.localSource = false
+                device.multipoint.selectedSource = phone
+                device.multipoint.devices = [mac, phone]
+                device.preparationIssue = .selectMac(mac)
+                controller.devices?.controllers[device.address] = device
+                controller.headphones = device
+                controller.targetAddress = device.address
+                controller.requestedAddress = device.address
+                controller.resumeOutputUID = controller.audioRoute?.route?.uid
+                controller.state = .requested
+                let output = LDACNativeOutput(id: controller.sessionID, address: device.address) { _ in }
+                output.didSelect = { [weak controller] in controller?.audioRoute?.currentOutputUID = LDACNativeOutput.uid }
+                controller.nativeOutput = output
+                let origin = (device.notificationSession, phone.address, device.playbackSourceGeneration, nil as UUID?)
+                let selection = Task { @MainActor in
+                    try await controller.selectMacAudioSource(mac, for: device, address: device.address, identifier: controller.sessionID,
+                        origin: origin, output: output)
+                }
+                try await waitUntil { device.sourceRequests == [mac.address] }
+                if outcome == "transient no source" { device.reportAudioSource(nil) }
+                if outcome == "source changed before confirmation" {
+                    device.reportAudioSource(mac)
+                    device.reportAudioSource(phone)
+                }
+                device.confirmAudioSource(mac)
+                try await selection.value
+                let expectedReturn = outcome == "transient no source" || outcome == "source changed before confirmation" ? nil : phone.address
+                precondition(controller.startupSourceReturn?.source == expectedReturn && device.multipoint.selectedSource?.address == mac.address)
+                switch outcome {
+                case "phone disconnected": device.multipoint.devices = [mac]
+                case "source changed twice": device.confirmAudioSource(phone); device.confirmAudioSource(mac)
+                case "different request": device.sourceTransition = .init(phase: .complete, session: device.notificationSession)
+                case "new session": device.notificationSession += 1
+                case "keeping enabled": device.multipoint.keeping = true
+                default: break
+                }
+                controller.requestedAddress = nil
+                controller.finish("LDAC startup failed")
+                if outcome == "return" {
+                    try await waitUntil { device.sourceRequests == [mac.address, phone.address] }
+                    device.confirmAudioSource(phone)
+                }
+                try await waitUntil { controller.cleanupTask == nil }
+                precondition(device.sourceRequests == (outcome == "return" ? [mac.address, phone.address] : [mac.address]))
+                precondition(controller.startupSourceReturn == nil && controller.state == .failed("LDAC startup failed"))
+            }
+            print("PASS failed LDAC handoff returns an owned direct source switch; transient no-source and extra changes skip rollback without blocking confirmed Mac selection")
+            if ProcessInfo.processInfo.arguments.contains("--check-source-return") { return }
+        }
         if ProcessInfo.processInfo.arguments.contains("--check-handoff-refresh") || ProcessInfo.processInfo.arguments.count == 1 {
             for generation in [Generation.v1, .v2] {
                 let (controller, device, output, raw) = try await started(generation)
@@ -523,15 +1611,42 @@ enum Check {
             let initialStops = raw.stops
             controller.updateConfiguration(LDACConfiguration(sampleRate: 48000, quality: .quality))
             controller.updateConfiguration(LDACConfiguration(sampleRate: 48000, quality: .adaptive))
-            precondition(raw.qualities == [.quality, .adaptive] && raw.stops == initialStops && output.restores.isEmpty,
+            precondition(raw.configurations.map(\.quality) == [.quality, .adaptive] && raw.stops == initialStops && output.restores.isEmpty,
                          "Live bitrate selection restarted the transport")
             controller.updateConfiguration(LDACConfiguration(sampleRate: 96000, quality: .adaptive))
-            precondition(raw.stops == initialStops + 1 && controller.state == .stopping && !controller.canChangeConfiguration,
-                         "Sample-rate change did not enter controlled cleanup")
+            precondition(raw.configurations.last?.sampleRate == 96000 && raw.stops == initialStops &&
+                         controller.state == .active(LDACFormat()) && controller.canChangeConfiguration,
+                         "Sample-rate change replaced the active session")
             precondition(controller.requestedAddress != nil && controller.requestedConfiguration.sampleRate == 96000,
                          "Sample-rate change lost the requested session")
+            raw.emit(.sampleRateChangeRejected(requested: 96000, active: 48000))
+            precondition(controller.requestedConfiguration.sampleRate == 48000 && controller.restoredRates == [48000] &&
+                         controller.sampleRateChangeError != nil && controller.state == .active(LDACFormat()),
+                         "Rejection did not preserve the active output or restore the preferred rate")
+            let superseded = LDACConfiguration(sampleRate: 96000, quality: .quality)
+            let latest = LDACConfiguration(sampleRate: 96000, quality: .balanced)
+            controller.updateConfiguration(superseded)
+            controller.updateConfiguration(latest)
+            raw.emit(.sampleRateChangeDeferred(requested: .init(sampleRate: 88200, quality: .balanced), active: 48000))
+            raw.emit(.sampleRateChangeDeferred(requested: superseded, active: 48000))
+            precondition(controller.requestedConfiguration == latest && controller.restoredRates == [48000] &&
+                         controller.sampleRateChangeError == nil && Array(raw.configurations.suffix(2)) == [superseded, latest],
+                         "A stale deferral restored the preference after a newer request at the same rate")
+            let newerFormat = LDACFormat(value: 2)
+            raw.emit(.formatChanged(newerFormat))
+            precondition(controller.requestedConfiguration == latest && controller.state == .active(newerFormat),
+                         "A successful newer request left the preference or active format behind")
+            let deferred = LDACConfiguration(sampleRate: 88200, quality: .adaptive)
+            controller.updateConfiguration(deferred)
+            raw.emit(.sampleRateChangeDeferred(requested: deferred, active: 96000))
+            precondition(controller.requestedConfiguration == .init(sampleRate: 96000, quality: .adaptive) &&
+                         controller.restoredRates == [48000, 96000] && controller.sampleRateChangeError?.contains("buffered") == true &&
+                         controller.state == .active(newerFormat) && raw.stops == initialStops && output.restores.isEmpty,
+                         "A matching deferral failed to restore the active sample rate and preserve the requested quality")
             try await stop(controller)
         }
+        print("PASS live LDAC configuration, peer rejection, and capture deferral preserve the active session and current preference")
+        if ProcessInfo.processInfo.arguments.contains("--check-live-configuration") { return }
         for generation in [Generation.v1, .v2] {
             let (controller, device, output, raw) = try await active(generation)
             let devices = controller.devices!
@@ -1247,14 +2362,52 @@ enum Check {
         try await waitUntil { !forced.isSessionRunning }
         precondition(forced.session == nil && forced.state == .off)
 
-        let (otherSource, sourceDevice, _, sourceRaw) = try await started(.v2)
+        for changedOutput in [false, true] {
+            let (deselected, device, output, raw) = try await started(.v2)
+            raw.emit(.handoffReady)
+            try await waitUntil { raw.handoffs == 1 }
+            deselected.audioRoute?.route = Route(uid: "fixture-speakers")
+            output.changed(.failure(LDACOwnerError(outputDeselected: true)))
+            precondition(device.isDeviceConnected && raw.audioRestorations == [false] && !output.ready,
+                         "Route-first loss requested an ordinary Bluetooth reconnect")
+            deselected.isClassicConnected = { _ in false }
+            raw.emit(.finished(.init(message: nil, targetDisconnected: true, waitForReconnect: true)))
+            try await waitUntil { deselected.state == .waitingForDevice }
+            precondition(output.restores == [true] && output.restoredHeadphoneOutputs == [false] && !output.selected)
+            precondition(deselected.session == nil && deselected.requestedAddress == device.address)
+            deselected.audioRoute?.route = Route(uid: changedOutput ? "fixture-speakers" : "fixture-headphones")
+            deselected.resumeIfReady()
+            precondition(deselected.session == nil, "LDAC resumed before the headphones returned")
+            deselected.isClassicConnected = { _ in true }
+            deselected.resumeIfReady()
+            if changedOutput {
+                precondition(deselected.state == .waitingForDevice && deselected.session == nil,
+                             "Device return overrode the selected speakers")
+            } else {
+                try await waitUntil { device.statusReadPending && device.volumeReadPending }
+                device.receiveStatus()
+                device.receiveVolume()
+                try await waitUntil { deselected.session != nil }
+                precondition(deselected.session !== raw && deselected.session?.restoringOnly == false)
+            }
+            try await stop(deselected)
+        }
+        print("PASS route-first physical loss releases LDAC without restoring Bluetooth audio and only resumes on the original output")
+
+        let (otherSource, sourceDevice, sourceOutput, sourceRaw) = try await started(.v2)
         sourceDevice.multipoint.selectedSource = .init(address: "02:00:00:00:00:03")
         sourceDevice.localSource = false
+        sourceDevice.statusFresh = false
+        sourceDevice.volumeFresh = false
+        sourceDevice.multipoint.inventoryIsStale = true
+        precondition(!otherSource.hasOtherMusicSource, "A stale source was treated as a confirmed phone handoff")
+        sourceDevice.multipoint.inventoryIsStale = false
         otherSource.controlsChanged()
         precondition(otherSource.requestedAddress == sourceDevice.address && sourceRaw.stops == 1)
-        precondition(sourceRaw.audioRestorations == [true], "Phone playback left ordinary Mac Bluetooth audio disconnected")
+        precondition(sourceRaw.audioRestorations == [false], "Phone playback triggered ordinary Mac Bluetooth audio restoration")
         sourceRaw.emit(.finished(.init(message: nil)))
         try await waitUntil { otherSource.state == .waitingForDevice }
+        precondition(sourceOutput.restores == [false] && sourceOutput.restoredHeadphoneOutputs == [false] && !sourceOutput.selected)
         for _ in 0..<10 { otherSource.resumeIfReady() }
         precondition(otherSource.session == nil, "LDAC took over another multipoint source")
         sourceDevice.multipoint.selectedSource = .init(address: "02:00:00:00:00:02")
@@ -1265,6 +2418,27 @@ enum Check {
         sourceDevice.receiveVolume()
         try await waitUntil { otherSource.session != nil }
         try await stop(otherSource)
+
+        let (phoneBeforeStop, phoneDevice, phoneOutput, phoneRaw) = try await started(.v2)
+        phoneDevice.multipoint.selectedSource = .init(address: "02:00:00:00:00:03")
+        phoneDevice.localSource = false
+        let phonePreference = UUID()
+        phoneDevice.connectionMode = .soundQuality
+        phoneDevice.lastConnectionModeChangeID = phonePreference
+        phoneBeforeStop.connectionModeRestoreID = phonePreference
+        phoneBeforeStop.connectionModeConfirmed = true
+        phoneBeforeStop.stop(reason: "User disabled LDAC while the phone was selected")
+        precondition(phoneRaw.audioRestorations == [false])
+        phoneRaw.emit(.finished(.init(message: nil)))
+        try await waitUntil { phoneBeforeStop.state == .off }
+        precondition(phoneOutput.restoredHeadphoneOutputs == [false] && phoneBeforeStop.session == nil)
+        precondition(phoneDevice.connectionRequests.isEmpty && phoneBeforeStop.deferredConnectionModes[phoneDevice.address] == phonePreference)
+        phoneDevice.multipoint.selectedSource = .init(address: "02:00:00:00:00:02")
+        phoneDevice.localSource = true
+        phoneBeforeStop.resumeIfReady()
+        try await waitUntil { phoneDevice.connectionRequests == [.stableConnection] }
+        phoneDevice.confirmConnectionMode(.stableConnection)
+        try await waitUntil { phoneBeforeStop.preferenceRestoreTasks.isEmpty }
         print("PASS actual completion routing: manual Off never reconnects absent headphones; another multipoint source holds resume until the Mac is confirmed")
         for initiallyConnected in [false, true] {
             let (bounded, recoveringDevice, _, originalRaw) = try await started(.v2)
@@ -1335,13 +2509,15 @@ enum Check {
     }
 }
 '''
-names = ["canChangeConfiguration", "updateConfiguration", "handleOutputDeselection", "needsStopBeforeTermination", "nextRecoveryDelay", "canResumeRecovery", "deviceUnavailableReason", "refreshDriverState", "start", "launch", "hasMusicVolumeForHandoff", "hasOwnedMusicContext",
-         "hasOtherMusicSource", "observeControls", "bindingIsCurrent", "musicControlStatus", "waitForControls", "controlsChanged",
-         "rebindControls", "sendPendingVolume", "setOutputGain", "fail", "beginRecovery", "scheduleRecovery", "cancelMultipointRequest", "stop", "stopSession",
+names = ["canChangeConfiguration", "updateConfiguration", "handleOutputDeselection", "observeDeselectedSourceReturn", "needsStopBeforeTermination", "nextRecoveryDelay", "canResumeRecovery", "deviceUnavailableReason", "refreshDriverState", "captureMenuBarControls", "captureMenuBarControlsFromActiveSession", "start", "validateSourceResume", "selectMacAudioSource", "launch", "hasMusicControlTarget", "hasReadableMusicVolumeForHandoff", "hasMusicVolumeForHandoff", "hasOwnedMusicContext",
+         "hasOtherMusicSource", "selectAudioSource", "beginPhoneHandoff", "observePhoneSource", "phoneHandoffIsCurrent",
+         "sendPendingPhoneSelection", "waitForQueuedPhoneSelection", "handlePhoneHeld", "resumePhoneHandoffIfReady", "verifyPhoneOutput", "clearPhoneHandoff", "observeControls",
+         "bindingIsCurrent", "musicControlStatus", "waitForControls", "controlsChanged",
+         "rebindControls", "sendPendingVolume", "setOutputGain", "fail", "beginRecovery", "scheduleRecovery", "cancelMultipointRequest", "cancelPreparation", "stop", "stopSession",
          "suspend", "resumeIfReady", "reconcileConnectionPreferences", "forgetConnectionPreference", "scheduleConnectionPreferenceRestoration", "prepareConnectionMode", "waitForConnectionChange", "restoreConnectionMode",
-         "restoreConnectionPreference", "finish", "completeStop"]
+         "restoreConnectionPreference", "returnStartupSource", "finish", "completeStop"]
 fixture = fixture.replace("precondition(", "check(")
-fixture = fixture.replace("__VOLUME__", volume).replace("__METHODS__", "\n".join(member(name) for name in names))
+fixture = fixture.replace("__DRIVER_STATES__", driver_states).replace("__VOLUME__", volume).replace("__TRANSFER__", transfer).replace("__METHODS__", "\n".join(member(name) for name in names))
 
 with tempfile.TemporaryDirectory(prefix="acouplet-ldac-controller-volume-") as directory:
     directory = Path(directory)
@@ -1355,11 +2531,13 @@ with tempfile.TemporaryDirectory(prefix="acouplet-ldac-controller-volume-") as d
     environment["CLANG_MODULE_CACHE_PATH"] = str(directory / "module-cache")
     subprocess.run(["xcrun", "swiftc", "-swift-version", "6", "-parse-as-library", str(swift), "-o", str(binary)],
                    env=environment, check=True)
-    arguments = ["--check-handoff-refresh"] if "--check-handoff-refresh" in sys.argv or "--check-handoff-mutations" in sys.argv else ["--check-volume-observation"] if "--check-volume-observation" in sys.argv else ["--check-headphone-mute"] if "--check-mute-mutations" in sys.argv or "--check-headphone-mute" in sys.argv else []
+    arguments = ["--check-source-return"] if "--check-source-return" in sys.argv else ["--check-source-preflight"] if "--check-source-preflight" in sys.argv else ["--check-handoff-refresh"] if "--check-handoff-refresh" in sys.argv or "--check-handoff-mutations" in sys.argv else ["--check-volume-observation"] if "--check-volume-observation" in sys.argv else ["--check-headphone-mute"] if "--check-mute-mutations" in sys.argv or "--check-headphone-mute" in sys.argv else []
+    for check in ["--check-live-configuration", "--check-readable-handoff", "--check-output-deselection", "--check-route-first-source-return", "--check-startup-output-deselection", "--check-pending-source-return", "--check-phone-handoff", "--check-cold-controls-overlap"]:
+        if check in sys.argv: arguments = [check]
     subprocess.run([str(binary), *arguments], env=environment, check=True)
     if "--check-mutations" in sys.argv or "--check-mute-mutations" in sys.argv or "--check-handoff-mutations" in sys.argv:
         mutations = [
-            ("handoff refresh wait", "if headphones.hasFreshMusicVolumeReadback { break }", "break",
+            ("handoff refresh wait", "if headphones.hasFreshReadableMusicVolumeReadback { break }", "break",
              "Routine playback refresh aborted handoff instead of awaiting its existing reads"),
             ("headphone mute gain", "let gain = headphones?.playback.supportsMute == true && headphones?.playback.musicMuted != false ? 0 : gain",
              "", "LDAC admission ignored known or unknown headphone mute"),

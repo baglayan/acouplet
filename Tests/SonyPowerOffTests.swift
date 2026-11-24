@@ -12,6 +12,7 @@ final class SonyPowerOffTests: XCTestCase {
             XCTAssertEqual(controller.controlProtocol, "MDR v1")
             XCTAssertEqual(controller.supportsPowerOff, supported)
             XCTAssertEqual(controller.canPowerOff, supported)
+            XCTAssertEqual(MenuBarHeadphoneControls(controller).supportsPowerOff, supported)
             let before = controller.simulatedTransmittedFrames.count
             controller.powerOff(expectedSession: controller.simulatedControlSession)
             let sent = Array(controller.simulatedTransmittedFrames.dropFirst(before))
@@ -52,6 +53,22 @@ final class SonyPowerOffTests: XCTestCase {
         XCTAssertEqual(controller.powerOffState, .unconfirmed)
         XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x22, 0x00, 0x01] }.count, 1)
     }
+
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    @MainActor
+    func testLegacyPowerOffRowSurvivesLockedControlHandoff() throws {
+        let controller = readyLegacyController(functions: [0x21])
+        let ldac = LDACController(inspectDriver: { _ in .current })
+        defer { ldac.stop(); controller.simulateControlLoss() }
+        XCTAssertTrue(MenuBarHeadphoneControls(controller).supportsPowerOff)
+        ldac.simulateRecoverySession(controller)
+        controller.simulateControlLoss(deviceConnected: false)
+        XCTAssertFalse(controller.supportsPowerOff)
+        XCTAssertNil(controller.powerOffSession)
+        XCTAssertTrue(ldac.locksMenuBarHeadphoneControls(for: controller))
+        XCTAssertTrue(try XCTUnwrap(ldac.retainedMenuBarHeadphoneControls(for: controller)).supportsPowerOff)
+    }
+    #endif
 
     @MainActor
     func testPowerOffRequiresReadyAdvertisedSupportAndTheConfirmedSession() throws {

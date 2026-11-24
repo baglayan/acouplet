@@ -338,6 +338,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var batteryReports: [UInt8: [UInt8]] = [:]
     #if !ACOUPLET_PUBLIC_APIS_ONLY
     @Published private(set) var nativeBatterySnapshot: SonyNativeBatterySnapshot?
+    private(set) var lastReadyMenuBarControls: MenuBarHeadphoneControls?
     #endif
     @Published private(set) var lowBatteryReadings: [SonyLowBatteryPolicy.Reading] = []
     #if !ACOUPLET_PUBLIC_APIS_ONLY
@@ -2386,9 +2387,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         return true
     }
 
-    func retryControlsIfNeeded() -> Bool {
-        guard !displayOnly, !isSystemSleeping, !isTerminating, isBluetoothInitialized, reconnectAutomatically,
-              isDeviceConnected, powerOffState == nil, !isRunningHeadphoneTest,
+    func retryControlsIfNeeded(forColdLDAC: Bool = false) -> Bool {
+        guard !displayOnly, !isSystemSleeping, !isTerminating, isBluetoothInitialized,
+              forColdLDAC || (reconnectAutomatically && isDeviceConnected),
+              powerOffState == nil, !isRunningHeadphoneTest,
               stage == .idle, channel == nil, classicConnectionID == nil,
               serviceDiscoveries.isEmpty, recoveryUsesBLE == nil, commonConnectionHoldAddress != address,
               connectionTransition?.isFinished != false, connectionTransition?.phase != .failed,
@@ -2401,8 +2403,17 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         #if DEBUG
         guard bleTransport == nil, preparingBLETransport == nil else { return false }
         #endif
+        let cachedChannel: BluetoothRFCOMMChannelID?
+        if forColdLDAC {
+            guard linkState == .disconnected || linkState == .controlBusy, commonConnectionRecoveryAddress == nil,
+                  rfcommCloseCompletion.wait(timeout: .now()) == .success,
+                  let channel = cachedSonyRFCOMMChannel(for: device) else { return false }
+            cachedChannel = channel
+        } else {
+            cachedChannel = nil
+        }
         cancelScheduledRetry(resetAttempts: false)
-        openSonyLink(automatically: true)
+        openSonyLink(automatically: !forColdLDAC, discoverServices: !forColdLDAC, cachedChannel: cachedChannel)
         return true
     }
 
@@ -7616,7 +7627,20 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
     }
 
-    private func openSonyLink(automatically: Bool = false, discoverServices: Bool = true) {
+    private func cachedSonyRFCOMMChannel(for device: any SonyBluetoothDevice) -> BluetoothRFCOMMChannelID? {
+        for bytes in Self.sonyUUIDBytes {
+            let uuid = bytes.withUnsafeBytes {
+                IOBluetoothSDPUUID(bytes: $0.baseAddress!, length: bytes.count)
+            }
+            if let record = device.sonyServiceRecord(for: uuid) {
+                var channelID: BluetoothRFCOMMChannelID = 0
+                if record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess { return channelID }
+            }
+        }
+        return nil
+    }
+
+    private func openSonyLink(automatically: Bool = false, discoverServices: Bool = true, cachedChannel: BluetoothRFCOMMChannelID? = nil) {
         guard !isSystemSleeping, !isTerminating, serviceDiscoveryID == nil else { return }
         guard powerOffState == nil, !isRunningHeadphoneTest else { return }
         guard let device else { return }
@@ -7635,25 +7659,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 guard let self, self.controlSession == session,
                       self.pendingClassicOpenID == identifier else { return }
                 self.pendingClassicOpenID = nil
-                self.openSonyLink(automatically: automatically, discoverServices: discoverServices)
+                self.openSonyLink(automatically: automatically, discoverServices: discoverServices, cachedChannel: cachedChannel)
             }
             return
         }
         pendingClassicOpenID = nil
-        var selectedChannelID: BluetoothRFCOMMChannelID?
-        for bytes in Self.sonyUUIDBytes {
-            let uuid = bytes.withUnsafeBytes {
-                IOBluetoothSDPUUID(bytes: $0.baseAddress!, length: bytes.count)
-            }
-            if let record = device.sonyServiceRecord(for: uuid) {
-                var channelID: BluetoothRFCOMMChannelID = 0
-                if record.getRFCOMMChannelID(&channelID) == kIOReturnSuccess {
-                    selectedChannelID = channelID
-                    break
-                }
-            }
-        }
-        guard let channelID = selectedChannelID else {
+        guard let channelID = cachedChannel ?? cachedSonyRFCOMMChannel(for: device) else {
             if discoverServices {
                 discoverSonyService(on: device, automatically: automatically)
             } else {
@@ -7744,6 +7755,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     private func closeSonyLink() {
         musicHandoverReadOrdinal = nil
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        retainMenuBarControls()
+        #endif
         #if DEBUG
         let preparingTransport = preparingBLETransport
         preparingBLETransport = nil
@@ -7918,6 +7932,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             scheduleRetry()
             return
         }
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        retainMenuBarControls()
+        #endif
         resetWearingStatusRead(preservingPendingRead: reusingConnection)
         resetLegacyCapabilities()
         protocolInformation = nil
@@ -8025,6 +8042,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         scheduleHandshakeTimeout()
         send([0x00, 0x00])
     }
+
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    private func retainMenuBarControls() {
+        guard isReady, powerOffState == nil, !headphoneTestNeedsRecovery, !isSystemSleeping else { return }
+        lastReadyMenuBarControls = MenuBarHeadphoneControls(self)
+    }
+    #endif
 
     private func scheduleHandshakeTimeout() {
         handshakeTimeoutWorkItem?.cancel()

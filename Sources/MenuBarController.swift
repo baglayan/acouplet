@@ -131,7 +131,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     private func updateStatusItem() {
         let headphones = devices.selectedController
         #if !ACOUPLET_PUBLIC_APIS_ONLY
-        let keepsLDACVisible = ldac.targetAddress == headphones.address && ldac.state.keepsMenuBarVisible(isSessionRunning: ldac.isSessionRunning)
+        let keepsLDACVisible = ldac.keepsMenuBarVisible(forAddress: headphones.address)
         #else
         let keepsLDACVisible = false
         #endif
@@ -319,10 +319,17 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
 }
 
 #if !ACOUPLET_PUBLIC_APIS_ONLY
+extension LDACController {
+    func keepsMenuBarVisible(forAddress address: String) -> Bool {
+        multipointShutdownAddress == address
+            || (targetAddress == address && state.keepsMenuBarVisible(isSessionRunning: isSessionRunning))
+    }
+}
+
 extension LDACState {
     func keepsMenuBarVisible(isSessionRunning: Bool) -> Bool {
         switch self {
-        case .requested, .connecting, .active, .stopping: true
+        case .requested, .connecting, .waitingForMac, .active, .stopping: true
         case .failed: isSessionRunning
         case .off, .waitingForDevice: false
         }

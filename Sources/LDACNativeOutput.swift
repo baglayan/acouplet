@@ -37,6 +37,10 @@ struct LDACOutputDeselectedError: LocalizedError {
     var errorDescription: String? { String(localized: "The Mac audio output changed. LDAC stopped.") }
 }
 
+struct LDACPhoneFallbackUnavailableError: LocalizedError {
+    var errorDescription: String? { String(localized: "The previous Mac audio output is unavailable.") }
+}
+
 struct LDACRouteRecovery: Codable, Sendable {
     let address: String
     let model: String
@@ -44,12 +48,15 @@ struct LDACRouteRecovery: Codable, Sendable {
     let defaults: [UInt32: String]
     let controls: LDACNativeVolume
     let selected: Bool
+
+    var defaultOutputUID: String? { defaults[kAudioHardwarePropertyDefaultOutputDevice] }
 }
 
 @MainActor
 final class LDACNativeOutput {
     nonisolated static let uid = "dev.baglayan.Acouplet.ldac-output"
     private nonisolated static let leaseSelector: AudioObjectPropertySelector = 0x786D6C73
+    private static let ratePendingSelector: AudioObjectPropertySelector = 0x786D7274
     private static let modelSelector: AudioObjectPropertySelector = 0x786D6E6D
     private nonisolated static let prioritySelector: AudioObjectPropertySelector = 0x786D7072
     private static let system = AudioObjectID(kAudioObjectSystemObject)
@@ -63,13 +70,17 @@ final class LDACNativeOutput {
     private var device = AudioObjectID(kAudioObjectUnknown)
     private var stream = AudioObjectID(kAudioObjectUnknown)
     private var sampleRateHz = Float64(48000)
+    private var changingClock = false
     private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
     private var renewTask: Task<Void, Never>?
     private var leaseActivity: NSObjectProtocol?
     private var savedDefaults: [AudioObjectPropertySelector: String] = [:]
+    private var expectedDefaultOutputUID: String?
+    private var partialSourceResumeSelection = false
     private var expected = LDACNativeVolume(scalar: 0, muted: true)
     private(set) var controls = LDACNativeVolume(scalar: 0, muted: true)
     private(set) var isSelected = false
+    private(set) var isParkedForPhone = false
     private(set) var userVolumeChanged = false
     private(set) var hasInitialVolume = false
     private var ready = false
@@ -111,23 +122,29 @@ final class LDACNativeOutput {
     }
 
     nonisolated static func canTransferControls(uid: String, transport: UInt32, address: String) -> Bool {
-        guard transport == kAudioDeviceTransportTypeBluetooth,
-              uid.count == 17 || (uid.count > 17 && uid.dropFirst(17).first == ":"),
+        transport == kAudioDeviceTransportTypeBluetooth && isTargetOutput(uid: uid, address: address)
+    }
+
+    private nonisolated static func isTargetOutput(uid: String, address: String) -> Bool {
+        guard uid.count == 17 || (uid.count > 17 && uid.dropFirst(17).first == ":"),
               let target = SonyBLEIdentity.normalizedAddress(address),
               let source = SonyBLEIdentity.normalizedAddress(String(uid.prefix(17))) else { return false }
         return source == target
     }
 
-    func claim(model: String, targetAddress: String, sampleRate: LDACSampleRate = .hz48000, recovering: LDACRouteRecovery? = nil) async throws {
+    func claim(model: String, targetAddress: String, sampleRate: LDACSampleRate = .hz48000,
+               recovering: LDACRouteRecovery? = nil, requiresIdlePriority: Bool = false,
+               expectedDefaultOutputUID: String? = nil) async throws {
         record("claim-requested", reason: "model=\(model)")
         guard let endpoint = try Self.resolve(Self.uid) else {
-            throw OutputError(String(localized: "Install the LDAC driver from the app, then restart your Mac."))
+            throw OutputError("Core Audio could not resolve the LDAC output device UID.", userFacing: String(localized: "macOS did not make LDAC audio available. Try again."))
         }
         do { try Self.acquireRouteOwner(); holdsRouteOwner = true }
         catch {
             throw OutputError("macOS could not reserve LDAC route ownership: \(Self.diagnosticDescription(error))", userFacing: String(localized: "macOS did not make LDAC audio available. Try again."))
         }
         self.model = model
+        self.expectedDefaultOutputUID = expectedDefaultOutputUID
         restoringOwner = recovering != nil
         controls.muted = false
         if let recovering {
@@ -137,10 +154,19 @@ final class LDACNativeOutput {
         } else {
             for selector in Self.defaultSelectors {
                 let output: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
+                if selector == kAudioHardwarePropertyDefaultOutputDevice, expectedDefaultOutputUID != nil, output == kAudioObjectUnknown {
+                    throw LDACOutputDeselectedError()
+                }
                 let savedUID = try Self.readString(output, selector: kAudioDevicePropertyDeviceUID)
+                let transport: UInt32 = try Self.read(output, selector: kAudioDevicePropertyTransportType, initial: 0)
+                if selector == kAudioHardwarePropertyDefaultOutputDevice, let expectedDefaultOutputUID {
+                    guard savedUID == expectedDefaultOutputUID,
+                          Self.canTransferControls(uid: savedUID, transport: transport, address: targetAddress) else {
+                        throw LDACOutputDeselectedError()
+                    }
+                }
                 guard savedUID != Self.uid else { throw OutputError(String(localized: "Select your headphones as the Mac output, then retry LDAC.")) }
                 savedDefaults[selector] = savedUID
-                let transport: UInt32 = try Self.read(output, selector: kAudioDevicePropertyTransportType, initial: 0)
                 if selector == kAudioHardwarePropertyDefaultOutputDevice,
                    Self.canTransferControls(uid: savedUID, transport: transport, address: targetAddress) {
                     var volumeProperty = Self.property(kAudioDevicePropertyVolumeScalar, scope: kAudioObjectPropertyScopeOutput)
@@ -163,6 +189,7 @@ final class LDACNativeOutput {
         }
         device = endpoint
         sampleRateHz = Float64(sampleRate.rawValue)
+        if requiresIdlePriority { try Self.requireIdlePriority(device) }
         do { try setLease(true) }
         catch {
             throw OutputError("macOS could not claim the experimental LDAC output: \(Self.diagnosticDescription(error))", userFacing: String(localized: "macOS did not make LDAC audio available. Try again."))
@@ -196,7 +223,8 @@ final class LDACNativeOutput {
                 }
             }
         }
-        try await clearPreviousPriority()
+        if requiresIdlePriority { try Self.requireIdlePriority(device) }
+        else { try await clearPreviousPriority() }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(5))
         while true {
@@ -244,6 +272,7 @@ final class LDACNativeOutput {
             if AudioObjectHasProperty(device, &property) { try listen(device, selector: selector, scope: kAudioObjectPropertyScopeOutput) }
         }
         for selector in Self.defaultSelectors { try listen(Self.system, selector: selector) }
+        if expectedDefaultOutputUID != nil { try verifyRoute() }
     }
 
     var routeRecovery: LDACRouteRecovery {
@@ -322,6 +351,13 @@ final class LDACNativeOutput {
         }
     }
 
+    private nonisolated static func requireIdlePriority(_ device: AudioObjectID) throws {
+        guard (try? prioritySnapshot(device))?.state.phase == "idle" else {
+            throw OutputError("The LDAC driver has not finished an earlier Bluetooth audio session.",
+                userFacing: String(localized: "LDAC did not stop completely."))
+        }
+    }
+
     private static func priorityConnectionDisconnected(address: String) -> Bool {
         guard CBManager.authorization == .allowedAlways,
               let device = IOBluetoothDevice(addressString: address), device.isPaired() else { return false }
@@ -330,17 +366,95 @@ final class LDACNativeOutput {
 
     func selectForHandoff() throws {
         try verifyRoute()
-        for selector in handoffSelectors {
+        if isSelected { return }
+        func validate(_ selector: AudioObjectPropertySelector) throws {
             let current: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
+            if expectedDefaultOutputUID != nil, current == kAudioObjectUnknown { throw LDACOutputDeselectedError() }
             guard try LDACNativeVolume.canHandoff(currentUID: Self.readString(current, selector: kAudioDevicePropertyDeviceUID),
                                                  savedUID: savedDefaults[selector]) else {
+                if expectedDefaultOutputUID != nil { throw LDACOutputDeselectedError() }
                 throw OutputError("The Mac audio output changed before LDAC handoff. Retry LDAC.", userFacing: String(localized: "The Mac audio output changed before LDAC started. Try again."))
             }
         }
+        try handoffSelectors.forEach(validate)
+        partialSourceResumeSelection = expectedDefaultOutputUID != nil
         isSelected = true
-        for selector in handoffSelectors { try Self.write(Self.system, selector: selector, value: device) }
+        for selector in handoffSelectors {
+            if expectedDefaultOutputUID != nil { try validate(selector) }
+            try Self.write(Self.system, selector: selector, value: device)
+        }
         try verifyRoute()
+        partialSourceResumeSelection = false
         record("selected", reason: "silent endpoint selected")
+    }
+
+    func parkForPhone() throws -> Bool {
+        guard isSelected, !isParkedForPhone else { throw LDACOutputDeselectedError() }
+        try verifyRoute()
+        for selector in handoffSelectors where try phoneFallback(for: selector) == nil { return false }
+        if let error = silence() { throw OutputError(error) }
+        isParkedForPhone = true
+        for selector in handoffSelectors { try releasePhoneSelector(selector, requireOwnership: true) }
+        try verifyRoute()
+        isSelected = false
+        return true
+    }
+
+    func resumeFromPhone() throws {
+        guard isParkedForPhone, !isSelected else { throw LDACOutputDeselectedError() }
+        try verifyRoute()
+        var attempted: [AudioObjectPropertySelector] = []
+        isSelected = true
+        do {
+            for selector in handoffSelectors {
+                try verifyPhoneFallback(for: selector)
+                attempted.append(selector)
+                try Self.write(Self.system, selector: selector, value: device)
+            }
+            isParkedForPhone = false
+            try verifyRoute()
+        } catch {
+            isParkedForPhone = true
+            var rollbackError: Error?
+            for selector in attempted {
+                do { try releasePhoneSelector(selector, requireOwnership: false) }
+                catch { rollbackError = error }
+            }
+            isSelected = rollbackError != nil
+            throw rollbackError ?? error
+        }
+    }
+
+    private func phoneFallback(for selector: AudioObjectPropertySelector) throws -> AudioObjectID? {
+        guard let savedUID = savedDefaults[selector], savedUID != Self.uid,
+              !Self.isTargetOutput(uid: savedUID, address: address),
+              let fallback = try Self.resolve(savedUID), fallback != device,
+              try Self.isAliveOutput(fallback) else { return nil }
+        return fallback
+    }
+
+    private func verifyPhoneFallback(for selector: AudioObjectPropertySelector) throws {
+        guard let fallback = try phoneFallback(for: selector), try leaseIsOwned() else { throw LDACOutputDeselectedError() }
+        let current: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
+        guard current == fallback else { throw LDACOutputDeselectedError() }
+    }
+
+    private func releasePhoneSelector(_ selector: AudioObjectPropertySelector, requireOwnership: Bool) throws {
+        guard try leaseIsOwned() else { throw LDACOutputDeselectedError() }
+        let current: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
+        guard current == device else {
+            if requireOwnership { throw LDACOutputDeselectedError() }
+            return
+        }
+        guard let fallback = try phoneFallback(for: selector) else { throw LDACOutputDeselectedError() }
+        let observed: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
+        guard observed == device else {
+            if requireOwnership { throw LDACOutputDeselectedError() }
+            return
+        }
+        try Self.write(Self.system, selector: selector, value: fallback)
+        let restored: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
+        guard restored != device else { throw LDACOutputDeselectedError() }
     }
 
     func validateForRecovery() throws {
@@ -374,14 +488,19 @@ final class LDACNativeOutput {
         return nil
     }
 
-    func restoreAndRelease(targetDisconnected: Bool = false) async -> String? {
+    func restoreAndRelease(targetDisconnected: Bool = false, restoreHeadphoneOutput: Bool = true) async -> String? {
         restoring = true
         record("restoring", reason: "selected=\(isSelected) userMuted=\(controls.muted)")
         let silenceError = silence()
         var errors = [silenceError].compactMap { $0 }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(8))
-        if isSelected {
+        if isParkedForPhone && isSelected {
+            for selector in handoffSelectors {
+                do { try releasePhoneSelector(selector, requireOwnership: false) }
+                catch { errors.append(error.localizedDescription) }
+            }
+        } else if isSelected {
             for selector in handoffSelectors {
                 guard let savedUID = savedDefaults[selector] else { continue }
                 do {
@@ -397,15 +516,16 @@ final class LDACNativeOutput {
                         }
                         if let restored = try Self.resolve(savedUID), try Self.isAliveOutput(restored) {
                             let transport: UInt32 = try Self.read(restored, selector: kAudioDevicePropertyTransportType, initial: 0)
-                            if isSelected, !restoringOwner, Self.canTransferControls(uid: savedUID, transport: transport, address: address) {
-                                try Self.setMute(restored, muted: controls.muted)
+                            if Self.canTransferControls(uid: savedUID, transport: transport, address: address) {
+                                if !restoreHeadphoneOutput && !partialSourceResumeSelection { break }
+                                if restoreHeadphoneOutput, !restoringOwner { try Self.setMute(restored, muted: controls.muted) }
                             }
                             try Self.write(Self.system, selector: selector, value: restored)
                             record("route-restored", reason: "selector=\(selector) savedUID=\(savedUID) userMuted=\(controls.muted)")
                             break
                         }
-                        if targetDisconnected || clock.now >= deadline {
-                            if targetDisconnected { break }
+                        if targetDisconnected || !restoreHeadphoneOutput { break }
+                        if clock.now >= deadline {
                             errors.append(String(localized: "The previous Mac audio output did not return. Check Sound settings to select it."))
                             break
                         }
@@ -455,23 +575,87 @@ final class LDACNativeOutput {
         try Self.write(device, selector: kAudioDevicePropertyMute, scope: kAudioObjectPropertyScopeOutput, value: UInt32(expected.muted ? 1 : 0), requiringLease: true)
     }
 
+
+    func nativeClockControl() throws -> LDACNativeClockControl? {
+        var property = Self.property(Self.ratePendingSelector)
+        guard AudioObjectHasProperty(device, &property) else { return nil }
+        guard try Self.driverRevision().map({ $0 >= 11 }) == true else {
+            throw OutputError("The LDAC driver reported inconsistent native clock support.")
+        }
+        return LDACNativeClockControl { [weak self] previous, requested, deadline in
+            guard let self else { throw CancellationError() }
+            return try await self.changeClock(from: previous, to: requested, deadline: deadline)
+        }
+    }
+
+    private func changeClock(from previous: LDACSampleRate, to requested: LDACSampleRate,
+                             deadline: DispatchTime) async throws -> Bool {
+        guard !restoring, !changingClock, sampleRateHz == Double(previous.rawValue) else {
+            throw OutputError("The selected LDAC clock changed before a native rate request.")
+        }
+        try verifyRoute()
+        try Task.checkCancellation()
+        changingClock = true
+        defer { changingClock = false }
+        let rate = Double(requested.rawValue)
+        do {
+            try Self.write(device, selector: kAudioDevicePropertyNominalSampleRate, value: rate)
+        } catch {
+            if try driverClockRate() == previous.rawValue, try hasSelectedFormat() { return false }
+            throw error
+        }
+        while DispatchTime.now() < deadline {
+            try Task.checkCancellation()
+            try verifyRoute()
+            let driverRate = try driverClockRate()
+            if driverRate == requested.rawValue, (try? hasSelectedFormat(rate: rate)) == true {
+                sampleRateHz = rate
+                return true
+            }
+            if driverRate == previous.rawValue, (try? hasSelectedFormat()) == true { return false }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw OutputError("The Core Audio native clock outcome could not be confirmed.")
+    }
+
+    private func driverClockRate() throws -> Int {
+        let value = try Self.read(device, selector: Self.ratePendingSelector, initial: Optional<Unmanaged<CFTypeRef>>.none)
+        guard let number = value?.takeRetainedValue() as? NSNumber,
+              number.doubleValue == Double(number.intValue),
+              number.intValue == 0 || LDACSampleRate(rawValue: number.intValue) != nil else {
+            throw OutputError("The LDAC driver did not report its native clock request state.")
+        }
+        return number.intValue
+    }
+
     private func verifyRoute() throws {
-        guard try leaseIsOwned(), try Self.isSelectableEndpoint(device) else { throw OutputError("The experimental LDAC output became unavailable.", userFacing: String(localized: "LDAC audio became unavailable. Try again.")) }
-        guard try hasSelectedFormat() else { throw OutputError(String(localized: "The Mac audio format changed. LDAC stopped.")) }
-        if isSelected {
+        guard try leaseIsOwned(), try (changingClock || Self.isSelectableEndpoint(device)) else {
+            throw OutputError("The experimental LDAC output became unavailable.", userFacing: String(localized: "LDAC audio became unavailable. Try again."))
+        }
+        if !changingClock, try !hasSelectedFormat() { throw OutputError(String(localized: "The Mac audio format changed. LDAC stopped.")) }
+        if isParkedForPhone {
+            for selector in handoffSelectors { try verifyPhoneFallback(for: selector) }
+        } else if isSelected {
             for selector in handoffSelectors {
                 let current: AudioObjectID = try Self.read(Self.system, selector: selector, initial: 0)
                 guard current == device else { throw LDACOutputDeselectedError() }
             }
+        } else if let expectedDefaultOutputUID {
+            let current: AudioObjectID = try Self.read(Self.system, selector: kAudioHardwarePropertyDefaultOutputDevice, initial: 0)
+            guard current != kAudioObjectUnknown,
+                  try Self.readString(current, selector: kAudioDevicePropertyDeviceUID) == expectedDefaultOutputUID else {
+                throw LDACOutputDeselectedError()
+            }
         }
     }
 
-    private func hasSelectedFormat() throws -> Bool {
+    private func hasSelectedFormat(rate expected: Float64? = nil) throws -> Bool {
+        let selected = expected ?? sampleRateHz
         let rate: Float64 = try Self.read(device, selector: kAudioDevicePropertyNominalSampleRate, initial: 0)
-        guard rate == sampleRateHz else { return false }
+        guard rate == selected else { return false }
         for selector in [kAudioStreamPropertyPhysicalFormat, kAudioStreamPropertyVirtualFormat] {
             let format = try Self.read(stream, selector: selector, initial: AudioStreamBasicDescription())
-            guard format.mSampleRate == sampleRateHz, format.mFormatID == kAudioFormatLinearPCM,
+            guard format.mSampleRate == selected, format.mFormatID == kAudioFormatLinearPCM,
                   format.mFormatFlags == kAudioFormatFlagsNativeFloatPacked, format.mChannelsPerFrame == 2,
                   format.mBitsPerChannel == 32, format.mBytesPerFrame == 8,
                   format.mFramesPerPacket == 1, format.mBytesPerPacket == 8 else { return false }

@@ -1,5 +1,6 @@
 import pathlib
 import subprocess
+import sys
 import tempfile
 
 
@@ -83,6 +84,7 @@ final class SessionEvents {
             case .failed: "failed"
             case .active: "active"
             case .formatChanged: "formatChanged"
+            case .sampleRateChangeDeferred: "sampleRateChangeDeferred"
             default: "other"
             }
         }
@@ -108,6 +110,18 @@ final class FixturePriority: @unchecked Sendable {
                 prioritySent: self.enabled, targetPublicationSeen: self.enabled, targetPublicationWithdrawn: false) }
         })
     }
+}
+
+enum RateFixture {
+    static let firstFrames = 12_288
+    static let secondFrames = 24_576
+    static let firstWatermark = firstFrames * 8
+    static let secondWatermark = firstWatermark + secondFrames * 8
+    static let firstFreeze = "CAPTURE_FROZEN rate=48000 bytes=\(firstWatermark) sourceFrames=\(firstFrames)"
+    static let declinedFreeze = "CAPTURE_FREEZE_DECLINED rate=48000 queuedFrames=96256 reserveFrames=864256 capacityFrames=960000"
+    static let secondFreeze = "CAPTURE_FROZEN rate=96000 bytes=\(secondWatermark) sourceFrames=\(firstFrames + secondFrames / 2)"
+    static let firstDrain = "RATE_DRAINED rate=48000 bytes=\(firstWatermark) sourceFrames=\(firstFrames) paddingFrames=128"
+    static let secondDrain = "RATE_DRAINED rate=96000 bytes=\(secondWatermark) sourceFrames=\(secondFrames) paddingFrames=256"
 }
 
 extension LDACNativeSession.Helpers {
@@ -171,28 +185,168 @@ extension LDACNativeSession {
         }
     }
 
+    static func earlyMediaPreparationCheck(executable: URL, cancelled: Bool) throws {
+        let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+            helpers: Helpers(fixture: executable), gain: 0, outputDeviceUID: "fixture-output",
+            outputSampleRate: .hz48000, receive: { _ in })
+        let probe = try LDACNativeChild(executable: executable,
+            arguments: ["--fixture", "read", "FIXTURE_WAITING", "stop", "0"], inheritedPCM: nil)
+        defer {
+            cleanUp(Array(session.children.values))
+            if session.pcmRead >= 0 { Darwin.close(session.pcmRead) }
+            if session.pcmWrite >= 0 { Darwin.close(session.pcmWrite) }
+        }
+        session.children["probe"] = probe
+        session.connected = true
+        try session.handle("probe", line: "OWNED_OPEN CID=0040 outgoingMTU=1000")
+        try session.advance()
+        try require(session.children["media"] == nil && session.children["capture"] == nil,
+            "Helper preparation preceded compatible endpoint discovery")
+        try session.handle("probe", line: "PREPARE_MEDIA")
+        try session.advance()
+        guard let media = session.children["media"], let capture = session.children["capture"] else {
+            throw ClosureCheckError(description: "Media and capture preparation did not start together before the connector finished")
+        }
+        var capturePrepared = false
+        func readCapture() throws {
+            for line in try capture.readLines() {
+                if line == "PCM_CAPTURE_PREPARED rate=48000" { capturePrepared = true }
+                try session.handle("capture", line: line)
+            }
+        }
+        try waitUntil {
+            for line in try media.readLines() { try session.handle("media", line: line) }
+            try readCapture()
+            return session.mediaPrepared && capturePrepared
+        }
+        try session.advance()
+        try require(!session.preparedSent && !session.captureStartSent && session.mediaGate.cid == nil && !session.pcmReady,
+            "Early preparation advanced media or audio capture before verified readiness")
+        if cancelled { session.stop(restoreAudio: false) }
+        else { session.fail("Fixture connection failed before readiness", stage: "connector") }
+        try waitUntil {
+            for child in [probe, media] {
+                _ = try child.readLines()
+                child.reap()
+            }
+            try readCapture()
+            capture.reap()
+            try session.advance()
+            return probe.finished && media.finished && capture.finished
+        }
+        try require(probe.status == 0 && media.status == 0 && session.canRestore && !session.preparedSent && !session.started,
+            "Early cancellation or failure did not close the prepared media helper cleanly")
+        try require(!session.captureStartSent && !session.captureReady && !session.mediaStopSent
+            && session.captureCancelledBeforeStream && session.captureStoppedCleanly && session.hardFailure != cancelled,
+            "Prepared capture did not stop cleanly without starting audio or asking unopened media to stop")
+    }
+
     @MainActor
-    static func logfreePlaybackCheck(executable: URL, priorityAvailable: Bool) async throws {
+    static func logfreePlaybackCheck(executable: URL, priorityAvailable: Bool, liveRates: Bool = false,
+                                     capturePermissionMode: CapturePermissionMode = .check, mediaReadyFault: String? = nil, warmHold: Bool = false, warmExit: String? = nil) async throws {
+        let barrier = FileManager.default.temporaryDirectory.appendingPathComponent("acouplet-capture-barrier-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: barrier, withIntermediateDirectories: false)
+        setenv("ACOUPLET_FIXTURE_CAPTURE_BARRIER", barrier.path, 1)
+        if let mediaReadyFault { setenv("ACOUPLET_FIXTURE_MEDIA_READY_FAULT", mediaReadyFault, 1) }
+        if let warmExit { setenv("ACOUPLET_FIXTURE_WARM_EXIT", warmExit, 1) }
+        defer {
+            unsetenv("ACOUPLET_FIXTURE_WARM_EXIT")
+            unsetenv("ACOUPLET_FIXTURE_CAPTURE_BARRIER")
+            unsetenv("ACOUPLET_FIXTURE_MEDIA_READY_FAULT")
+            try? FileManager.default.removeItem(at: barrier)
+        }
         let events = SessionEvents()
         let priority = FixturePriority(available: priorityAvailable)
         let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
-            helpers: Helpers(fixture: executable), gain: 0.25, outputDeviceUID: "fixture-output",
-            priority: priority.control, receive: { events.values.append($0) })
+            helpers: Helpers(fixture: executable), gain: 0.25, outputDeviceUID: liveRates ? "fixture-live-rate" : warmHold ? "fixture-warm-hold" : "fixture-output",
+            outputSampleRate: .hz48000,
+            priority: priority.control, capturePermissionMode: capturePermissionMode, receive: { events.values.append($0) })
         session.start()
         var handedOff = false
         var stopped = false
         var gainApplied = false
+        var parkRequested = false
+        var resumeRequested = false
+        var heldAt: DispatchTime?
+        var startRequestedAt: DispatchTime?
+        var disallowedAuthorization: UUID?
+        let peerEnded = ["peer-close", "peer-abort", "peer-close-before-suspend"].contains(warmExit ?? "")
+        var rateRequested = false
+        var rejectedRateRequested = false
         let deadline = DispatchTime.now() + 15
         while DispatchTime.now() < deadline {
             if !handedOff, events.values.contains(where: { if case .handoffReady = $0 { return true }; return false }) {
                 session.allowHandoff()
                 handedOff = true
             }
-            if !gainApplied, events.values.contains(where: { if case .active = $0 { return true }; return false }) {
+            let active = events.values.contains { if case .active = $0 { return true }; return false }
+            let held = events.values.contains { if case .warmHeld = $0 { return true }; return false }
+            let resumed = events.values.contains {
+                if case let .warmResumed(format) = $0 { return format.sampleRateHz == 48000 }
+                return false
+            }
+            if warmHold, active, !parkRequested {
+                session.park()
+                parkRequested = true
+            }
+            if warmHold, held, !resumeRequested, !peerEnded {
+                let beganHolding = heldAt ?? .now()
+                heldAt = beganHolding
+                if warmExit != "long-hold" || DispatchTime.now() >= beganHolding + 6 {
+                    session.updateGain(0.9)
+                    if warmExit == "queued-configuration" || warmExit == "stop-prefill" {
+                        session.updateConfiguration(.init(sampleRate: .hz48000, quality: .quality))
+                    }
+                    if warmExit == "stop" {
+                        session.stop(restoreAudio: false)
+                        stopped = true
+                    } else {
+                        session.resumeParkedStream()
+                    }
+                    resumeRequested = true
+                }
+            }
+            if let authorization = events.values.compactMap({
+                if case let .warmCaptureReady(value) = $0 { return value }
+                return nil as UUID?
+            }).last {
+                if disallowedAuthorization == nil {
+                    let stale = UUID()
+                    disallowedAuthorization = stale
+                    session.allowParkedStart(stale)
+                    if warmExit == "stop-prefill" {
+                        session.stop(restoreAudio: false)
+                        session.allowParkedStart(authorization)
+                    }
+                    startRequestedAt = .now()
+                } else if warmExit != "stop-prefill" && warmExit != "authorization-timeout",
+                          let startRequestedAt, DispatchTime.now() >= startRequestedAt + .milliseconds(120) {
+                    session.allowParkedStart(authorization)
+                }
+            }
+            if warmExit == "overlap-stop", !stopped,
+               FileManager.default.fileExists(atPath: barrier.appendingPathComponent("warm-start-accepted").path) {
+                session.stop(restoreAudio: false)
+                stopped = true
+            }
+            if !gainApplied, warmHold ? resumed : active {
                 session.updateGain(0.5)
                 gainApplied = true
             }
-            if !stopped, events.values.contains(where: { if case .gainApplied(0.5) = $0 { return true }; return false }) {
+            let gainConfirmed = events.values.contains { if case .gainApplied(0.5) = $0 { return true }; return false }
+            if liveRates, gainConfirmed, !rateRequested {
+                rateRequested = true
+                session.updateConfiguration(.init(sampleRate: .hz96000, quality: .quality))
+            }
+            if rateRequested, !rejectedRateRequested, events.values.contains(where: {
+                if case let .formatChanged(format) = $0 { return format.sampleRateHz == 96000 }
+                return false
+            }) {
+                rejectedRateRequested = true
+                session.updateConfiguration(.init(sampleRate: .hz88200, quality: .quality))
+            }
+            let rateRolledBack = events.values.contains { if case .sampleRateChangeRejected(requested: .hz88200, active: .hz96000) = $0 { return true }; return false }
+            if !stopped, gainConfirmed, !liveRates || rateRolledBack {
                 session.stop(restoreAudio: false)
                 stopped = true
             }
@@ -206,6 +360,43 @@ extension LDACNativeSession {
         guard case let .finished(completion)? = events.values.last else {
             throw ClosureCheckError(description: "Log-free fixture did not complete within fifteen seconds")
         }
+        let log = try String(contentsOf: session.rawURL!.deletingLastPathComponent().appendingPathComponent("session.log"), encoding: .utf8)
+        let ownedMediaEvents = events.values.indices.filter { if case .ownedMediaReady = events.values[$0] { return true }; return false }
+        if let mediaReadyFault {
+            let expected = mediaReadyFault == "format" ? "LDAC did not start with the selected audio format."
+                : "The media helper reported invalid or repeated channel readiness."
+            try require(handedOff && completion.message != nil && log.contains("FAILED \(expected)"),
+                "Malformed media readiness was not rejected: \(mediaReadyFault)")
+            try require(ownedMediaEvents.isEmpty && !session.captureStartSent && !session.captureReady && !session.pcmReady && !session.started
+                && !log.contains("COMMAND capture capture") && !log.contains("COMMAND media start"),
+                "Unverified media readiness enabled capture: \(mediaReadyFault)")
+            try require(session.children["capture"]?.finished == true && session.children["media"]?.finished == true
+                && session.captureCancelledBeforeStream && session.captureStoppedCleanly
+                && session.mediaGate.closed && session.signalingGate.closed && !session.shutdownUnverified,
+                "Invalid media readiness did not clean up both helpers or their owned channels: \(mediaReadyFault)")
+            return
+        }
+        let activeEvent = events.values.firstIndex { if case .active = $0 { return true }; return false }
+        try require(ownedMediaEvents.count == 1 && activeEvent.map({ ownedMediaEvents[0] < $0 }) == true,
+                    "Cold owned-media readiness was missing, repeated, or published after the stream became active")
+        if let warmExit, !["long-hold", "queued-configuration", "overlap"].contains(warmExit) {
+            let orderly = ["stop", "stop-prefill", "overlap-stop"].contains(warmExit) || peerEnded
+            let expected = warmExit == "authorization-timeout" ? "FAILED LDAC could not complete its warm hold within the deadline."
+                : "FAILED Unexpected response while holding the LDAC stream."
+            try require((completion.message == nil) == orderly && (orderly || log.contains(expected)),
+                "A held-channel interruption had the wrong outcome: \(warmExit)")
+            try require(session.signalingGate.closed && session.mediaGate.closed && session.captureStoppedCleanly
+                && !session.shutdownUnverified && !log.contains("COMMAND media resume") && !log.contains("COMMAND media gain 0.5"),
+                "A held-channel interruption reopened playback or failed to close: \(warmExit)")
+            let prefillRequested = ["start-cid", "stop-prefill", "authorization-timeout", "overlap-stop"].contains(warmExit)
+            let startSent = ["start-cid", "overlap-stop"].contains(warmExit)
+            try require(log.contains("COMMAND probe resume") == startSent
+                && log.contains("COMMAND media warm-prefill") == prefillRequested
+                && !log.contains("COMMAND media quality high")
+                && (!peerEnded || !log.contains("COMMAND probe media-finished")),
+                "An invalid channel report advanced the wrong stage: \(warmExit)")
+            return
+        }
         try require(handedOff && gainApplied && stopped && completion.message == nil,
             "Log-free capture/playback/stop failed: \(completion.message ?? "missing active state")")
         try require(priority.lock.withLock { priority.requests } == (priorityAvailable ? [true, false] : [true]),
@@ -214,7 +405,74 @@ extension LDACNativeSession {
             "Capture or connection guardian cleanup was not confirmed")
         try require(session.signalingGate.closed && session.mediaGate.closed && !session.shutdownUnverified,
             "Owned channel callbacks did not confirm shutdown")
-        let log = try String(contentsOf: session.rawURL!.deletingLastPathComponent().appendingPathComponent("session.log"), encoding: .utf8)
+        try require(log.contains("LAUNCH preflight") == (capturePermissionMode == .check),
+            "An already verified session repeated the targeted permission probe")
+        if liveRates {
+            let formats = events.values.compactMap { if case let .formatChanged(format) = $0 { return format }; return nil as LDACFormat? }
+            try require(formats == Array(repeating: .init(sampleRateHz: 96000, bitrateKbps: 990, channels: 2, sourceSampleRateHz: 48000), count: 2),
+                        "Rate changes reported unverified or misleading formats")
+            try require(log.components(separatedBy: "LAUNCH capture").count == 2 &&
+                        log.components(separatedBy: "COMMAND media open").count == 2 &&
+                        log.components(separatedBy: "COMMAND probe resume").count == 4 &&
+                        log.components(separatedBy: "COMMAND capture freeze").count == 3 &&
+                        log.components(separatedBy: "COMMAND capture rate ").count == 3,
+                        "Rate changes replaced the capture or owned transport")
+            let initial = ["COMMAND capture freeze", "capture \(RateFixture.firstFreeze)",
+                "COMMAND media drain \(RateFixture.firstWatermark)", "media \(RateFixture.firstDrain)",
+                "COMMAND probe rate 96000", "probe RATE_SELECTED rate=96000", "COMMAND media rate 96000 high",
+                "media RATE_PREPARED rate=96000", "COMMAND probe resume", "probe RATE_START_ACCEPTED rate=96000",
+                "COMMAND capture rate 96000"]
+            let rollback = ["COMMAND capture freeze", "capture \(RateFixture.secondFreeze)",
+                "COMMAND media drain \(RateFixture.secondWatermark)", "media \(RateFixture.secondDrain)",
+                "COMMAND probe rate 88200", "probe RATE_SELECTED rate=88200", "COMMAND media rate 88200 high",
+                "media RATE_PREPARED rate=88200", "COMMAND probe resume", "probe RATE_ROLLBACK rate=96000",
+                "COMMAND media rate 96000 high", "media RATE_PREPARED rate=96000", "COMMAND probe resume",
+                "probe RATE_START_ACCEPTED rate=96000", "COMMAND capture rate 96000"]
+            let live = ["COMMAND media resume", "media RATE_LIVE rate=96000"]
+            for readiness in ["capture PCM_CAPTURE_RESUMED rate=96000", "media PCM_READY frames=24000 rate=96000"] {
+                var next = log.startIndex
+                for marker in initial + [readiness] + live + rollback + [readiness] + live {
+                    guard let found = log.range(of: marker, range: next..<log.endIndex) else {
+                        throw ClosureCheckError(description: "Missing or out-of-order live-rate marker: \(marker)")
+                    }
+                    next = found.upperBound
+                }
+            }
+            try require(!log.contains("COMMAND capture rate 88200") && !log.contains("COMMAND capture pause"),
+                        "A refused Start released or re-froze capture at the abandoned rate")
+        }
+        if warmHold {
+            let order = [("media PARK_MEDIA_PAUSED CID=0041", "COMMAND probe park"),
+                ("capture PARK_CAPTURE_PAUSED rate=48000", "COMMAND probe park"),
+                ("probe PARK_SUSPENDED signalingCID=0040 mediaCID=0041", "COMMAND media warm-prefill"),
+                ("capture PARK_CAPTURE_RESUMED rate=48000", "COMMAND probe resume"),
+                ("media PARK_MEDIA_PREFILL_PREPARED rate=48000", "COMMAND capture warm-resume"),
+                ("COMMAND media warm-prefill", "COMMAND probe resume"),
+                ("probe PARK_START_ACCEPTED rate=48000 signalingCID=0040 mediaCID=0041", "COMMAND media resume"),
+                ("media PARK_LIVE CID=0041 rate=48000", "COMMAND media gain 0.5")]
+            for (first, second) in order {
+                guard let before = log.range(of: first), let after = log.range(of: second), before.lowerBound < after.lowerBound else {
+                    throw ClosureCheckError(description: "Missing or out-of-order warm ownership: \(first), \(second)")
+                }
+            }
+            if warmExit == "overlap" {
+                guard let start = log.range(of: "COMMAND probe resume"),
+                      let prefill = log.range(of: "media PCM_READY ", range: start.upperBound..<log.endIndex),
+                      let media = log.range(of: "COMMAND media resume"), prefill.lowerBound < media.lowerBound else {
+                    throw ClosureCheckError(description: "START did not overlap the full PCM prefill")
+                }
+            }
+            if warmExit == "queued-configuration" {
+                guard let live = log.range(of: "media PARK_LIVE"), let quality = log.range(of: "COMMAND media quality high"),
+                      live.lowerBound < quality.lowerBound else {
+                    throw ClosureCheckError(description: "A queued quality change escaped before warm media resumed")
+                }
+            }
+            try require(parkRequested && resumeRequested && log.components(separatedBy: "LAUNCH capture").count == 2 &&
+                log.components(separatedBy: "COMMAND media open").count == 2 && !log.contains("COMMAND probe rate ") &&
+                !log.contains("COMMAND media gain 0.9"),
+                "Warm handoff reopened a channel or changed the negotiated format")
+        }
         try require(!log.contains("LAUNCH daemon") && !log.contains("transport-closed") && !log.contains("COMMAND probe 0x"),
             "Log-free playback still required daemon framing or fabricated closure")
         if priorityAvailable {
@@ -229,8 +487,13 @@ extension LDACNativeSession {
             }), "Unavailable hint diagnostic was not emitted")
         }
         for (first, second) in [("SIGNALING_ARMED", "LAUNCH disconnect"), ("ACL_CONNECTED", "COMMAND probe acquire"),
-            ("CONNECT_READY", "LAUNCH media"), ("PREPARE_MEDIA", "LAUNCH media"),
+            ("PREPARE_MEDIA", "LAUNCH media"), ("PREPARE_MEDIA", "LAUNCH capture"),
+            ("LAUNCH capture", "media READY CID="), ("CONNECT_READY", "COMMAND probe media-prepared"),
+            ("MEDIA_PREPARED", "COMMAND probe media-prepared"), ("OPEN_ACCEPTED", "COMMAND media open"),
+            ("media OWNED_OPEN CID=", "media READY CID="), ("media READY CID=", "COMMAND capture capture"),
+            ("COMMAND capture capture", "PCM_CAPTURE_READY"), ("COMMAND capture capture", "media PCM_READY"),
             ("PCM_CAPTURE_READY", "COMMAND probe media-ready"), ("PCM_READY", "COMMAND probe media-ready"),
+            ("COMMAND probe media-ready", "probe START_ACCEPTED"), ("probe START_ACCEPTED", "COMMAND media start"),
             (priorityAvailable ? "PRIORITY_CONFIGURATION_ATTEMPT_COMPLETED" : "PRIORITY_CONFIGURATION_SKIPPED", "COMMAND media start"),
             ("FEED_COMPLETE", priorityAvailable ? "PRIORITY_STOP_REQUESTED" : "COMMAND probe media-finished"), ("DESTROY_TAP", "COMMAND probe media-finished"),
             ("media OWNED_CLOSED", "COMMAND probe media-closed")] {
@@ -238,6 +501,500 @@ extension LDACNativeSession {
                 throw ClosureCheckError(description: "Missing lifecycle marker: \(first), \(second)")
             }
             try require(before.lowerBound < after.lowerBound, "Out-of-order log-free lifecycle: \(first), \(second)")
+        }
+    }
+
+    @MainActor
+    static func nativeClockPlaybackCheck(executable: URL, mode: String) async throws {
+        setenv("ACOUPLET_NATIVE_CLOCK_FIXTURE", mode, 1)
+        defer { unsetenv("ACOUPLET_NATIVE_CLOCK_FIXTURE") }
+        let timer = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: timer, withIntermediateDirectories: false)
+        setenv("ACOUPLET_NATIVE_CLOCK_BARRIER", timer.path, 1)
+        defer {
+            unsetenv("ACOUPLET_NATIVE_CLOCK_BARRIER")
+            try? FileManager.default.removeItem(at: timer)
+        }
+        let events = SessionEvents()
+        var rates: [Int] = []
+        var verified: LDACSampleRate = .hz48000
+        let clock = LDACNativeClockControl { from, to, _ in
+            try require(verified == from, "Native clock request used a stale starting rate")
+            rates.append(to.rawValue)
+            if to == .hz96000 {
+                try Data().write(to: timer.appendingPathComponent("clock-issued"))
+                if ["park-during-rate", "stop-during-clock", "hal-timeout"].contains(mode) {
+                    try await Task.sleep(for: .milliseconds(250))
+                } else if ["timing", "staging-timing", "overlap-barrier"].contains(mode) {
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                if mode == "hal-rejection" { return false }
+                if mode == "hal-timeout" { throw ClosureCheckError(description: "Unconfirmed native HAL timeout") }
+            } else if mode == "reverse-refused" {
+                return false
+            }
+            verified = to
+            return true
+        }
+        let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+            helpers: Helpers(fixture: executable), gain: 0.25, outputDeviceUID: "fixture-native-clock",
+            outputSampleRate: .hz48000, clock: clock, capturePermissionMode: .verified, receive: { events.values.append($0) })
+        session.start()
+        var handedOff = false, gainApplied = false, requested = false, secondRequested = false, stopped = false
+        var parkRequested = false
+        let roundTrip = ["round-trip", "recreated-round-trip", "timing", "staging-timing", "overlap-barrier", "staged-before-peer"].contains(mode)
+        let deadline = DispatchTime.now() + 15
+        while DispatchTime.now() < deadline {
+            if !handedOff, events.values.contains(where: { if case .handoffReady = $0 { return true }; return false }) {
+                session.allowHandoff()
+                handedOff = true
+            }
+            if !gainApplied, events.values.contains(where: { if case .active = $0 { return true }; return false }) {
+                session.updateGain(0.5)
+                gainApplied = true
+            }
+            if !requested, events.values.contains(where: { if case .gainApplied(0.5) = $0 { return true }; return false }) {
+                session.updateConfiguration(.init(sampleRate: .hz96000, quality: .quality))
+                requested = true
+            }
+            if mode == "park-during-rate", rates == [96000], !parkRequested {
+                session.park()
+                parkRequested = true
+            }
+            let stagedStop = mode == "staged-stop" && FileManager.default.fileExists(atPath: timer.appendingPathComponent("tap-prepared").path)
+            if !stopped, mode == "stop-during-clock" && rates == [96000] || stagedStop {
+                session.stop(restoreAudio: false)
+                stopped = true
+            }
+            let formats = events.values.compactMap { if case let .formatChanged(format) = $0 { return format }; return nil as LDACFormat? }
+            if roundTrip, !secondRequested, formats.contains(where: { $0.sampleRateHz == 96000 }) {
+                session.updateConfiguration(.init(sampleRate: .hz48000, quality: .quality))
+                secondRequested = true
+            }
+            let rejected = events.values.contains { if case .sampleRateChangeRejected(requested: .hz96000, active: .hz48000) = $0 { return true }; return false }
+            if !stopped, (roundTrip ? formats.count == 2 : formats.count == 1 && rejected) {
+                session.stop(restoreAudio: false)
+                stopped = true
+            }
+            if events.values.contains(where: { if case .finished = $0 { return true }; return false }) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        defer {
+            cleanUp(Array(session.children.values))
+            if let raw = session.rawURL { try? FileManager.default.removeItem(at: raw.deletingLastPathComponent()) }
+        }
+        guard case let .finished(completion)? = events.values.last else {
+            throw ClosureCheckError(description: "Native clock fixture did not complete: \(mode), events=\(events.names)")
+        }
+        let formats = events.values.compactMap { if case let .formatChanged(format) = $0 { return format }; return nil as LDACFormat? }
+        if ["hal-timeout", "partial-after-ready", "park-during-rate", "stop-during-clock", "reverse-refused", "staged-partial", "staged-stop"].contains(mode) {
+            let expectedRates = mode == "hal-timeout" ? [96000] : [96000, 48000]
+            let expectedClock: LDACSampleRate = mode == "reverse-refused" ? .hz96000 : .hz48000
+            try require((completion.message == nil) == ["stop-during-clock", "staged-stop"].contains(mode) && formats.isEmpty && rates == expectedRates && verified == expectedClock,
+                "An uncommitted native clock did not settle safely in \(mode): \(rates), \(verified), \(completion.message ?? "clean stop")")
+        } else {
+            try require(handedOff && gainApplied && stopped && completion.message == nil,
+                "Native clock fixture failed: \(mode): \(completion.message ?? "missing active state")")
+            try require(formats.map(\.sampleRateHz) == (roundTrip ? [96000, 48000] : [48000]) &&
+                formats.allSatisfy { $0.sampleRateHz == $0.sourceSampleRateHz } &&
+                rates == (mode == "hal-rejection" ? [96000] : [96000, 48000]) && verified == .hz48000,
+                "Native clock, capture and transport did not agree for \(mode): \(rates), \(formats)")
+        }
+        let log = try String(contentsOf: session.rawURL!.deletingLastPathComponent().appendingPathComponent("session.log"), encoding: .utf8)
+        try require(log.components(separatedBy: "LAUNCH media").count == 2 && log.components(separatedBy: "LAUNCH probe").count == 2,
+            "Native clock switch replaced an owned AVDTP channel")
+        try require(log.contains("COMMAND capture clock-freeze") && log.contains("COMMAND media drain 98304"),
+            "Native source did not close its PCM epoch before negotiation")
+        if roundTrip {
+            let launchCount = mode == "recreated-round-trip" ? 2 : 1
+            try require(log.contains("COMMAND media drain \(RateFixture.secondWatermark)") &&
+                log.components(separatedBy: "LAUNCH capture").count == launchCount + 1 &&
+                log.contains("COMMAND capture clock-rate 96000") && log.contains("COMMAND capture clock-rate 48000") &&
+                log.components(separatedBy: "capture DESTROY_TAP status=0").count == launchCount + 1 &&
+                log.components(separatedBy: "capture CLOCK_CREATE_TAP status=0").count == 4 - launchCount,
+                "Native capture did not replace its tap on the retained aggregate or preserve its absolute PCM watermark")
+        }
+        if mode == "empty-after-ready" || mode == "partial-after-ready" {
+            try require(log.contains("PCM_CAPTURE_READY rate=96000") && !log.contains("RATE_LIVE rate=96000") &&
+                log.contains("PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=\(mode == "partial-after-ready" ? 4 : 0)"),
+                "The ready-but-failed candidate was not accounted for")
+        }
+        if ["peer-rollback", "tap-rejection", "start-failure", "hal-timeout", "hal-rejection", "peer-rejected-suspend", "peer-rejected-config", "reverse-refused", "stop-during-clock"].contains(mode) {
+            try require(!log.contains("PCM_CAPTURE_READY rate=96000"), "An abandoned rate reached the PCM writer")
+        }
+        if mode == "stop-during-clock" {
+            try require(!log.contains("COMMAND probe resume") && !log.contains("COMMAND capture clock-rate")
+                && session.signalingGate.closed && session.mediaGate.closed && !session.shutdownUnverified,
+                "Stop during native clock work released PCM or bypassed owned closure")
+        }
+        if mode == "staged-stop" {
+            try requireOrder(log, ["PCM_CAPTURE_CLOCK_PREPARED rate=96000", "PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=0"])
+            try require(!log.contains("RATE_SELECTED rate=96000") && !log.contains("COMMAND probe resume")
+                && !log.contains("PCM_CAPTURE_READY rate=96000") && session.signalingGate.closed && session.mediaGate.closed,
+                "Stop during sealed capture published tentative PCM or lost owned closure")
+        }
+        if mode == "staged-before-peer" {
+            try requireOrder(log, ["RATE_DRAINED rate=48000", "PCM_CAPTURE_CLOCK_PREPARED rate=96000", "RATE_SELECTED rate=96000",
+                                   "COMMAND probe resume", "RATE_START_ACCEPTED rate=96000", "COMMAND capture capture",
+                                   "PCM_CAPTURE_READY rate=96000", "RATE_LIVE rate=96000"])
+        }
+        if ["staged-denial", "staged-denial-during-tap", "staged-denial-before-media", "staged-partial", "staged-failed-capture"].contains(mode) {
+            try require(!log.contains("PCM_CAPTURE_READY rate=96000") && !log.contains("RATE_START_ACCEPTED rate=96000"),
+                        "A tentative capture crossed the Sony START boundary: \(mode)")
+            let selected = mode == "staged-failed-capture" ? "RATE_SELECTED rate=96000" : "RATE_SELECTED rate=48000"
+            if mode == "staged-denial-before-media" {
+                try requireOrder(log, [selected, "RATE_PREPARED rate=96000", "RATE_PREPARED rate=48000"])
+                try require(!log.contains("COMMAND capture clock-rate 96000"), "A peer-rejected epoch opened the candidate tap")
+            } else if mode == "staged-denial" || mode == "staged-denial-during-tap" {
+                try requireOrder(log, ["COMMAND capture clock-rate 96000", selected, "PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=0", "RATE_PREPARED rate=48000"])
+                if mode == "staged-denial-during-tap" {
+                    try requireOrder(log, [selected, "PCM_CAPTURE_CLOCK_PREPARED rate=96000", "PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=0"])
+                }
+            } else if mode == "staged-failed-capture" {
+                try requireOrder(log, ["PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=0", selected,
+                                      "COMMAND probe rollback", "RATE_PREPARED rate=48000"])
+            } else {
+                try require(log.contains("PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=4") && !log.contains("RATE_PREPARED rate=48000")
+                    && !log.contains("RATE_LIVE rate=96000"), "Unproved candidate bytes allowed rollback or native playback")
+            }
+        }
+        if mode == "timing" || mode == "staging-timing" {
+            let times = ["CAPTURE_FROZEN rate=48000", "RATE_LIVE rate=96000", "CAPTURE_FROZEN rate=96000", "RATE_LIVE rate=48000"]
+                .compactMap { marker in log.split(separator: "\n").first { $0.contains(marker) }?.split(separator: " ").first.flatMap { Double($0) } }
+            try require(times.count == 4, "Missing rate timing witness")
+            print("TIMING \((times[1] - times[0]) * 1000) \((times[3] - times[2]) * 1000)")
+        }
+        if mode == "park-during-rate" {
+            try require(parkRequested && log.contains("FAILED LDAC cannot hold or resume the current stream.")
+                && !log.contains("COMMAND media park") && !log.contains("LAUNCH restore-disconnect")
+                && session.signalingGate.closed && session.mediaGate.closed && !session.shutdownUnverified,
+                "A park request racing the native clock silently disappeared or reset the ACL")
+        }
+        print("PASS native rate fixture \(mode): verified capture protocol and same owned transports")
+    }
+
+    static func requireOrder(_ log: String, _ markers: [String]) throws {
+        var remaining = log[...]
+        for marker in markers {
+            guard let match = remaining.range(of: marker) else { throw ClosureCheckError(description: "Missing ordered native marker: \(marker)") }
+            remaining = remaining[match.upperBound...]
+        }
+    }
+
+    @MainActor
+    static func stopBeforeQueuedClockCheck() async throws {
+        let executable = URL(fileURLWithPath: "/bin/cat")
+        for requested in [true, false] {
+            let media = try LDACNativeChild(executable: executable, arguments: [], inheritedPCM: nil)
+            defer { cleanUp([media]) }
+            var calls = 0
+            let clock = LDACNativeClockControl { _, _, _ in calls += 1; return true }
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(fixture: executable), gain: 0, clock: clock, receive: { _ in })
+            session.children["media"] = media
+            session.rateChange = RateChange(.init(sampleRate: .hz96000, quality: .quality), sourceClock: .hz48000)
+            session.deadline = DispatchTime.now() + 18
+            try session.handle("capture", line: RateFixture.firstFreeze)
+            try require(session.rateChange?.clockRequest == .hz96000, "The queued request was not represented in the rate transition")
+            if requested { session.stop(restoreAudio: false) }
+            else { session.fail("Fixture failure after capture freeze") }
+            try await Task.sleep(for: .milliseconds(25))
+            try session.settleClockBeforeRelease()
+            try require(calls == 0 && session.rateChange?.clockRequest == nil && session.rateChange?.sourceClock == .hz48000,
+                        "A stopped, queued HAL request applied after its authorization ended")
+        }
+        print("PASS queued native clock cannot apply after Stop or a failure")
+    }
+
+    static func rateTransitionDeadlineCheck(executable: URL) throws {
+        defer { SessionClock.shared.set(elapsed: nil) }
+        let requested = LDACConfiguration(sampleRate: .hz96000, quality: .quality)
+        for elapsed: TimeInterval in [17, 18] {
+            SessionClock.shared.set(elapsed: 0)
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(fixture: executable), gain: 0, receive: { _ in })
+            let originalDeadline = SessionClock.shared.monotonic + 18
+            session.deadline = originalDeadline
+            session.rateChange = RateChange(requested)
+            session.rateChange?.phase = .sending
+            SessionClock.shared.set(elapsed: elapsed)
+            var timedOut = false
+            do { try session.handle("media", line: "RATE_LIVE rate=96000 channels=2 bitrateKbps=990 eqmid=0") }
+            catch { timedOut = error.localizedDescription == "LDAC could not confirm the live sample rate change." }
+            if elapsed < 18 {
+                try require(!timedOut && session.rateChange == nil && session.activeConfiguration == requested,
+                            "A valid rate report within the deadline did not commit")
+            } else {
+                try require(timedOut && session.rateChange != nil && session.deadline == originalDeadline &&
+                            session.activeConfiguration.sampleRate == .hz48000,
+                            "An overdue rate report replaced the active format or cleared its deadline")
+            }
+        }
+
+        for elapsed: TimeInterval in [1, 16] {
+            SessionClock.shared.set(elapsed: 0)
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(fixture: executable), gain: 0, receive: { _ in })
+            let capture = try LDACNativeChild(executable: URL(fileURLWithPath: "/bin/cat"), arguments: [], inheritedPCM: nil)
+            let media = try LDACNativeChild(executable: URL(fileURLWithPath: "/bin/cat"), arguments: [], inheritedPCM: nil)
+            let probe = try LDACNativeChild(executable: URL(fileURLWithPath: "/bin/cat"), arguments: [], inheritedPCM: nil)
+            defer { cleanUp([capture, media, probe]) }
+            session.children = ["capture": capture, "media": media, "probe": probe]
+            try session.signalingGate.owned("OWNED_OPEN CID=0040 outgoingMTU=1000")
+            try session.mediaGate.owned("OWNED_OPEN CID=0041 outgoingMTU=1000")
+            let originalDeadline = SessionClock.shared.monotonic + 18
+            session.deadline = originalDeadline
+            session.rateChange = RateChange(requested)
+            try session.handle("capture", line: RateFixture.firstFreeze)
+            try session.handle("media", line: RateFixture.firstDrain)
+            try session.handle("probe", line: "RATE_SELECTED rate=96000 suspended=1 rejected=0")
+            try session.handle("media", line: "RATE_PREPARED rate=96000")
+            try require(try capture.readLines().isEmpty, "Capture left freeze before the proposed Start")
+            SessionClock.shared.set(elapsed: elapsed)
+            try session.handle("probe", line: "RATE_ROLLBACK rate=48000")
+            try require(session.rateChange?.selected.sampleRate == .hz48000 &&
+                        session.deadline == min(originalDeadline, SessionClock.shared.monotonic + 7),
+                        "Rate rollback did not preserve the original deadline and the shorter rollback limit")
+            try session.handle("media", line: "RATE_PREPARED rate=48000")
+            try require(try capture.readLines().isEmpty, "Rollback released capture before the original Start")
+            try session.handle("probe", line: "RATE_START_ACCEPTED rate=48000 signalingCID=0040 mediaCID=0041")
+            var captureCommands: [String] = []
+            try waitUntil {
+                captureCommands += try capture.readLines()
+                return !captureCommands.isEmpty
+            }
+            try require(captureCommands == ["rate 48000"], "Rollback commanded capture outside the accepted original format")
+        }
+    }
+
+    static func rateTransitionRejectionCheck(executable: URL) throws {
+        let capture = ("capture", RateFixture.firstFreeze)
+        let drain = ("media", RateFixture.firstDrain)
+        let selection = ("probe", "RATE_SELECTED rate=96000 suspended=1 rejected=0")
+        let prepared = ("media", "RATE_PREPARED rate=96000")
+        let frozen = [capture]
+        let drained = frozen + [drain]
+        let starting = drained + [selection, prepared]
+        let prefilling = starting + [("probe", "RATE_START_ACCEPTED rate=96000 signalingCID=0040 mediaCID=0041")]
+        let cases: [(String, [(String, String)]?, String, String)] = [
+            ("early-drain", [], "media", drain.1),
+            ("early-selection", frozen, "probe", selection.1),
+            ("wrong-frozen-rate", [], "capture", "CAPTURE_FROZEN rate=44100 bytes=98304 sourceFrames=12288"),
+            ("unaligned-freeze-watermark", [], "capture", "CAPTURE_FROZEN rate=48000 bytes=98305 sourceFrames=12288"),
+            ("oversized-freeze-watermark", [], "capture", "CAPTURE_FROZEN rate=48000 bytes=18446744073709551616 sourceFrames=12288"),
+            ("oversized-source-count", [], "capture", "CAPTURE_FROZEN rate=48000 bytes=98304 sourceFrames=18446744073709551616"),
+            ("malformed-freeze-count", [], "capture", "CAPTURE_FROZEN rate=48000 bytes=-8 sourceFrames=12288"),
+            ("repeated-freeze", frozen, "capture", capture.1),
+            ("unsolicited-freeze-decline", nil, "capture", RateFixture.declinedFreeze),
+            ("late-freeze-decline", frozen, "capture", RateFixture.declinedFreeze),
+            ("wrong-freeze-decline-rate", [], "capture", "CAPTURE_FREEZE_DECLINED rate=96000 queuedFrames=96256 reserveFrames=864256 capacityFrames=960000"),
+            ("negative-freeze-decline-queue", [], "capture", "CAPTURE_FREEZE_DECLINED rate=48000 queuedFrames=-1 reserveFrames=864256 capacityFrames=960000"),
+            ("oversized-freeze-decline-reserve", [], "capture", "CAPTURE_FREEZE_DECLINED rate=48000 queuedFrames=96256 reserveFrames=18446744073709551616 capacityFrames=960000"),
+            ("missing-freeze-decline-capacity", [], "capture", "CAPTURE_FREEZE_DECLINED rate=48000 queuedFrames=96256 reserveFrames=864256"),
+            ("zero-freeze-decline-capacity", [], "capture", "CAPTURE_FREEZE_DECLINED rate=48000 queuedFrames=0 reserveFrames=864256 capacityFrames=0"),
+            ("freeze-decline-queue-exceeds-capacity", [], "capture", "CAPTURE_FREEZE_DECLINED rate=48000 queuedFrames=960001 reserveFrames=864256 capacityFrames=960000"),
+            ("freeze-decline-reserve-fits", [], "capture", "CAPTURE_FREEZE_DECLINED rate=48000 queuedFrames=95744 reserveFrames=864256 capacityFrames=960000"),
+            ("wrong-drain-watermark", frozen, "media", "RATE_DRAINED rate=48000 bytes=98312 sourceFrames=12289 paddingFrames=127"),
+            ("wrong-drain-rate", frozen, "media", "RATE_DRAINED rate=96000 bytes=98304 sourceFrames=12288 paddingFrames=128"),
+            ("drain-frames-exceed-watermark", frozen, "media", "RATE_DRAINED rate=48000 bytes=98304 sourceFrames=12289 paddingFrames=128"),
+            ("drain-padding-at-limit", frozen, "media", "RATE_DRAINED rate=48000 bytes=98304 sourceFrames=12288 paddingFrames=256"),
+            ("malformed-drain-size", frozen, "media", "RATE_DRAINED rate=48000 bytes=98304 sourceFrames=12288 paddingFrames=-1"),
+            ("oversized-drain-padding", frozen, "media", "RATE_DRAINED rate=48000 bytes=98304 sourceFrames=12288 paddingFrames=18446744073709551616"),
+            ("early-prepare", drained, "media", prepared.1),
+            ("early-capture-resume", starting, "capture", "PCM_CAPTURE_RESUMED rate=96000"),
+            ("early-media-prefill", starting, "media", "PCM_READY frames=24000 rate=96000 channels=2 format=F32"),
+            ("wrong-start-channel", starting, "probe", "RATE_START_ACCEPTED rate=96000 signalingCID=0041 mediaCID=0040"),
+            ("undersized-prefill", prefilling, "media", "PCM_READY frames=23999 rate=96000 channels=2 format=F32"),
+            ("oversized-prefill", prefilling, "media", "PCM_READY frames=24000 rate=96000 channels=2 format=F32 bufferedFrames=96001"),
+        ]
+        let cat = URL(fileURLWithPath: "/bin/cat")
+        let children = try Dictionary(uniqueKeysWithValues: ["capture", "media", "probe"].map {
+            ($0, try LDACNativeChild(executable: cat, arguments: [], inheritedPCM: nil))
+        })
+        defer { cleanUp(Array(children.values)) }
+        let logURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: logURL) }
+        for (name, valid, sender, report) in cases {
+            try Data().write(to: logURL)
+            let log = try FileHandle(forWritingTo: logURL)
+            defer { try? log.close() }
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(fixture: executable), gain: 0, receive: { _ in })
+            session.children = children
+            session.log = log
+            try session.signalingGate.owned("OWNED_OPEN CID=0040 outgoingMTU=1000")
+            try session.mediaGate.owned("OWNED_OPEN CID=0041 outgoingMTU=1000")
+            session.deadline = DispatchTime.now() + 18
+            if let valid {
+                session.rateChange = RateChange(.init(sampleRate: .hz96000, quality: .quality))
+                for (source, line) in valid { try session.handle(source, line: line) }
+            }
+            let original = session.activeConfiguration
+            let deadline = session.deadline
+            let phase = session.rateChange?.phase
+            let before = try String(contentsOf: logURL, encoding: .utf8).components(separatedBy: "COMMAND ").count
+            var rejected = false
+            do { try session.handle(sender, line: report) }
+            catch is LDACSessionError { rejected = true }
+            let after = try String(contentsOf: logURL, encoding: .utf8).components(separatedBy: "COMMAND ").count
+            try require(rejected && before == after && session.activeConfiguration == original && session.deadline == deadline &&
+                        session.rateChange?.phase == phase,
+                        "Invalid live-rate report \(name) advanced the handshake or changed the active stream")
+            print("PASS invalid live-rate report \(name)")
+        }
+        let native = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+            helpers: Helpers(fixture: executable), gain: 0, receive: { _ in })
+        native.children = children
+        native.captureSourceRate = 48000
+        native.rateChange = RateChange(.init(sampleRate: .hz48000, quality: .quality), sourceClock: .hz48000)
+        native.rateChange?.phase = .prefilling
+        native.deadline = DispatchTime.now() + 18
+        for report in ["PCM_CAPTURE_RESUMED rate=48000", "PCM_CAPTURE_READY rate=48000 channels=2 format=F32 interleaved=1 bytesPerFrame=8"] {
+            do {
+                try native.handle("capture", line: report)
+                throw ClosureCheckError(description: "Native capture accepted a ready message from an unverified epoch")
+            } catch is LDACSessionError {}
+        }
+        try native.handle("capture", line: "PCM_CAPTURE_SOURCE rate=48000")
+        try native.handle("capture", line: "PCM_CAPTURE_READY rate=48000 channels=2 format=F32 interleaved=1 bytesPerFrame=8")
+        try require(native.rateChange?.captureResumed == true && native.rateChange?.pcmReady == false,
+            "A current native capture witness did not permit the prepared epoch")
+        print("PASS native capture requires a new source format witness after reusing the same rate")
+    }
+
+    @MainActor
+    static func capturePressureDeclineCheck(executable: URL) async throws {
+        let cat = URL(fileURLWithPath: "/bin/cat")
+        let children = try Dictionary(uniqueKeysWithValues: ["capture", "media", "probe"].map {
+            ($0, try LDACNativeChild(executable: cat, arguments: [], inheritedPCM: nil))
+        })
+        defer { cleanUp(Array(children.values)) }
+        let logURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: logURL) }
+
+        let cases: [(String, LDACQuality, LDACConfiguration?)] = [
+            (RateFixture.declinedFreeze, .connection, nil),
+            (RateFixture.declinedFreeze, .balanced, nil),
+            (RateFixture.declinedFreeze, .balanced, .init(sampleRate: .hz96000, quality: .quality)),
+            ("CAPTURE_FREEZE_DECLINED rate=48000 queuedFrames=0 reserveFrames=960001 capacityFrames=960000",
+                .balanced, .init(sampleRate: .hz88200, quality: .adaptive)),
+        ]
+        for (receipt, quality, newer) in cases {
+            try Data().write(to: logURL)
+            let log = try FileHandle(forWritingTo: logURL)
+            defer { try? log.close() }
+            let events = SessionEvents()
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(fixture: executable), gain: 0, receive: { events.values.append($0) })
+            session.children = children
+            session.log = log
+            session.active = true
+            try session.signalingGate.owned("OWNED_OPEN CID=0040 outgoingMTU=1000")
+            try session.mediaGate.owned("OWNED_OPEN CID=0041 outgoingMTU=1000")
+            let requested = LDACConfiguration(sampleRate: .hz96000, quality: quality)
+            session.updateConfiguration(requested)
+            try session.advance()
+            try require(session.rateChange?.requested == requested && session.rateChange?.phase == .freezing,
+                "Rate request did not reach capture freeze")
+            if let newer { session.updateConfiguration(newer) }
+
+            try session.handle("media", line: receipt)
+            try require(session.rateChange?.requested == requested && session.rateChange?.phase == .freezing &&
+                session.requestedConfiguration == newer, "A media-origin freeze decline resolved the capture request")
+
+            try session.handle("capture", line: receipt)
+            try require(session.active && !session.shouldStop && session.failure == nil && session.rateChange == nil &&
+                session.activeConfiguration == .init(sampleRate: .hz48000, quality: quality) &&
+                session.deadline == .distantFuture && session.requestedConfiguration == newer,
+                "Capture pressure interrupted the active stream or discarded a newer rate request")
+            for _ in 0..<100 where events.names.isEmpty { try await Task.sleep(for: .milliseconds(1)) }
+            try require(events.names == ["sampleRateChangeDeferred"] && events.values.contains {
+                if case let .sampleRateChangeDeferred(configuration, .hz48000) = $0 { return configuration == requested }
+                return false
+            }, "Capture pressure did not emit a single deferral for the original configuration and retained rate")
+            let expected = ["capture freeze"] + (quality == .connection ? [] : ["media quality \(quality.rawValue)"])
+            let commands = try String(contentsOf: logURL, encoding: .utf8).split(separator: "\n").compactMap { line in
+                line.range(of: "COMMAND ").map { String(line[$0.upperBound...]) }
+            }
+            try require(commands == expected && children.allSatisfy { session.children[$0.key]?.pid == $0.value.pid } &&
+                session.signalingGate.cid == 0x40 && !session.signalingGate.closed &&
+                session.mediaGate.cid == 0x41 && !session.mediaGate.closed,
+                "Capture pressure changed the media transport or replaced a helper")
+            if quality == .balanced {
+                try session.handle("media", line: "LIVE_FORMAT rate=48000 channels=2 bitrateKbps=660 frameBytes=220")
+                for _ in 0..<100 where events.names.count == 1 { try await Task.sleep(for: .milliseconds(1)) }
+                try require(events.names == ["sampleRateChangeDeferred", "formatChanged"] && events.values.contains {
+                    if case let .formatChanged(format) = $0 { return format.sampleRateHz == 48000 && format.bitrateKbps == 660 }
+                    return false
+                }, "Deferred rate did not allow the new bitrate to be confirmed on the active stream")
+            }
+            try session.advance()
+            try require(session.rateChange?.requested == newer && session.requestedConfiguration == nil,
+                "A declined request retried itself or prevented the newer request from starting")
+        }
+        print("PASS capture pressure defers the requested rate while keeping the stream, quality update, and newer requests")
+    }
+
+    @MainActor
+    static func sinkRatePreflightCheck(executable: URL) async throws {
+        let open = "OPEN_ACCEPTED signalingCID=0040 remoteSEID=3"
+        let cases: [(String, LDACSampleRate, LDACSampleRate, LDACQuality, Bool)] = [
+            (open + " rateMask=30", .hz48000, .hz96000, .connection, true),
+            (open + " rateMask=14", .hz48000, .hz88200, .balanced, true),
+            (open + " rateMask=20", .hz44100, .hz48000, .connection, true),
+            (open + " rateMask=10", .hz48000, .hz44100, .connection, true),
+            (open + " rateMask=14", .hz48000, .hz96000, .quality, false),
+            (open + " rateMask=10", .hz48000, .hz48000, .balanced, false),
+            (open, .hz48000, .hz96000, .connection, false),
+            (open + " rateMask=GG", .hz48000, .hz96000, .connection, false),
+            (open + " rateMask=20", .hz48000, .hz96000, .connection, false),
+            ("OPEN_ACCEPTED signalingCID=0041 remoteSEID=3 rateMask=10", .hz48000, .hz96000, .connection, false),
+        ]
+        let cat = URL(fileURLWithPath: "/bin/cat")
+        let capture = try LDACNativeChild(executable: cat, arguments: [], inheritedPCM: nil)
+        let media = try LDACNativeChild(executable: cat, arguments: [], inheritedPCM: nil)
+        defer { cleanUp([capture, media]) }
+        let logURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: logURL) }
+
+        for (receipt, original, requested, quality, rejected) in cases {
+            try Data().write(to: logURL)
+            let log = try FileHandle(forWritingTo: logURL)
+            defer { try? log.close() }
+            let events = SessionEvents()
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(fixture: executable), gain: 0, configuration: .init(sampleRate: original),
+                receive: { events.values.append($0) })
+            session.children = ["capture": capture, "media": media]
+            session.log = log
+            try session.signalingGate.owned("OWNED_OPEN CID=0040 outgoingMTU=1000")
+            session.preparedSent = true
+            try session.handle("probe", line: receipt)
+            session.active = true
+            session.updateConfiguration(.init(sampleRate: requested, quality: quality))
+            try session.advance()
+            try session.advance()
+            let commands = try String(contentsOf: logURL, encoding: .utf8).split(separator: "\n").compactMap { line in
+                line.range(of: "COMMAND ").map { String(line[$0.upperBound...]) }
+            }
+            let transitioning = !rejected && original != requested
+            let expected = ["media open"] + (transitioning ? ["capture freeze"] : quality != .connection ? ["media quality \(quality.rawValue)"] : [])
+            try require(commands == expected && (session.rateChange != nil) == transitioning &&
+                        session.activeConfiguration == .init(sampleRate: original, quality: transitioning ? .connection : quality),
+                        "Unexpected preflight for \(receipt) and \(requested): \(commands)")
+            if rejected {
+                if receipt == open + " rateMask=30" {
+                    let next = LDACConfiguration(sampleRate: .hz44100, quality: .quality)
+                    session.updateConfiguration(next)
+                    try session.advance()
+                    try require(session.rateChange?.requested == next, "A rejection discarded the next supported request")
+                }
+                for _ in 0..<100 where events.values.isEmpty { try await Task.sleep(for: .milliseconds(1)) }
+                guard events.values.count == 1, case let .sampleRateChangeRejected(rate, active) = events.values[0] else {
+                    throw ClosureCheckError(description: "Missing preflight rejection for \(receipt) and \(requested)")
+                }
+                try require(rate == requested && active == original, "Preflight rejection identified the wrong rates")
+            }
         }
     }
 
@@ -286,6 +1043,53 @@ extension LDACNativeSession {
     }
 }
 extension LDACNativeSession {
+    @MainActor
+    static func ordinaryAudioRestorationPolicyCheck(executable: URL) async throws {
+        for (restoreAudio, observedByGuardian) in [(true, false), (true, true), (false, false)] {
+            let events = SessionEvents()
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(fixture: executable), gain: 0, receive: { events.values.append($0) })
+            let disconnect = try LDACNativeChild(executable: executable, arguments: ["fixture-disconnect"], inheritedPCM: nil)
+            session.children["disconnect"] = disconnect
+            defer { cleanUp(Array(session.children.values)) }
+            try waitUntil {
+                _ = try disconnect.readLines()
+                disconnect.reap()
+                return disconnect.finished
+            }
+            session.stop(restoreAudio: restoreAudio)
+            if observedByGuardian {
+                session.connected = true
+                try session.handle("connector", line: "CONNECT_READY handle=0001 guarded=1")
+                try session.handle("connector", line: "CONNECTION_DISCONNECTED handle=0001 connected=0")
+            } else if restoreAudio {
+                try session.beginRestore()
+                let preparing = session.children["restore-disconnect"]!
+                try waitUntil {
+                    _ = try preparing.readLines()
+                    preparing.reap()
+                    return preparing.finished
+                }
+                try session.handle("restore-disconnect", line: "BEFORE time=1791160325.072411 address=02-00-00-00-00-01 paired=1 connected=0")
+                try session.handle("restore-disconnect", line: "RESTORE_DISCONNECTED disconnected=1")
+            }
+            try session.beginRestore()
+            try require(session.restoring && session.children["restore"] == nil,
+                        "Ordinary audio restoration tried to reopen an absent headset")
+            if !restoreAudio {
+                try require(session.children["restore-disconnect"] == nil, "Relinquishing a healthy link caused a redundant disconnect")
+            }
+            session.finish()
+            for _ in 0..<20 { await Task.yield() }
+            guard case let .finished(completion)? = events.values.last else {
+                throw ClosureCheckError(description: "Absent headset failed to finish cleanup")
+            }
+            try require(completion.message == nil && completion.targetDisconnected == restoreAudio && completion.waitForReconnect == restoreAudio,
+                        "Ordinary audio restoration applied the wrong device loss classification")
+        }
+        print("PASS physical loss never reopens ordinary audio, and relinquishing a healthy link with settled priority never disconnects")
+    }
+
     static func checkRestoreArguments(executable: URL, handle: Int?) throws {
         let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01", helpers: Helpers(fixture: executable), gain: 0) { _ in }
         let disconnect = try LDACNativeChild(executable: executable, arguments: ["fixture-disconnect"], inheritedPCM: nil)
@@ -329,6 +1133,7 @@ extension LDACNativeSession {
         defer { cleanUp([media, capture]) }
         session.children["media"] = media
         session.children["capture"] = capture
+        session.captureStartSent = true
         if mode == "recovering" { session.connectionLost("Fixture transport ended before playback") }
         else { session.stop(restoreAudio: false) }
         try session.advance()
@@ -502,6 +1307,33 @@ extension LDACNativeSession {
         }
         try require(messages == [LDACAudioCaptureAccess.permissionGuidance, LDACAudioCaptureAccess.permissionGuidance],
             "Permission instructions were replaced by a generic failure")
+    }
+
+    @MainActor
+    static func targetedPermissionCheck(executable: URL) async throws {
+        for (mode, access) in [("allowed", LDACAudioCaptureAccess.ready), ("denied", .permissionRequired),
+                               ("bad-exit", nil), ("no-callbacks", nil)] as [(String, LDACAudioCaptureAccess?)] {
+            let events = SessionEvents()
+            let session = LDACNativeSession(id: UUID(), address: "02:00:00:00:00:01",
+                helpers: Helpers(fixture: executable), gain: 0, outputDeviceUID: "fixture-permission-\(mode)",
+                outputSampleRate: .hz48000, capturePermissionMode: .checkOnly, receive: { events.values.append($0) })
+            session.start()
+            let deadline = DispatchTime.now() + 3
+            while DispatchTime.now() < deadline, !events.values.contains(where: { if case .finished = $0 { return true }; return false }) {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            defer {
+                cleanUp(Array(session.children.values))
+                if let raw = session.rawURL { try? FileManager.default.removeItem(at: raw.deletingLastPathComponent()) }
+            }
+            guard case let .finished(completion)? = events.values.last else {
+                throw ClosureCheckError(description: "Targeted capture permission check did not finish: \(mode)")
+            }
+            try require(completion.captureAccess == access && (completion.message == nil) == (access == .ready),
+                "Targeted permission check admitted unverified access or lost the denial: \(mode)")
+            try require(!session.handoffRequested && session.children.keys.sorted() == ["preflight"],
+                "Permission-only check started Bluetooth or changed output: \(mode)")
+        }
     }
 
     @MainActor
@@ -867,11 +1699,57 @@ enum LDACSessionClosureCheck {
 
     static func helperFixture() -> Bool {
         func output(_ line: String) { print(line); fflush(stdout) }
+        func pcm(_ frames: Int, tag: UInt8, writing: Bool) {
+            var bytes = [UInt8](repeating: tag, count: 4096)
+            var remaining = frames * 8
+            while remaining > 0 {
+                let count = bytes.withUnsafeMutableBytes { buffer in
+                    if writing { return Darwin.write(3, buffer.baseAddress, min(remaining, buffer.count)) }
+                    return Darwin.read(3, buffer.baseAddress, min(remaining, buffer.count))
+                }
+                if count < 0, errno == EINTR { continue }
+                guard count > 0, writing || bytes.prefix(count).allSatisfy({ $0 == tag }) else { exit(93) }
+                remaining -= count
+            }
+        }
         let arguments = CommandLine.arguments
         guard arguments.count > 1 else { return false }
+        let barrier = ProcessInfo.processInfo.environment["ACOUPLET_FIXTURE_CAPTURE_BARRIER"].map { URL(fileURLWithPath: $0) }
+        let native = ProcessInfo.processInfo.environment["ACOUPLET_NATIVE_CLOCK_FIXTURE"]
+        let nativeBarrier = ProcessInfo.processInfo.environment["ACOUPLET_NATIVE_CLOCK_BARRIER"].map { URL(fileURLWithPath: $0) }
+        func clockMarker(_ name: String) {
+            guard let nativeBarrier else { exit(91) }
+            do { try Data().write(to: nativeBarrier.appendingPathComponent(name)) }
+            catch { exit(91) }
+        }
+        func waitClockMarker(_ name: String) {
+            guard let nativeBarrier else { exit(91) }
+            do { try waitUntil { FileManager.default.fileExists(atPath: nativeBarrier.appendingPathComponent(name).path) } }
+            catch { output("FIXTURE_CLOCK_MARKER_TIMEOUT \(name)"); exit(91) }
+        }
+        let warmExit = ProcessInfo.processInfo.environment["ACOUPLET_FIXTURE_WARM_EXIT"]
+        func terminateCapture() {
+            var mask = sigset_t()
+            sigemptyset(&mask)
+            sigaddset(&mask, SIGTERM)
+            var received: Int32 = 0
+            guard sigwait(&mask, &received) == 0, received == SIGTERM else { exit(91) }
+        }
         switch arguments[1] {
         case "--check-permission":
+            if arguments.contains(where: { $0.hasPrefix("fixture-permission-") }) {
+                guard arguments.suffix(2) == ["--device-rate", "48000"], arguments.contains("--device-uid") else { exit(92) }
+                if arguments.contains("fixture-permission-denied") {
+                    output("AUDIO_PERMISSION_DENIED operation=start status=560492391 cleanup=1")
+                    exit(1)
+                }
+                if arguments.contains("fixture-permission-no-callbacks") {
+                    output("AUDIO_PERMISSION_ALLOWED cleanup=1 callbacks=0")
+                    return true
+                }
+            }
             output("AUDIO_PERMISSION_ALLOWED cleanup=1 callbacks=1")
+            if arguments.contains("fixture-permission-bad-exit") { exit(1) }
         case "--playback-disconnected":
             output("SIGNALING_ARMED time_ns=\(clock_gettime_nsec_np(CLOCK_MONOTONIC))")
             guard readLine()?.hasPrefix("acquire ") == true else { exit(81) }
@@ -879,9 +1757,100 @@ enum LDACSessionClosureCheck {
             output("PREPARE_MEDIA")
             guard readLine() == "media-prepared" else { exit(82) }
             output("OPEN_ACCEPTED")
-            guard readLine() == "media-ready 41 1000" else { exit(83) }
-            output("START_ACCEPTED")
-            guard readLine() == "media-finished" else { exit(84) }
+            let readiness = readLine()
+            guard readiness == "media-ready 41 1000" || readiness == "stop" else { exit(83) }
+            if readiness == "media-ready 41 1000" { output("START_ACCEPTED") }
+            var command = readiness == "stop" ? readiness : readLine()
+            if command == "park" {
+                if warmExit != "peer-close-before-suspend" {
+                    output(warmExit == "suspend-cid" ? "PARK_SUSPENDED signalingCID=0040 mediaCID=0042" : "PARK_SUSPENDED signalingCID=0040 mediaCID=0041")
+                }
+                if ["peer-close", "peer-abort", "peer-close-before-suspend"].contains(warmExit ?? "") {
+                    output(warmExit == "peer-abort" ? "STREAM_CLOSED peerSignal=0A" : "STREAM_CLOSED peerSignal=08")
+                    output("MEDIA_CLOSE_REQUIRED")
+                    output("WAIT_MEDIA_CLOSED")
+                    guard readLine() == "media-closed" else { exit(85) }
+                    output("OWNED_CLOSED CID=0040")
+                    return true
+                }
+                command = readLine()
+                if command == "resume" {
+                    output(warmExit == "start-cid" ? "PARK_START_ACCEPTED rate=48000 signalingCID=0040 mediaCID=0042"
+                        : "PARK_START_ACCEPTED rate=48000 signalingCID=0040 mediaCID=0041")
+                    if ["overlap", "overlap-stop"].contains(warmExit ?? ""), let barrier {
+                        do { try Data().write(to: barrier.appendingPathComponent("warm-start-accepted")) }
+                        catch { exit(84) }
+                    }
+                    command = readLine()
+                }
+            }
+            if let native, command == "rate 96000" {
+                if native == "timing" || native == "staging-timing" { usleep(140_000) }
+                switch native {
+                case "staged-before-peer", "staged-denial", "staged-partial", "staged-stop": waitClockMarker("tap-prepared")
+                case "staged-denial-during-tap": waitClockMarker("tap-preparing")
+                case "staged-denial-before-media": waitClockMarker("media-preparing")
+                case "staged-failed-capture": waitClockMarker("tap-replacement-failed")
+                default: break
+                }
+                let refused = ["peer-rejected-suspend", "peer-rejected-config", "reverse-refused", "staged-denial", "staged-denial-during-tap", "staged-denial-before-media", "staged-partial"].contains(native)
+                if refused {
+                    output("RATE_SELECTED rate=48000 suspended=\(native == "peer-rejected-suspend" ? 0 : 1) rejected=1")
+                    if native == "staged-denial-before-media" || native == "staged-denial-during-tap" {
+                        clockMarker("peer-denied")
+                    }
+                } else if native != "staged-stop" {
+                    output("RATE_SELECTED rate=96000 suspended=1 rejected=0")
+                }
+                switch native {
+                case "hal-rejection", "tap-rejection", "staged-failed-capture":
+                    guard readLine() == "rollback" else { exit(84) }
+                    output("RATE_ROLLBACK rate=48000")
+                case "peer-rollback":
+                    guard readLine() == "resume" else { exit(84) }
+                    output("RATE_ROLLBACK rate=48000")
+                case "start-failure", "empty-after-ready":
+                    guard readLine() == "resume" else { exit(84) }
+                    output("RATE_START_ACCEPTED rate=96000 signalingCID=0040 mediaCID=0041")
+                    guard readLine() == "rate 48000" else { exit(84) }
+                    output("RATE_SELECTED rate=48000 suspended=1 rejected=0")
+                case "partial-after-ready":
+                    guard readLine() == "resume" else { exit(84) }
+                    output("RATE_START_ACCEPTED rate=96000 signalingCID=0040 mediaCID=0041")
+                    guard readLine() == "stop" else { exit(84) }
+                    command = "stop"
+                case "hal-timeout", "park-during-rate", "stop-during-clock", "reverse-refused", "staged-partial", "staged-stop":
+                    guard readLine() == "stop" else { exit(84) }
+                    command = "stop"
+                case "peer-rejected-suspend", "peer-rejected-config", "staged-denial", "staged-denial-during-tap", "staged-denial-before-media":
+                    break
+                default:
+                    guard readLine() == "resume" else { exit(84) }
+                    output("RATE_START_ACCEPTED rate=96000 signalingCID=0040 mediaCID=0041")
+                    guard readLine() == "rate 48000" else { exit(84) }
+                    if native == "timing" || native == "staging-timing" { usleep(140_000) }
+                    output("RATE_SELECTED rate=48000 suspended=1 rejected=0")
+                }
+                if !["hal-timeout", "partial-after-ready", "park-during-rate", "stop-during-clock", "reverse-refused", "staged-partial", "staged-stop"].contains(native) {
+                    if native != "peer-rejected-suspend" {
+                        guard readLine() == "resume" else { exit(84) }
+                        output("RATE_START_ACCEPTED rate=48000 signalingCID=0040 mediaCID=0041")
+                    }
+                    command = readLine()
+                }
+            } else if command == "rate 96000" {
+                output("RATE_SELECTED rate=96000 suspended=1 rejected=0")
+                guard readLine() == "resume" else { exit(84) }
+                output("RATE_START_ACCEPTED rate=96000 signalingCID=0040 mediaCID=0041")
+                guard readLine() == "rate 88200" else { exit(84) }
+                output("RATE_SELECTED rate=88200 suspended=1 rejected=0")
+                guard readLine() == "resume" else { exit(84) }
+                output("RATE_ROLLBACK rate=96000")
+                guard readLine() == "resume" else { exit(84) }
+                output("RATE_START_ACCEPTED rate=96000 signalingCID=0040 mediaCID=0041")
+                command = readLine()
+            }
+            guard command == "media-finished" || command == "stop" else { exit(84) }
             output("MEDIA_CLOSE_REQUIRED")
             output("WAIT_MEDIA_CLOSED")
             guard readLine() == "media-closed" else { exit(85) }
@@ -889,20 +1858,254 @@ enum LDACSessionClosureCheck {
             output("OWNED_CLOSED CID=0040")
         case "--media":
             output("MEDIA_PREPARED")
-            guard readLine() == "open" else { exit(86) }
+            let opening = readLine()
+            if opening == "close" { return true }
+            guard opening == "open" else { exit(86) }
             output("OWNED_OPEN CID=0041 outgoingMTU=1000")
-            output("READY CID=0041 outgoingMTU=1000 socketFD=3 PSM=0019 rate=48000 channels=2 bitrateKbps=330 eqmid=2")
-            output("PCM_READY frames=12000 rate=48000 channels=2 format=F32")
+            if let barrier {
+                let prepared = barrier.appendingPathComponent("capture-prepared")
+                do { try waitUntil { FileManager.default.fileExists(atPath: prepared.path) } }
+                catch { output("FIXTURE_CAPTURE_WARMUP_TIMEOUT"); exit(86) }
+            }
+            let fault = ProcessInfo.processInfo.environment["ACOUPLET_FIXTURE_MEDIA_READY_FAULT"]
+            let cid = fault == "cid" ? "0042" : "0041"
+            let mtu = fault == "mtu" ? 1001 : 1000
+            let rate = fault == "format" ? 44100 : 48000
+            output("READY CID=\(cid) outgoingMTU=\(mtu) socketFD=3 PSM=0019 rate=\(rate) channels=2 bitrateKbps=330 eqmid=2")
+            if fault != nil {
+                guard readLine() == "close" else { exit(86) }
+                output("OWNED_CLOSED CID=0041")
+                return true
+            }
+            pcm(RateFixture.firstFrames, tag: 1, writing: false)
+            output("PCM_READY frames=12000 rate=48000 channels=2 format=F32 bufferedFrames=\(RateFixture.firstFrames)")
             guard readLine() == "start live 0.25 0" else { exit(87) }
             output("LIVE_SENT packets=1 rate=48000 channels=2 bitrateKbps=330 eqmid=2")
-            guard readLine() == "gain 0.5" else { exit(88) }
-            output("GAIN_APPLIED gain=0.5")
-            guard readLine() == "stop" else { exit(89) }
+            var gain = readLine()
+            if gain == "park" {
+                output("PARK_MEDIA_PAUSED CID=0041 packets=1")
+                gain = readLine()
+                if gain == "warm-prefill" {
+                    output("PARK_MEDIA_PREFILL_PREPARED rate=48000")
+                    if warmExit != "overlap-stop" {
+                        pcm(RateFixture.firstFrames, tag: 4, writing: false)
+                        output("PCM_READY frames=12000 rate=48000 channels=2 format=F32 bufferedFrames=\(RateFixture.firstFrames)")
+                    }
+                    gain = readLine()
+                    if gain == "resume" {
+                        output("PARK_MEDIA_DISCARDED bytes=1024")
+                        output("PARK_LIVE CID=0041 rate=48000 packets=2")
+                        gain = readLine()
+                        if gain == "quality high" { gain = readLine() }
+                    }
+                }
+            }
+            guard gain == "gain 0.5" || gain == "stop" else { exit(88) }
+            if gain == "gain 0.5" { output("GAIN_APPLIED gain=0.5") }
+            var command = gain == "stop" ? gain : readLine()
+            if let native, command == "drain \(RateFixture.firstWatermark)" {
+                if native == "overlap-barrier", let nativeBarrier {
+                    do { try waitUntil { FileManager.default.fileExists(atPath: nativeBarrier.appendingPathComponent("clock-issued").path) } }
+                    catch { output("FIXTURE_NO_CLOCK_DURING_DRAIN"); exit(89) }
+                }
+                if native == "timing" || native == "staging-timing" { usleep(200_000) }
+                output(RateFixture.firstDrain)
+                if ["hal-timeout", "park-during-rate", "stop-during-clock", "reverse-refused"].contains(native) {
+                    command = readLine()
+                } else {
+                    if !["hal-rejection", "peer-rejected-suspend", "peer-rejected-config"].contains(native) {
+                        guard readLine() == "rate 96000 high" else { exit(89) }
+                        if native == "staged-denial-before-media" {
+                            clockMarker("media-preparing")
+                            waitClockMarker("peer-denied")
+                            usleep(75_000)
+                        }
+                        output("RATE_PREPARED rate=96000")
+                    }
+                    if !["partial-after-ready", "staged-partial", "staged-stop"].contains(native) {
+                        if ["round-trip", "recreated-round-trip", "timing", "staging-timing", "overlap-barrier", "staged-before-peer"].contains(native) {
+                            pcm(RateFixture.secondFrames, tag: 2, writing: false)
+                            output("PCM_READY frames=24000 rate=96000 channels=2 format=F32 bufferedFrames=\(RateFixture.secondFrames)")
+                            guard readLine() == "resume" else { exit(89) }
+                            output("RATE_LIVE rate=96000 channels=2 bitrateKbps=990 eqmid=0")
+                            guard readLine() == "drain \(RateFixture.secondWatermark)" else { exit(89) }
+                            if native == "timing" || native == "staging-timing" { usleep(200_000) }
+                            output(RateFixture.secondDrain)
+                        }
+                        guard readLine() == "rate 48000 high" else { exit(89) }
+                        output("RATE_PREPARED rate=48000")
+                        pcm(RateFixture.firstFrames, tag: 3, writing: false)
+                        output("PCM_READY frames=12000 rate=48000 channels=2 format=F32 bufferedFrames=\(RateFixture.firstFrames)")
+                        guard readLine() == "resume" else { exit(89) }
+                        output("RATE_LIVE rate=48000 channels=2 bitrateKbps=990 eqmid=0")
+                    }
+                    command = readLine()
+                }
+            } else if command == "drain \(RateFixture.firstWatermark)" {
+                output(RateFixture.firstDrain)
+                guard readLine() == "rate 96000 high" else { exit(89) }
+                output("RATE_PREPARED rate=96000")
+                pcm(RateFixture.secondFrames, tag: 2, writing: false)
+                output("PCM_READY frames=24000 rate=96000 channels=2 format=F32 bufferedFrames=\(RateFixture.secondFrames)")
+                guard readLine() == "resume" else { exit(89) }
+                output("RATE_LIVE rate=96000 channels=2 bitrateKbps=990 eqmid=0")
+                guard readLine() == "drain \(RateFixture.secondWatermark)" else { exit(89) }
+                output(RateFixture.secondDrain)
+                guard readLine() == "rate 88200 high" else { exit(89) }
+                output("RATE_PREPARED rate=88200")
+                guard readLine() == "rate 96000 high" else { exit(89) }
+                output("RATE_PREPARED rate=96000")
+                pcm(RateFixture.secondFrames, tag: 3, writing: false)
+                output("PCM_READY frames=24000 rate=96000 channels=2 format=F32 bufferedFrames=\(RateFixture.secondFrames)")
+                guard readLine() == "resume" else { exit(89) }
+                output("RATE_LIVE rate=96000 channels=2 bitrateKbps=990 eqmid=0")
+                command = readLine()
+            }
+            guard command == "stop" else { exit(89) }
             output("FEED_COMPLETE result=0")
             guard readLine() == "close" else { exit(90) }
             output("OWNED_CLOSED CID=0041")
+        case "--stream" where native != nil:
+            guard let marker = arguments.firstIndex(of: "--sample-rate"), var rate = Int(arguments[marker + 1]),
+                  arguments.contains("--device-uid"), arguments.contains("--await-start") else { exit(91) }
+            var staged = arguments.contains("--native-epoch")
+            var reused = false
+            while true {
+                var prefillBegan: UInt64?
+                if staged {
+                    if native == "staging-timing" {
+                        usleep(75_000)
+                        prefillBegan = clock_gettime_nsec_np(CLOCK_MONOTONIC)
+                    }
+                    if native == "staged-failed-capture", rate == 96000 {
+                        output("DESTROY_TAP status=0")
+                        output("PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=0")
+                        if !reused { clockMarker("tap-replacement-failed") }
+                        exit(1)
+                    }
+                    if rate == 96000 && (native == "tap-rejection" || native == "recreated-round-trip" && reused) {
+                        output("DESTROY_TAP status=0")
+                        output("PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=0")
+                        exit(1)
+                    }
+                    if reused {
+                        output("CLOCK_DESTROY_TAP status=0")
+                        output("CLOCK_CREATE_TAP status=0")
+                    }
+                    if native == "staged-denial-during-tap", rate == 96000 {
+                        clockMarker("tap-preparing")
+                        waitClockMarker("peer-denied")
+                        usleep(75_000)
+                    }
+                    output("PCM_CAPTURE_CLOCK_PREPARED rate=\(rate)")
+                    if ["staged-before-peer", "staged-denial", "staged-partial", "staged-stop"].contains(native), rate == 96000 {
+                        clockMarker("tap-prepared")
+                    }
+                    if ["peer-rollback", "staged-denial", "staged-denial-during-tap", "staged-partial", "staged-stop"].contains(native), rate == 96000 {
+                        terminateCapture()
+                        if native == "staged-partial" {
+                            var word: UInt32 = 7
+                            guard Darwin.write(3, &word, 4) == 4 else { exit(91) }
+                        }
+                        output("DESTROY_TAP status=0")
+                        output("PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=\(native == "staged-partial" ? 4 : 0)")
+                        return true
+                    }
+                } else {
+                    output("PCM_CAPTURE_SOURCE rate=\(rate)")
+                    output("PCM_CAPTURE_PREPARED rate=\(rate)")
+                }
+                guard readLine() == "capture" else { exit(91) }
+                if let prefillBegan {
+                    let elapsed = clock_gettime_nsec_np(CLOCK_MONOTONIC) - prefillBegan
+                    if elapsed < 250_000_000 { usleep(useconds_t((250_000_000 - elapsed) / 1000)) }
+                }
+                if native == "start-failure", rate == 96000 {
+                    output("DESTROY_TAP status=0")
+                    output("PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=0")
+                    exit(1)
+                }
+                if staged { output("PCM_CAPTURE_SOURCE rate=\(rate)") }
+                output("PCM_CAPTURE_READY rate=\(rate) channels=2 format=F32 interleaved=1 bytesPerFrame=8")
+                if rate == 96000, native == "empty-after-ready" || native == "partial-after-ready" {
+                    var word: UInt32 = 7
+                    let bytes = native == "partial-after-ready" ? Darwin.write(3, &word, 4) : 0
+                    guard bytes == (native == "partial-after-ready" ? 4 : 0) else { exit(91) }
+                    output("DESTROY_TAP status=0")
+                    output("PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=\(bytes)")
+                    exit(1)
+                }
+                let frames = rate == 96000 ? RateFixture.secondFrames : RateFixture.firstFrames
+                pcm(frames, tag: staged ? rate == 96000 ? 2 : 3 : 1, writing: true)
+                if staged, rate == 48000 {
+                    terminateCapture()
+                    output("DESTROY_TAP status=0")
+                    output("PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=\(frames * 8)")
+                    return true
+                }
+                guard readLine() == "clock-freeze" else { exit(91) }
+                output("CAPTURE_FROZEN rate=\(rate) bytes=\(frames * 8) sourceFrames=\(frames)")
+                if ["hal-timeout", "park-during-rate", "stop-during-clock", "reverse-refused"].contains(native) {
+                    terminateCapture()
+                    output("DESTROY_TAP status=0")
+                    output("PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=0")
+                    return true
+                }
+                guard let command = readLine(), command.hasPrefix("clock-rate "),
+                      let next = Int(command.dropFirst(11)), next == 48000 || next == 96000 else { exit(91) }
+                staged = true
+                reused = true
+                rate = next
+            }
         case "--stream":
+            let liveRates = arguments.contains("fixture-live-rate")
+            guard arguments.contains("--await-start"), arguments.suffix(2) == ["--device-rate", "48000"] else { exit(91) }
+            output("PCM_CAPTURE_PREPARED rate=48000")
+            output("PCM_CAPTURE_SOURCE rate=48000")
+            if let barrier {
+                do { try Data().write(to: barrier.appendingPathComponent("capture-prepared")) }
+                catch { exit(91) }
+            }
+            var ready = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+            while true {
+                var pending = sigset_t()
+                guard sigpending(&pending) == 0 else { exit(91) }
+                if sigismember(&pending, SIGTERM) == 1 {
+                    output("DESTROY_TAP status=0")
+                    output("PCM_CAPTURE_CANCELLED cleanup=1 error=0 interrupted=\(SIGTERM)")
+                    exit(1)
+                }
+                let result = poll(&ready, 1, 25)
+                if result < 0 && errno != EINTR { exit(91) }
+                if result > 0 {
+                    guard readLine() == "capture" else { exit(91) }
+                    break
+                }
+            }
             output("PCM_CAPTURE_READY rate=48000 channels=2 format=F32 interleaved=1 bytesPerFrame=8")
+            pcm(RateFixture.firstFrames, tag: 1, writing: true)
+            if liveRates {
+                for (freeze, tag) in [(RateFixture.firstFreeze, UInt8(2)), (RateFixture.secondFreeze, UInt8(3))] {
+                    guard readLine() == "freeze" else { exit(91) }
+                    output(freeze)
+                    guard readLine() == "rate 96000" else { exit(91) }
+                    output("PCM_CAPTURE_RESUMED rate=96000")
+                    pcm(RateFixture.secondFrames, tag: tag, writing: true)
+                }
+            }
+            if arguments.contains("fixture-warm-hold") {
+                guard readLine() == "park" else { exit(91) }
+                output("PARK_CAPTURE_PAUSED rate=48000")
+                if ["", "long-hold", "start-cid", "stop-prefill", "authorization-timeout", "queued-configuration", "overlap", "overlap-stop"].contains(warmExit ?? "") {
+                    guard readLine() == "warm-resume" else { exit(91) }
+                    output("PARK_CAPTURE_RESUMED rate=48000 discardedFrames=1024")
+                    if warmExit == "overlap", let barrier {
+                        do { try waitUntil { FileManager.default.fileExists(atPath: barrier.appendingPathComponent("warm-start-accepted").path) } }
+                        catch { exit(91) }
+                    }
+                    if warmExit != "overlap-stop" { pcm(RateFixture.firstFrames, tag: 4, writing: true) }
+                }
+            }
             var mask = sigset_t()
             sigemptyset(&mask)
             sigaddset(&mask, SIGTERM)
@@ -940,15 +2143,43 @@ enum LDACSessionClosureCheck {
         }
         if CommandLine.arguments.dropFirst().first == "--fixture" { child() }
         let executable = URL(fileURLWithPath: CommandLine.arguments[0])
+        if CommandLine.arguments.count > 2 {
+            for mode in CommandLine.arguments.dropFirst(2) {
+                if mode == "stop-before-queued-clock" { try await LDACNativeSession.stopBeforeQueuedClockCheck() }
+                else { try await LDACNativeSession.nativeClockPlaybackCheck(executable: executable, mode: mode) }
+            }
+            return
+        }
         try LDACNativeSession.priorityPreparationCheck(executable: executable)
         try LDACNativeSession.priorityActivationFailureCheck(executable: executable)
         try LDACNativeSession.acquisitionCheck(executable: executable)
+        try LDACNativeSession.earlyMediaPreparationCheck(executable: executable, cancelled: true)
+        try LDACNativeSession.earlyMediaPreparationCheck(executable: executable, cancelled: false)
+        print("PASS unopened capture and media helpers clean up after cancellation or connector failure")
         try await LDACNativeSession.logfreePlaybackCheck(executable: executable, priorityAvailable: true)
-        try await LDACNativeSession.logfreePlaybackCheck(executable: executable, priorityAvailable: false)
+        try await LDACNativeSession.logfreePlaybackCheck(executable: executable, priorityAvailable: false, capturePermissionMode: .verified)
+        try await LDACNativeSession.logfreePlaybackCheck(executable: executable, priorityAvailable: true, liveRates: true)
+        try await LDACNativeSession.logfreePlaybackCheck(executable: executable, priorityAvailable: true, warmHold: true)
+        for exit in ["long-hold", "stop", "stop-prefill", "suspend-cid", "start-cid", "peer-close", "peer-abort", "peer-close-before-suspend", "authorization-timeout", "queued-configuration", "overlap", "overlap-stop"] {
+            try await LDACNativeSession.logfreePlaybackCheck(executable: executable, priorityAvailable: true, warmHold: true, warmExit: exit)
+        }
+        print("PASS warm hold preserves both CIDs through idle and explicit START authorization; peer exit, STOP, stale authorization and invalid CIDs fail closed")
+        for fault in ["cid", "mtu", "format"] {
+            try await LDACNativeSession.logfreePlaybackCheck(executable: executable, priorityAvailable: true, mediaReadyFault: fault)
+        }
+        print("PASS capture warms before media readiness and produces audio only after the owned channel and format are verified")
+        print("PASS live rate selection and rejection preserve the same capture and owned channels")
+        for mode in ["round-trip", "recreated-round-trip", "hal-rejection", "peer-rollback", "tap-rejection", "start-failure", "empty-after-ready", "partial-after-ready", "hal-timeout", "park-during-rate", "stop-during-clock", "overlap-barrier",
+                     "peer-rejected-suspend", "peer-rejected-config", "reverse-refused", "staged-before-peer", "staged-denial",
+                     "staged-denial-during-tap", "staged-denial-before-media", "staged-partial", "staged-failed-capture", "staged-stop"] {
+            try await LDACNativeSession.nativeClockPlaybackCheck(executable: executable, mode: mode)
+        }
+        try await LDACNativeSession.stopBeforeQueuedClockCheck()
         print("PASS log-free acquisition, deferred media, live capture, gain, priority and owned shutdown")
         for handle in [nil, 0, 1] as [Int?] {
             try LDACNativeSession.checkRestoreArguments(executable: executable, handle: handle)
         }
+        try await LDACNativeSession.ordinaryAudioRestorationPolicyCheck(executable: executable)
         for failure in 1...3 {
             PipeSetupCheck.failureCall = failure
             PipeSetupCheck.calls = 0
@@ -990,8 +2221,16 @@ enum LDACSessionClosureCheck {
             try LDACNativeSession.clockJumpCheck(offset, logURL: raw.deletingLastPathComponent().appendingPathComponent("clock.log"))
             print("PASS clock jump seconds=\(offset): operation and shutdown deadlines use elapsed time; logs retain calendar time")
         }
+        try LDACNativeSession.rateTransitionDeadlineCheck(executable: executable)
+        print("PASS live rate deadlines: overdue format reports rejected and rollback cannot extend the request")
+        try LDACNativeSession.rateTransitionRejectionCheck(executable: executable)
+        try await LDACNativeSession.capturePressureDeclineCheck(executable: executable)
+        try await LDACNativeSession.sinkRatePreflightCheck(executable: executable)
+        print("PASS selected-sink rate preflight: known unsupported rates leave PCM running and preserve quality changes; unknown capabilities negotiate")
         try await LDACNativeSession.failurePresentationCheck(logURL: raw.deletingLastPathComponent().appendingPathComponent("errors.log"))
         print("PASS LDAC failure presentation preserves diagnostics and actionable permission/availability messages")
+        try await LDACNativeSession.targetedPermissionCheck(executable: executable)
+        print("PASS permission-only capture accepts a clean callback, rejects failed checks, and never asks for Bluetooth handoff")
         for mode in ["permission-term", "permission-int", "permission-unknown-signal", "permission-cleanup-failed", "permission-capture-failed",
                      "capture-cancel", "capture-recovery", "capture-unclassified", "capture-cleanup-failed", "capture-no-destruction"] {
             try await LDACNativeSession.captureCancellationCheck(mode, executable: executable)
@@ -1096,4 +2335,4 @@ static volatile sig_atomic_t interrupted;
 ''')
     subprocess.run(["xcrun", "clang", str(signal_source), "-o", str(signal_binary)], check=True)
     subprocess.run(["xcrun", "swiftc", "-swift-version", "6", "-parse-as-library", str(swift), "-o", str(binary)], check=True)
-    subprocess.run([str(binary), str(signal_binary)], check=True)
+    subprocess.run([str(binary), str(signal_binary), *sys.argv[1:]], check=True)

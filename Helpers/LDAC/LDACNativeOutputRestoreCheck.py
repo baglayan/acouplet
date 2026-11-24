@@ -13,18 +13,20 @@ claim = source[source.index("    nonisolated static func canTransferControls("):
 priority = source[source.index("    func priorityControl("):source.index("    func selectForHandoff(")]
 priority_state = source[source.index("    private nonisolated static func validatePriority("):source.index("    private nonisolated static func read<T>(")]
 lease_state = source[source.index("    private nonisolated static func leaseIsOwned("):source.index("    private func listen(")]
-apply = source[source.index("    private func applyControls("):source.index("    private func verifyRoute(")]
+apply = source[source.index("    private func applyControls("):source.index("    func nativeClockControl(")]
 method = source[source.index("    @discardableResult\n    func silence("):source.index("    private func applyControls(")]
 route_owner = source[source.index("    private static func acquireRouteOwner("):source.index("    private func setLease(")].replace('"/Library/Application Support/Acouplet"', 'routeDirectory')
 set_lease = source[source.index("    private func setLease("):source.index("    private func leaseIsOwned(")].replace("private func setLease", "private func setDriverLease")
 hal_write = source[source.index("    private nonisolated static func write<T>("):source.index("    private nonisolated static func property(")].replace("private nonisolated static func write<T>", "nonisolated static func writeHAL<T>")
 handoff = source[source.index("    func selectForHandoff()"):source.index("    @discardableResult\n    func silence(")]
-verify = source[source.index("    private func verifyRoute()"):source.index("    private func hasSelectedFormat()")]
+clock_methods = source[source.index("    func nativeClockControl("):source.index("    private func verifyRoute()")]
+verify = source[source.index("    private func verifyRoute()"):source.index("    private func hasSelectedFormat(")]
 selectors = source[source.index("    private var handoffSelectors:"):source.index("    init(id:")]
 volume = source[source.index("struct LDACNativeVolume:"):source.index("\n@MainActor\nfinal class LDACNativeOutput")]
 session_source = (Path(__file__).resolve().parents[2] / "Sources/LDACNativeSession.swift").read_text()
 owner_source = (Path(__file__).resolve().parents[2] / "Sources/LDACOwner.swift").read_text()
-priority_types = session_source[session_source.index("struct LDACPriorityControl:"):session_source.index("final class LDACNativeSession:")]
+sample_rates = session_source[session_source.index("enum LDACSampleRate:"):session_source.index("enum LDACQuality:")]
+priority_types = session_source[session_source.index("enum LDACAudioCaptureAccess:"):session_source.index("final class LDACNativeSession:")]
 diagnostic_type = session_source[session_source.index("    struct Diagnostic:"):session_source.index("    struct Completion:")]
 owner_error = owner_source[owner_source.index("struct LDACOwnerError:"):owner_source.index("private final class LDACOwnerChannel:")]
 diagnostic_description = source[source.index("    static func diagnosticDescription("):source.index("    struct OutputError:")]
@@ -79,8 +81,8 @@ enum SonyBLEIdentity {
         return address
     }
 }
-enum LDACSampleRate: Int, Codable { case hz48000 = 48000 }
 __PRIORITY_TYPES__
+__SAMPLE_RATES__
 struct LDACNativeSession {
 __DIAGNOSTIC_TYPE__
 }
@@ -133,7 +135,9 @@ struct ContinuousClock {
 
 func AudioObjectRemovePropertyListenerBlock(_ object: UInt32, _ property: inout AudioObjectPropertyAddress,
     _ queue: DispatchQueue, _ block: () -> Void) -> Int32 { noErr }
-func AudioObjectHasProperty(_ object: UInt32, _ property: inout AudioObjectPropertyAddress) -> Bool { true }
+func AudioObjectHasProperty(_ object: UInt32, _ property: inout AudioObjectPropertyAddress) -> Bool {
+    property.mSelector != LDACNativeOutput.ratePendingSelector || LDACNativeOutput.advertisesClock
+}
 func AudioObjectIsPropertySettable(_ object: UInt32, _ property: inout AudioObjectPropertyAddress,
     _ settable: inout DarwinBoolean) -> OSStatus { settable = true; return noErr }
 func leaseClaim(_ value: CFDictionary) -> Bool {
@@ -216,6 +220,7 @@ __VOLUME__
 final class LDACNativeOutput {
     static var routeOwner: FileHandle?
     var holdsRouteOwner = false
+    var changingClock = false
     var restoringOwner = false
     var model = ""
     static var routeDirectory = ""
@@ -227,6 +232,13 @@ final class LDACNativeOutput {
     nonisolated static let modelSelector: UInt32 = 11
     nonisolated static let prioritySelector: UInt32 = 12
     nonisolated static let leaseSelector: UInt32 = 13
+    nonisolated static let ratePendingSelector: UInt32 = 14
+    nonisolated(unsafe) static var advertisesClock = false
+    nonisolated(unsafe) static var clockDriverRevision = 10
+    nonisolated(unsafe) static var requestedClocks: [Int] = []
+    nonisolated(unsafe) static var clockStates: [Int] = []
+    nonisolated(unsafe) static var publishedClock = 48000
+    static func driverRevision() throws -> Int? { clockDriverRevision }
     nonisolated static let lease = LeaseFixture()
     nonisolated(unsafe) static var leaseReadback: Bool?
     nonisolated(unsafe) static var failLeaseRead = false
@@ -256,6 +268,10 @@ final class LDACNativeOutput {
     nonisolated(unsafe) static var writes: [(UInt32, UInt32)] = []
     nonisolated(unsafe) static var failMute = false
     nonisolated(unsafe) static var failWrite = false
+    nonisolated(unsafe) static var changeSystemOutputAfterHandoff: UInt32?
+    nonisolated(unsafe) static var replaceDefaultsAfterHandoff: UInt32?
+    nonisolated(unsafe) static var changeSystemOutputAfterPark: UInt32?
+    nonisolated(unsafe) static var deadOutput: UInt32?
     nonisolated(unsafe) static var expire = false
     let address = LDACNativeOutput.targetUID
     var stream: UInt32 = 0
@@ -267,9 +283,12 @@ final class LDACNativeOutput {
     var restoring = false
     var ownsLease = true
     var isSelected = true
+    var isParkedForPhone = false
     var controls = LDACNativeVolume(scalar: 0, muted: true)
 __SELECTORS__
     var savedDefaults: [UInt32: String] = [kAudioHardwarePropertyDefaultOutputDevice: LDACNativeOutput.targetUID, kAudioHardwarePropertyDefaultSystemOutputDevice: LDACNativeOutput.targetUID]
+    var expectedDefaultOutputUID: String?
+    var partialSourceResumeSelection = false
     var listeners: [(UInt32, AudioObjectPropertyAddress, () -> Void)] = []
     var renewTask: Task<Void, Never>?
     var leaseActivity: NSObjectProtocol?
@@ -296,6 +315,10 @@ __SELECTORS__
         writes = []
         failMute = false
         failWrite = false
+        changeSystemOutputAfterHandoff = nil
+        replaceDefaultsAfterHandoff = nil
+        changeSystemOutputAfterPark = nil
+        deadOutput = nil
         expire = false
         priorityReply = ["phase": "idle"]
         priorityReplies = []
@@ -348,6 +371,9 @@ __SELECTORS__
                 Date.time -= 3600
             }
             value = Optional(Unmanaged.passRetained(priorityReply as CFDictionary as CFTypeRef)) as Any
+        } else if selector == ratePendingSelector {
+            let rate = clockStates.count > 1 ? clockStates.removeFirst() : clockStates.first!
+            value = Optional(Unmanaged.passRetained(NSNumber(value: rate) as CFTypeRef)) as Any
         } else if object == system { defaultReads += 1; value = current[selector]! }
         else if selector == kAudioDevicePropertyTransportType { value = transports[object]! }
         else if selector == kAudioDevicePropertyVolumeScalar { value = volumes[object]! }
@@ -364,9 +390,9 @@ __SELECTORS__
         if expireReadiness == "device" { ContinuousClock.time += 6; Date.time -= 3600; return false }
         return true
     }
-    private func hasSelectedFormat() throws -> Bool {
+    private func hasSelectedFormat(rate expected: Float64? = nil) throws -> Bool {
         if Self.expireReadiness == "format" { ContinuousClock.time += 6; Date.time -= 3600; return false }
-        return true
+        return Self.publishedClock == Int(expected ?? sampleRateHz)
     }
     func leaseIsOwned() throws -> Bool {
         try Self.leaseIsOwned(device) && (!Self.leaseLostAfterPriorityWrite || Self.priorityWrites.isEmpty)
@@ -378,7 +404,7 @@ __SELECTORS__
         if expire { ContinuousClock.time += 9; Date.time -= 3600 }
         return available[uid]
     }
-    static func isAliveOutput(_ object: UInt32) throws -> Bool { true }
+    static func isAliveOutput(_ object: UInt32) throws -> Bool { object != deadOutput }
     static func availableFallback() throws -> UInt32? { fallback }
     static func setMute(_ object: UInt32, muted: Bool) throws {
         if failMute { throw RouteError() }
@@ -392,6 +418,11 @@ __SELECTORS__
             return
         }
         if failWrite { throw RouteError() }
+        if object == 5 && selector == kAudioDevicePropertyNominalSampleRate {
+            precondition(!requiringLease)
+            requestedClocks.append(Int(value as! Float64))
+            return
+        }
         if object == 5 && (selector == kAudioDevicePropertyMute || selector == kAudioDevicePropertyVolumeScalar) {
             if replaceOnControlWrite {
                 replaceOnControlWrite = false
@@ -420,11 +451,21 @@ __SELECTORS__
             let value = value as! UInt32
             writes.append((selector, value))
             current[selector] = value
+            if selector == kAudioHardwarePropertyDefaultOutputDevice, value == available[uid], let changeSystemOutputAfterHandoff {
+                current[kAudioHardwarePropertyDefaultSystemOutputDevice] = changeSystemOutputAfterHandoff
+            }
+            if selector == kAudioHardwarePropertyDefaultSystemOutputDevice, value == available[uid], let replacement = replaceDefaultsAfterHandoff {
+                current = Dictionary(uniqueKeysWithValues: defaultSelectors.map { ($0, replacement) })
+            }
+            if selector == kAudioHardwarePropertyDefaultOutputDevice, value == available["speakers"], let changeSystemOutputAfterPark {
+                current[kAudioHardwarePropertyDefaultSystemOutputDevice] = changeSystemOutputAfterPark
+            }
         }
     }
 __CLAIM__
 __HANDOFF__
 __VERIFY__
+__CLOCK__
 __PRIORITY__
 __DIAGNOSTIC_DESCRIPTION__
 __PRIORITY_STATE__
@@ -441,7 +482,7 @@ __SET_LEASE__
 @main
 enum Check {
     @MainActor
-    static func main() async {
+    static func main() async throws {
         typealias Output = LDACNativeOutput
         for (seen, withdrawn, type) in [(false, false, Int64(0x7461636c)), (true, true, Int64(0x74616164))] {
             Output.reset()
@@ -599,6 +640,30 @@ enum Check {
         precondition(fcntl(routeDescriptor, F_GETFD) & FD_CLOEXEC != 0)
         _ = await rejected.restoreAndRelease()
         precondition(Output.routeOwner == nil && fcntl(routeDescriptor, F_GETFD) < 0)
+
+        for failure in ["none", "lease", "non-idle", "priority changed"] {
+            Output.reset()
+            Output.current = Dictionary(uniqueKeysWithValues: Output.defaultSelectors.map { ($0, 6) })
+            Output.available = [Output.uid: 5, Output.targetUID: 6]
+            let stale = ["phase": "cleanup-required"]
+            if failure == "non-idle" { Output.priorityReply = stale }
+            if failure == "priority changed" { Output.priorityReplies = [["phase": "idle"], stale] }
+            let output = Output()
+            output.isSelected = false
+            output.failLeaseClaim = failure == "lease"
+            do {
+                try await output.claim(model: "Sony", targetAddress: Output.targetUID, requiresIdlePriority: true)
+                precondition(failure == "none" && Output.lease.isOwned())
+            } catch {
+                precondition(failure != "none")
+            }
+            precondition(Output.lease.writes() == (failure == "none" || failure == "priority changed" ? [true] : []))
+            let result = await output.restoreAndRelease()
+            precondition(result == nil && Output.routeOwner == nil && !Output.lease.isOwned())
+            precondition(Output.priorityWrites.isEmpty && Output.writes.isEmpty && Output.muteWrites.isEmpty
+                         && Output.current.values.allSatisfy { $0 == 6 } && Output.volumes[6] == 0.3 && Output.mutes[6] == 1)
+        }
+
         Output.reset()
         for claim in [false, true] {
             try! Output.writeHAL(5, selector: Output.leaseSelector, value: ["claim": claim ? kCFBooleanTrue! : kCFBooleanFalse!] as CFDictionary)
@@ -614,6 +679,7 @@ enum Check {
             output.isSelected = false
             do {
                 try await output.claim(model: "Sony", targetAddress: Output.targetUID)
+                try output.selectForHandoff()
                 try output.selectForHandoff()
                 precondition(Output.current[Output.defaultSelectors[0]] == 5)
                 precondition(Output.current[Output.defaultSelectors[1]] == (shared ? 5 : 7))
@@ -637,17 +703,174 @@ enum Check {
         supersededRoute.isSelected = false
         try! await supersededRoute.claim(model: "Sony", targetAddress: Output.targetUID)
         try! supersededRoute.selectForHandoff()
+        let routeWrites = Output.writes.count
         Output.current[Output.defaultSelectors[0]] = 8
         do {
             try supersededRoute.validateForRecovery()
             preconditionFailure("Changed music route accepted for recovery")
         } catch {}
+        do {
+            try supersededRoute.selectForHandoff()
+            preconditionFailure("Repeated handoff overrode a new music route")
+        } catch is LDACOutputDeselectedError {}
+        catch { preconditionFailure("Unexpected handoff error: \(error)") }
+        precondition(supersededRoute.silence() == nil && supersededRoute.ownsLease && !supersededRoute.leaseReleased)
+        precondition(Output.current[Output.defaultSelectors[0]] == 8 && Output.current[Output.defaultSelectors[1]] == 7)
+        precondition(Output.writes.count == routeWrites)
+        Output.current[Output.defaultSelectors[0]] = 5
+        try! supersededRoute.validateForRecovery()
+        precondition(Output.writes.count == routeWrites && Output.current[Output.defaultSelectors[1]] == 7)
+        Output.current[Output.defaultSelectors[0]] = 8
         Output.writes = []
         Output.muteWrites = []
         let preservedRoute = await supersededRoute.restoreAndRelease()
         precondition(preservedRoute == nil && Output.writes.isEmpty && Output.muteWrites.isEmpty)
         precondition(Output.current[Output.defaultSelectors[0]] == 8 && Output.current[Output.defaultSelectors[1]] == 7)
         print("PASS independent system-sound routing, shared routing and later music-route supersession")
+        print("PASS a muted lease survives temporary external selection and explicit return without route writes")
+
+        Output.reset()
+        let builtInDefaults = Dictionary(uniqueKeysWithValues: Output.defaultSelectors.map { ($0, UInt32(7)) })
+        Output.current = builtInDefaults
+        Output.available = [Output.uid: 5, "speakers": 7]
+        let interruptedHandoff = Output()
+        interruptedHandoff.isSelected = false
+        try await interruptedHandoff.claim(model: "Sony", targetAddress: Output.targetUID)
+        Output.replaceDefaultsAfterHandoff = 7
+        do {
+            try interruptedHandoff.selectForHandoff()
+            preconditionFailure("Handoff accepted while another process reclaimed both defaults")
+        } catch is LDACOutputDeselectedError {}
+        catch { preconditionFailure("Interrupted handoff returned the wrong failure: \(error)") }
+        precondition(Output.writes.map(\.0) == Output.defaultSelectors && Output.writes.allSatisfy { $0.1 == 5 })
+        Output.writes = []
+        let interruptedCleanup = await interruptedHandoff.restoreAndRelease(restoreHeadphoneOutput: false)
+        precondition(interruptedCleanup == nil && interruptedHandoff.leaseReleased
+                     && Output.current == builtInDefaults && Output.writes.isEmpty)
+        print("PASS cold handoff stops when another process reclaims both outputs and releases the lease without restoring either selector")
+
+        for currentOutput in [kAudioObjectUnknown, 8] {
+            Output.reset()
+            Output.current = [Output.defaultSelectors[0]: currentOutput, Output.defaultSelectors[1]: 6]
+            Output.available = [Output.uid: 5, Output.targetUID: 6, "user-output": 8]
+            let output = Output()
+            output.isSelected = false
+            output.ownsLease = false
+            do {
+                try await output.claim(model: "Sony", targetAddress: Output.targetUID, expectedDefaultOutputUID: Output.targetUID)
+                preconditionFailure("Pinned claim accepted a superseded or unavailable default")
+            } catch is LDACOutputDeselectedError {}
+            catch { preconditionFailure("Pinned claim returned the wrong failure: \(error)") }
+            precondition(Output.writes.isEmpty && !output.ownsLease && Output.current[Output.defaultSelectors[0]] == currentOutput)
+            _ = await output.restoreAndRelease(restoreHeadphoneOutput: false)
+        }
+
+        Output.reset()
+        Output.current = [Output.defaultSelectors[0]: 6, Output.defaultSelectors[1]: 6]
+        Output.available = [Output.uid: 5, Output.targetUID: 6, "user-output": 8]
+        let partial = Output()
+        partial.isSelected = false
+        try! await partial.claim(model: "Sony", targetAddress: Output.targetUID, expectedDefaultOutputUID: Output.targetUID)
+        Output.changeSystemOutputAfterHandoff = 8
+        do {
+            try partial.selectForHandoff()
+            preconditionFailure("Pinned handoff overrode the later system default")
+        } catch is LDACOutputDeselectedError {}
+        catch { preconditionFailure("Pinned handoff returned the wrong failure: \(error)") }
+        precondition(Output.current[Output.defaultSelectors[0]] == 5 && Output.current[Output.defaultSelectors[1]] == 8)
+        let partialResult = await partial.restoreAndRelease(restoreHeadphoneOutput: false)
+        precondition(partialResult == nil && partial.leaseReleased && Output.current[Output.defaultSelectors[0]] == 6
+                     && Output.current[Output.defaultSelectors[1]] == 8 && Output.muteWrites.isEmpty)
+        print("PASS pinned automatic return refuses changed or absent defaults and undoes only its still-owned partial route selection")
+
+        let musicSelector = Output.defaultSelectors[0]
+        let systemSelector = Output.defaultSelectors[1]
+        for shared in [true, false] {
+            Output.reset()
+            Output.available = [Output.uid: 5, Output.targetUID: 6, "speakers": 7, "user-output": 8]
+            Output.current[systemSelector] = shared ? 5 : 8
+            let held = Output()
+            held.savedDefaults = [musicSelector: "speakers", systemSelector: shared ? "speakers" : Output.targetUID]
+            let parked = try held.parkForPhone()
+            precondition(parked && held.isParkedForPhone && !held.routeRecovery.selected && held.ownsLease)
+            precondition(Output.current == [musicSelector: 7, systemSelector: shared ? 7 : 8])
+            precondition(Output.writes.count == (shared ? 2 : 1) && Output.muteWrites.isEmpty && Output.endpointMuteWrites == [1])
+            try held.validateForRecovery()
+            if !shared { Output.current[systemSelector] = 6 }
+            try held.resumeFromPhone()
+            precondition(!held.isParkedForPhone && held.routeRecovery.selected && held.ownsLease && !held.ready)
+            precondition(Output.current == [musicSelector: 5, systemSelector: shared ? 5 : 6])
+            precondition(Output.writes.count == (shared ? 4 : 2) && Output.endpointMuteWrites == [1])
+            let error = await held.restoreAndRelease(restoreHeadphoneOutput: false)
+            precondition(error == nil && held.leaseReleased)
+            precondition(Output.current == [musicSelector: 7, systemSelector: shared ? 7 : 6])
+        }
+
+        let targetVariant = Output.targetUID + ":output"
+        for saved in [Output.targetUID, targetVariant, "missing-output", "speakers"] {
+            Output.reset()
+            Output.available = [Output.uid: 5, Output.targetUID: 6, targetVariant: 8, "speakers": 7]
+            if saved == "speakers" { Output.deadOutput = 7 }
+            let held = Output()
+            held.savedDefaults = [musicSelector: saved, systemSelector: "speakers"]
+            let parked = try held.parkForPhone()
+            precondition(!parked && !held.isParkedForPhone && held.routeRecovery.selected && held.ownsLease)
+            precondition(Output.writes.isEmpty && Output.endpointMuteWrites.isEmpty)
+            _ = await held.restoreAndRelease(restoreHeadphoneOutput: false)
+        }
+
+        for changedSelector in [musicSelector, systemSelector] {
+            Output.reset()
+            Output.available = [Output.uid: 5, "speakers": 7, "user-output": 8]
+            let held = Output()
+            held.savedDefaults = [musicSelector: "speakers", systemSelector: "speakers"]
+            let parked = try held.parkForPhone()
+            precondition(parked)
+            Output.current[changedSelector] = 8
+            Output.writes = []
+            for check in [held.validateForRecovery, held.resumeFromPhone] {
+                do {
+                    try check()
+                    preconditionFailure("A parked output supersession was accepted")
+                } catch is LDACOutputDeselectedError {}
+            }
+            precondition(Output.writes.isEmpty && held.isParkedForPhone && held.ownsLease)
+            let error = await held.restoreAndRelease(restoreHeadphoneOutput: false)
+            precondition(error == nil && held.leaseReleased && Output.current[changedSelector] == 8 && Output.writes.isEmpty)
+        }
+
+        Output.reset()
+        Output.available = [Output.uid: 5, "speakers": 7, "user-output": 8]
+        let paused = Output()
+        paused.savedDefaults = [musicSelector: "speakers", systemSelector: "speakers"]
+        let parked = try paused.parkForPhone()
+        precondition(parked)
+        Output.writes = []
+        Output.changeSystemOutputAfterHandoff = 8
+        do {
+            try paused.resumeFromPhone()
+            preconditionFailure("A partial resume overrode the new system output")
+        } catch is LDACOutputDeselectedError {}
+        precondition(paused.isParkedForPhone && paused.ownsLease && !paused.routeRecovery.selected && !paused.ready)
+        precondition(Output.writes.elementsEqual([(musicSelector, UInt32(5)), (musicSelector, UInt32(7))]) { $0 == $1 })
+        precondition(Output.current == [musicSelector: 7, systemSelector: 8] && Output.muteWrites.isEmpty)
+        let pausedError = await paused.restoreAndRelease(restoreHeadphoneOutput: false)
+        precondition(pausedError == nil && paused.leaseReleased && Output.current == [musicSelector: 7, systemSelector: 8])
+
+        Output.reset()
+        Output.available = [Output.uid: 5, "speakers": 7, "user-output": 8]
+        let yielding = Output()
+        yielding.savedDefaults = [musicSelector: "speakers", systemSelector: "speakers"]
+        Output.changeSystemOutputAfterPark = 8
+        do {
+            _ = try yielding.parkForPhone()
+            preconditionFailure("A partial park overrode the new system output")
+        } catch is LDACOutputDeselectedError {}
+        precondition(yielding.isParkedForPhone && yielding.routeRecovery.selected && yielding.ownsLease)
+        let yieldingError = await yielding.restoreAndRelease(restoreHeadphoneOutput: false)
+        precondition(yieldingError == nil && yielding.leaseReleased && Output.current == [musicSelector: 7, systemSelector: 8])
+        precondition(Output.writes.elementsEqual([(musicSelector, UInt32(7))]) { $0 == $1 })
+        print("PASS held output parks and reclaims only owned defaults; declines missing, dead or native fallback, preserves split and foreign routes, and cleans up partial park and reclaim")
 
         for changed in [false, true] {
             Output.reset()
@@ -677,6 +900,25 @@ enum Check {
         precondition(clean == nil && disconnected.leaseReleased && !disconnected.ownsLease)
         precondition(Output.writes.isEmpty && Output.muteWrites.isEmpty)
         precondition(Output.mutes[7] == 0 && Output.volumes[7] == 1)
+
+        for selectedOtherOutput in [false, true] {
+            Output.reset()
+            Output.available = [Output.uid: 5, Output.targetUID: 6, "speakers": 7]
+            if selectedOtherOutput { Output.current[Output.defaultSelectors[0]] = 7 }
+            let yielded = Output()
+            let result = await yielded.restoreAndRelease(restoreHeadphoneOutput: false)
+            precondition(result == nil && yielded.leaseReleased && !yielded.ownsLease)
+            precondition(Output.writes.isEmpty && Output.muteWrites.isEmpty)
+            if selectedOtherOutput { precondition(Output.current[Output.defaultSelectors[0]] == 7) }
+        }
+        Output.reset()
+        Output.available = [Output.uid: 5, "speakers": 7]
+        let unrelated = Output()
+        unrelated.savedDefaults = Dictionary(uniqueKeysWithValues: Output.defaultSelectors.map { ($0, "speakers") })
+        let yieldedUnrelatedResult = await unrelated.restoreAndRelease(restoreHeadphoneOutput: false)
+        precondition(yieldedUnrelatedResult == nil && unrelated.leaseReleased)
+        precondition(Output.writes.count == 2 && Output.writes.allSatisfy { $0.1 == 7 } && Output.muteWrites.isEmpty)
+        print("PASS relinquishing LDAC releases the lease without routing to headphones or altering a newer output")
 
         for targetDisconnected in [false, true] {
             Output.reset()
@@ -997,10 +1239,37 @@ enum Check {
         try! Output.checkRouteOwner()
         try! Output.routeOwner?.close()
         Output.routeOwner = nil
+        Output.reset()
+        let clockOwner = Output()
+        precondition(try! clockOwner.nativeClockControl() == nil)
+        try! Output.lease.write(true)
+        Output.advertisesClock = true
+        Output.clockDriverRevision = 11
+        let clock = try! clockOwner.nativeClockControl()!
+        Output.clockStates = [48000]
+        let clockRejected = try! await clock.change(.hz48000, .hz96000, .now() + .seconds(1))
+        precondition(!clockRejected && clockOwner.sampleRateHz == 48000)
+        Output.clockStates = [0, 96000]
+        let publish = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(60))
+            Output.publishedClock = 96000
+        }
+        let clockAccepted = try! await clock.change(.hz48000, .hz96000, .now() + .seconds(1))
+        await publish.value
+        precondition(clockAccepted && clockOwner.sampleRateHz == 96000 && Output.current.values.allSatisfy { $0 == 5 })
+        Output.clockStates = [0]
+        do {
+            _ = try await clock.change(.hz96000, .hz48000, .now() + .milliseconds(45))
+            preconditionFailure("An unresolved clock change was treated as a rollback")
+        } catch {
+            precondition(clockOwner.sampleRateHz == 96000 && Output.requestedClocks.suffix(3) == [96000, 96000, 48000])
+        }
+        _ = await clockOwner.restoreAndRelease()
+        print("PASS authenticated owner control uses the driver result and waits for matching Core Audio stream formats")
         print("PASS actual native output claim/configure/silence/restoration and scoped HAL write, replacement-owner mute/route preservation, monotonic deadlines, bounded previous-priority cleanup, lease renewal during MainActor stall, in-flight renewal/release ordering, stale versus active failure reporting, and balanced playback activity lifetime; no audio devices accessed")
     }
 }
-'''.replace("__PRIORITY_TYPES__", priority_types).replace("__DIAGNOSTIC_TYPE__", diagnostic_type).replace("__OWNER_ERROR__", owner_error).replace("__DIAGNOSTIC_DESCRIPTION__", diagnostic_description).replace("__SELECTORS__", selectors).replace("__HANDOFF__", handoff).replace("__VERIFY__", verify).replace("__VOLUME__", volume).replace("__METHOD__", method).replace("__CLAIM__", claim).replace("__APPLY__", apply).replace("__PRIORITY__", priority).replace("__PRIORITY_STATE__", priority_state).replace("__LEASE_STATE__", lease_state).replace("__HAL_WRITE__", hal_write).replace("__ROUTE_OWNER__", route_owner).replace("__SET_LEASE__", set_lease)
+'''.replace("__PRIORITY_TYPES__", priority_types).replace("__SAMPLE_RATES__", sample_rates).replace("__CLOCK__", clock_methods).replace("__DIAGNOSTIC_TYPE__", diagnostic_type).replace("__OWNER_ERROR__", owner_error).replace("__DIAGNOSTIC_DESCRIPTION__", diagnostic_description).replace("__SELECTORS__", selectors).replace("__HANDOFF__", handoff).replace("__VERIFY__", verify).replace("__VOLUME__", volume).replace("__METHOD__", method).replace("__CLAIM__", claim).replace("__APPLY__", apply).replace("__PRIORITY__", priority).replace("__PRIORITY_STATE__", priority_state).replace("__LEASE_STATE__", lease_state).replace("__HAL_WRITE__", hal_write).replace("__ROUTE_OWNER__", route_owner).replace("__SET_LEASE__", set_lease)
 
 with tempfile.TemporaryDirectory(prefix="acouplet-native-output-restore-") as directory:
     directory = Path(directory)

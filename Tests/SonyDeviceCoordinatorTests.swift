@@ -103,6 +103,14 @@ final class SonyDeviceCoordinatorTests: XCTestCase {
     }
 
     #if !ACOUPLET_PUBLIC_APIS_ONLY
+    func testLDACWaitingForMacKeepsTheMenuAndSonyControlsAvailable() {
+        let state = LDACState.waitingForMac
+        XCTAssertTrue(state.keepsMenuBarVisible(isSessionRunning: true))
+        XCTAssertTrue(state.isEnabledInMenuBar)
+        XCTAssertFalse(state.showsMenuBarProgress)
+        XCTAssertFalse(state.locksMenuBarHeadphoneControls(controlsReady: true))
+    }
+
     @MainActor
     func testLDACHandoffRetainsDeviceAndMenuUntilOwnershipEnds() throws {
         for running in [false, true] {

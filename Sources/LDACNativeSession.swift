@@ -6,6 +6,7 @@ struct LDACFormat: Equatable, Codable, Sendable {
     let sampleRateHz: Int
     let bitrateKbps: Int
     let channels: Int
+    var sourceSampleRateHz: Int? = nil
 }
 
 enum LDACSampleRate: Int, CaseIterable, Codable, Sendable {
@@ -15,6 +16,15 @@ enum LDACSampleRate: Int, CaseIterable, Codable, Sendable {
     case hz96000 = 96000
 
     var displayName: String { String(localized: "\((Double(rawValue) / 1_000).formatted()) kHz") }
+
+    fileprivate var avdtpBit: UInt8 {
+        switch self {
+        case .hz44100: 0x20
+        case .hz48000: 0x10
+        case .hz88200: 0x08
+        case .hz96000: 0x04
+        }
+    }
 }
 
 enum LDACQuality: String, CaseIterable, Codable, Sendable {
@@ -64,6 +74,7 @@ enum LDACState: Equatable, Sendable {
     case requested
     case connecting
     case waitingForDevice
+    case waitingForMac
     case active(LDACFormat)
     case stopping
     case failed(String)
@@ -104,9 +115,46 @@ struct LDACPriorityCleanupError: LocalizedError, Sendable {
     var errorDescription: String? { message }
 }
 
+struct LDACNativeClockControl: Sendable {
+    let change: @MainActor @Sendable (LDACSampleRate, LDACSampleRate, DispatchTime) async throws -> Bool
+}
+
 final class LDACNativeSession: @unchecked Sendable {
     private enum PriorityPhase {
         case unused, configuring, configured, stopping, uncertain, removing, removed
+    }
+
+    private enum ClockApplication {
+        case queued(UUID), applying, settled(Result<Bool, Error>), skipped
+    }
+
+    private struct RateChange {
+        enum Phase: Equatable {
+            case freezing, draining(UInt64), drained(UInt64), selecting, awaitingClock
+            case preparing, capturePreparing, capturePrepared, retiringCandidate, candidateRetired
+            case rollingBackPeer, recoveringStartedPeer, starting, prefilling, sending
+        }
+
+        let requested: LDACConfiguration
+        var phase = Phase.freezing
+        var selected: LDACConfiguration
+        var awaitingPeerSelection = false
+        var mediaRate: LDACSampleRate?
+        var peerSuspended = false
+        var captureResumed = false
+        var captureFormatWitness = false
+        var pcmReady = false
+        var sourceClock: LDACSampleRate?
+        var clockRequest: LDACSampleRate?
+        var refusedClock: LDACSampleRate?
+        var peerRolledBack = false
+        var reusingCapture = false
+
+        init(_ configuration: LDACConfiguration, sourceClock: LDACSampleRate? = nil) {
+            requested = configuration
+            selected = configuration
+            self.sourceClock = sourceClock
+        }
     }
 
     struct Helpers: Sendable {
@@ -132,14 +180,22 @@ final class LDACNativeSession: @unchecked Sendable {
         case connecting
         case diagnostic(Diagnostic)
         case handoffReady
+        case ownedMediaReady
         case active(LDACFormat)
+        case warmHeld
+        case warmCaptureReady(UUID)
+        case warmResumed(LDACFormat)
         case formatChanged(LDACFormat)
+        case sampleRateChangeRejected(requested: LDACSampleRate, active: LDACSampleRate)
+        case sampleRateChangeDeferred(requested: LDACConfiguration, active: LDACSampleRate)
         case gainApplied(Double)
         case audioCaptureAccess(LDACAudioCaptureAccess)
         case failed(String)
         case connectionLost(String)
         case finished(Completion)
     }
+
+    enum CapturePermissionMode { case check, checkOnly, verified }
 
     struct Diagnostic: Codable, Sendable {
         let stage: String
@@ -159,6 +215,7 @@ final class LDACNativeSession: @unchecked Sendable {
         let requiresAttention: Bool
         let targetDisconnected: Bool
         let waitForReconnect: Bool
+        var captureAccess: LDACAudioCaptureAccess? = nil
     }
 
     let id: UUID
@@ -166,6 +223,9 @@ final class LDACNativeSession: @unchecked Sendable {
     private let helpers: Helpers
     private let configuration: LDACConfiguration
     private let outputDeviceUID: String?
+    private let outputSampleRate: LDACSampleRate?
+    private let clock: LDACNativeClockControl?
+    private let capturePermissionMode: CapturePermissionMode
     private let priority: LDACPriorityControl?
     private let receive: @MainActor @Sendable (Event) -> Void
     private let lock = NSLock()
@@ -185,8 +245,25 @@ final class LDACNativeSession: @unchecked Sendable {
     private var handoffRequested = false
     private var restoreAudio = true
     private var requestedGain: Double?
-    private var requestedQuality: LDACQuality?
+    private enum WarmPhase { case parking, suspending, held, preparingPrefill, prefilling, awaitingStart, starting, startAccepted, resuming }
+    private enum WarmCommand { case park, resume }
+    private var warmPhase: WarmPhase?
+    private var warmCommand: WarmCommand?
+    private var warmDeadline = DispatchTime.distantFuture
+    private var warmCapturePaused = false
+    private var warmMediaReady = false
+    private var warmGainLocked = false
+    private var warmStartAuthorization: UUID?
+    private var warmStartAllowed = false
+    private var requestedConfiguration: LDACConfiguration?
+    private var activeConfiguration: LDACConfiguration
+    private var sinkRateMask: UInt8?
     private var qualityChanged = false
+    private var rateChange: RateChange?
+    private var captureSourceRate: Int?
+    private var captureEpochBytes: UInt64 = 0
+    private var captureClockClosedBytes: UInt64?
+    private var clockApplication: ClockApplication?
     private var gain: Double
     private var children: [String: LDACNativeChild] = [:]
     private var signalingGate = LDACChannelGate()
@@ -215,6 +292,7 @@ final class LDACNativeSession: @unchecked Sendable {
     private var preparedSent = false
     private var mediaReady: (cid: Int, mtu: Int)?
     private var readySent = false
+    private var captureStartSent = false
     private var captureReady = false
     private var pcmReady = false
     private var startAccepted = false
@@ -260,17 +338,22 @@ final class LDACNativeSession: @unchecked Sendable {
     private var omittedSignalingTraceLines = 0
     private var signalingTraceReported = false
 
-    init(id: UUID, address: String, helpers: Helpers, gain: Double, outputDeviceUID: String? = nil,
+    init(id: UUID, address: String, helpers: Helpers, gain: Double, outputDeviceUID: String? = nil, outputSampleRate: LDACSampleRate? = nil, clock: LDACNativeClockControl? = nil,
          priority: LDACPriorityControl? = nil,
          configuration: LDACConfiguration = LDACConfiguration(), recoveryAttempt: Bool = false, restoringOnly: Bool = false,
+         capturePermissionMode: CapturePermissionMode = .check,
          receive: @escaping @MainActor @Sendable (Event) -> Void) {
         self.id = id
         self.address = address
         self.helpers = helpers
         self.configuration = configuration
+        activeConfiguration = configuration
         self.recoveryAttempt = recoveryAttempt
         self.restoringOnly = restoringOnly
         self.outputDeviceUID = outputDeviceUID
+        self.outputSampleRate = outputSampleRate
+        self.clock = clock
+        self.capturePermissionMode = capturePermissionMode
         self.priority = priority
         self.gain = gain
         self.receive = receive
@@ -283,6 +366,8 @@ final class LDACNativeSession: @unchecked Sendable {
     func stop(restoreAudio: Bool = true) {
         lock.lock()
         requestedStop = true
+        warmStartAuthorization = nil
+        warmStartAllowed = false
         recoveryRequested = false
         recoveryReason = nil
         pendingPriorityObservation = nil
@@ -307,14 +392,29 @@ final class LDACNativeSession: @unchecked Sendable {
         lock.unlock()
     }
 
-    func updateQuality(_ quality: LDACQuality) {
-        lock.withLock { requestedQuality = quality }
+    func updateConfiguration(_ configuration: LDACConfiguration) {
+        lock.withLock { requestedConfiguration = configuration }
     }
 
     func updateGain(_ gain: Double) {
         lock.lock()
-        requestedGain = gain
+        if !warmGainLocked || gain == 0 { requestedGain = gain }
         lock.unlock()
+    }
+
+    func park() {
+        lock.withLock {
+            warmGainLocked = true
+            requestedGain = nil
+            warmCommand = .park
+        }
+    }
+    func resumeParkedStream() { lock.withLock { warmCommand = .resume } }
+
+    func allowParkedStart(_ authorization: UUID) {
+        lock.withLock {
+            if !requestedStop, warmStartAuthorization == authorization { warmStartAllowed = true }
+        }
     }
 
     #if DEBUG
@@ -391,14 +491,16 @@ final class LDACNativeSession: @unchecked Sendable {
                 restoring = true
                 try launch("restore", executable: helpers.connection, arguments: ["--address", address, "--restore"])
                 restoreDeadline = DispatchTime.now() + 52
-            } else {
+            } else if capturePermissionMode != .verified {
                 try launch("preflight", executable: helpers.capture, arguments: ["--check-permission"] + captureDeviceArguments)
                 deadline = DispatchTime.now() + 90
             }
         } catch {
             diagnose(error.localizedDescription, isFailure: true)
             record("START_FAILED \(error.localizedDescription)")
-            emit(.finished(Completion(message: failureDescription, canRetry: false, requiresAttention: true,
+            let message = capturePermissionMode == .checkOnly
+                ? String(localized: "System audio recording could not be checked. Try LDAC again.") : failureDescription
+            emit(.finished(Completion(message: message, canRetry: false, requiresAttention: true,
                                       targetDisconnected: false, waitForReconnect: false)))
             return
         }
@@ -450,8 +552,16 @@ final class LDACNativeSession: @unchecked Sendable {
     }
 
     private var captureDeviceArguments: [String] {
-        ["--sample-rate", String(configuration.sampleRate.rawValue)] + (outputDeviceUID.map { ["--device-uid", $0] } ?? [])
+        ["--sample-rate", String(configuration.sampleRate.rawValue)] + (outputDeviceUID.map { ["--device-uid", $0] } ?? []) +
+            (outputSampleRate.map { ["--device-rate", String($0.rawValue)] } ?? [])
     }
+
+    private func capturedFormat(_ configuration: LDACConfiguration) -> LDACFormat {
+        LDACFormat(sampleRateHz: configuration.sampleRate.rawValue, bitrateKbps: configuration.bitrateKbps,
+                   channels: 2, sourceSampleRateHz: captureSourceRate)
+    }
+
+    private var warmHandoffInProgress: Bool { lock.withLock { warmGainLocked } }
 
     private var shouldStop: Bool {
         lock.lock()
@@ -483,6 +593,10 @@ final class LDACNativeSession: @unchecked Sendable {
     }
 
     private func handle(_ source: String, line: String) throws {
+        if source == "capture",
+           let values = LDACChannelGate.captures("^PCM_CAPTURE_CLOCK_CLOSED cleanup=1 bytes=([0-9]+)$", line) {
+            captureClockClosedBytes = UInt64(values[0])
+        }
         let trace = source == "probe" ? Self.signalingTraceLines(line) : nil
         if let trace {
             for detail in trace { record("probe \(detail)") }
@@ -526,12 +640,14 @@ final class LDACNativeSession: @unchecked Sendable {
                 throw LDACSessionError("The signaling and media helpers reported the same owned channel.")
             }
             if !shouldStop, line.hasPrefix("OWNED_CLOSED ") {
-                connectionLost("The LDAC Bluetooth connection ended.")
+                if warmHandoffInProgress { stop(restoreAudio: false) }
+                else { connectionLost("The LDAC Bluetooth connection ended.") }
             }
             if !shouldStop, line.hasPrefix("NO_OPEN ") || line.hasPrefix("NO_PLAYBACK ") || line.hasPrefix("PARSE_REJECT ") || line.hasPrefix("NOT_READY ") {
                 fail("Bluetooth could not open the LDAC audio connection. Try LDAC again.")
             }
         }
+        if try handleWarmHold(source, line: line) || handleRateChange(source, line: line) { return }
         if source == "preflight" {
             if line.hasPrefix("AUDIO_PERMISSION_ALLOWED") {
                 guard let values = LDACChannelGate.captures("^AUDIO_PERMISSION_ALLOWED cleanup=1 callbacks=([0-9]+)$", line),
@@ -635,6 +751,12 @@ final class LDACNativeSession: @unchecked Sendable {
                 mediaRequested = true
             } else if line.hasPrefix("OPEN_ACCEPTED") && !shouldStop {
                 guard preparedSent, mediaGate.cid == nil else { throw LDACSessionError("LDAC Open arrived outside media preparation.") }
+                if let values = LDACChannelGate.captures("^OPEN_ACCEPTED signalingCID=([0-9a-f]{4}) remoteSEID=([0-9]{1,2}) rateMask=([0-9a-f]{2})$", line),
+                   let cid = Int(values[0], radix: 16), cid == signalingGate.cid,
+                   let seid = Int(values[1]), (1...62).contains(seid),
+                   let mask = UInt8(values[2], radix: 16), mask & configuration.sampleRate.avdtpBit != 0 {
+                    sinkRateMask = mask
+                }
                 try send("media", "open")
             } else if line.hasPrefix("START_ACCEPTED") && !shouldStop {
                 guard readySent, !startAccepted, !mediaCloseSent else { throw LDACSessionError("LDAC Start arrived without independent live media readiness.") }
@@ -652,7 +774,13 @@ final class LDACNativeSession: @unchecked Sendable {
                 else { failForUser(String(localized: "The LDAC audio connection could not finish setup. Try LDAC again.")) }
             } else if line.hasPrefix("STREAM_CLOSED") || line.hasPrefix("MEDIA_CLOSE_REQUIRED") {
                 mediaCloseRequired = true
-                if !shouldStop { connectionLost("The LDAC Bluetooth connection ended.") }
+                if !shouldStop {
+                    if warmHandoffInProgress, line == "STREAM_CLOSED peerSignal=08" || line == "STREAM_CLOSED peerSignal=0A" {
+                        stop(restoreAudio: false)
+                    } else {
+                        connectionLost("The LDAC Bluetooth connection ended.")
+                    }
+                }
             } else if line == "WAIT_MEDIA_CLOSED" {
                 waitingMediaClosed = true
             }
@@ -672,11 +800,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 }
                 diagnose("media channel ready; mtu=\(mtu)", stage: "capture")
             } else if line.hasPrefix("PCM_READY ") {
-                let prefill = configuration.sampleRate.rawValue / 4
-                let capacity = (configuration.sampleRate.rawValue + 127) / 128 * 128
-                guard !pcmReady,
-                      let values = LDACChannelGate.captures("^PCM_READY frames=\(prefill) rate=\(configuration.sampleRate.rawValue) channels=2 format=F32(?: bufferedFrames=([0-9]+))?$", line),
-                      values[0].isEmpty || (prefill...capacity).contains(Int(values[0]) ?? -1) else {
+                guard captureStartSent, !pcmReady, Self.matchesPCMReady(line, configuration.sampleRate) else {
                     throw LDACSessionError("Live PCM prefill did not match the verified format.")
                 }
                 pcmReady = true
@@ -692,17 +816,17 @@ final class LDACNativeSession: @unchecked Sendable {
                 active = true
                 diagnose("live transmission verified", stage: "active")
                 deadline = .distantFuture
-                if !shouldStop { emit(.active(configuration.format)) }
+                if !shouldStop { emit(.active(capturedFormat(configuration))) }
             } else if line.hasPrefix("LIVE_FORMAT ") {
-                let rate = configuration.sampleRate.rawValue
+                let rate = activeConfiguration.sampleRate.rawValue
                 let frameSamples = rate > 48000 ? 256 : 128
-                guard active, configuration.quality == .adaptive || qualityChanged,
+                guard active, activeConfiguration.quality == .adaptive || qualityChanged,
                       let values = LDACChannelGate.captures("^LIVE_FORMAT rate=\(rate) channels=2 bitrateKbps=([0-9]+) frameBytes=([0-9]+)$", line),
                       let bitrate = Int(values[0]), let frameBytes = Int(values[1]),
                       (49...330).contains(frameBytes), bitrate == frameBytes * 8 * rate / frameSamples / 1000 else {
                     throw LDACSessionError(String(localized: "LDAC reported an invalid audio format."))
                 }
-                if !shouldStop { emit(.formatChanged(LDACFormat(sampleRateHz: rate, bitrateKbps: bitrate, channels: 2))) }
+                if !shouldStop { emit(.formatChanged(LDACFormat(sampleRateHz: rate, bitrateKbps: bitrate, channels: 2, sourceSampleRateHz: captureSourceRate))) }
             } else if let values = LDACChannelGate.captures("^GAIN_APPLIED gain=([0-9.eE+-]+)$", line),
                       let applied = Double(values[0]), applied.isFinite, (0...1).contains(applied) {
                 emit(.gainApplied(applied))
@@ -713,8 +837,12 @@ final class LDACNativeSession: @unchecked Sendable {
                 fail("Live LDAC transmission ended with an error.")
             } else if line.hasPrefix("FEED_COMPLETE ") {
                 feedFinished = true
-                if active, !shouldStop, line.range(of: "\\bclosed=1\\b", options: .regularExpression) != nil {
-                    connectionLost("The LDAC Bluetooth connection ended.")
+                if active, line.range(of: "\\bclosed=1\\b", options: .regularExpression) != nil {
+                    if warmHandoffInProgress, mediaGate.closed {
+                        if !shouldStop { stop(restoreAudio: false) }
+                        return
+                    }
+                    if !shouldStop { connectionLost("The LDAC Bluetooth connection ended.") }
                 }
                 guard line.range(of: "\\bresult=0\\b", options: .regularExpression) != nil else {
                     if recoverableFailure { return }
@@ -734,8 +862,19 @@ final class LDACNativeSession: @unchecked Sendable {
             if line == "SET_SELF_EXCLUSION status=560492391" || line.hasPrefix("AUDIO_PERMISSION_DENIED ") {
                 capturePermissionDenied()
             }
+            if !shouldStop, line.hasPrefix("PCM_CAPTURE_OVERFLOW ") {
+                fail("System audio capture ran out of buffer space.", stage: source)
+            }
+            if line.hasPrefix("PCM_CAPTURE_SOURCE ") {
+                guard !captureReady, captureSourceRate == nil,
+                      let rate = LDACChannelGate.captures("^PCM_CAPTURE_SOURCE rate=([0-9]+)$", line)?.first.flatMap(Int.init),
+                      LDACSampleRate(rawValue: rate) != nil else {
+                    throw LDACSessionError("System audio capture reported an invalid source rate.")
+                }
+                captureSourceRate = rate
+            }
             if line.hasPrefix("PCM_CAPTURE_READY ") {
-                guard !captureReady, line == "PCM_CAPTURE_READY rate=\(configuration.sampleRate.rawValue) channels=2 format=F32 interleaved=1 bytesPerFrame=8" else {
+                guard captureStartSent, !captureReady, line == "PCM_CAPTURE_READY rate=\(configuration.sampleRate.rawValue) channels=2 format=F32 interleaved=1 bytesPerFrame=8" else {
                     throw LDACSessionError("System audio capture did not match the verified format.")
                 }
                 captureReady = true
@@ -746,6 +885,460 @@ final class LDACNativeSession: @unchecked Sendable {
                LDACChannelGate.captures("^PCM_CAPTURE_CANCELLED cleanup=1 error=0 interrupted=(\(SIGINT)|\(SIGTERM))$", line) != nil {
                 captureCancelledBeforeStream = true
             }
+        }
+    }
+
+    private static func matchesPCMReady(_ line: String, _ rate: LDACSampleRate) -> Bool {
+        let prefill = rate.rawValue / 4
+        let capacity = (rate.rawValue + 127) / 128 * 128
+        guard let values = LDACChannelGate.captures("^PCM_READY frames=\(prefill) rate=\(rate.rawValue) channels=2 format=F32(?: bufferedFrames=([0-9]+))?$", line) else {
+            return false
+        }
+        return values[0].isEmpty || (prefill...capacity).contains(Int(values[0]) ?? -1)
+    }
+
+    private func handleWarmHold(_ source: String, line: String) throws -> Bool {
+        let relevant = line.hasPrefix("PARK_") || (warmPhase != nil && source == "media" && line.hasPrefix("PCM_READY "))
+        guard relevant else { return false }
+        if shouldStop { return true }
+        let error = LDACSessionError("Unexpected response while holding the LDAC stream.")
+        guard DispatchTime.now() < warmDeadline, let signalCID = signalingGate.cid, let mediaCID = mediaGate.cid,
+              signalingGate.opened, !signalingGate.closed, mediaGate.opened, !mediaGate.closed else { throw error }
+        let cids = String(format: "signalingCID=%04X mediaCID=%04X", signalCID, mediaCID)
+        let rate = activeConfiguration.sampleRate.rawValue
+        switch (warmPhase, source) {
+        case (.parking, "capture") where line == "PARK_CAPTURE_PAUSED rate=\(rate)":
+            warmCapturePaused = true
+        case (.parking, "media") where LDACChannelGate.captures("^PARK_MEDIA_PAUSED CID=\(String(format: "%04X", mediaCID)) packets=([0-9]+)$", line) != nil:
+            warmMediaReady = true
+        case (.suspending, "probe") where line == "PARK_SUSPENDED \(cids)":
+            warmPhase = .held
+            warmDeadline = .distantFuture
+            emit(.warmHeld)
+        case (.preparingPrefill, "media") where line == "PARK_MEDIA_PREFILL_PREPARED rate=\(rate)":
+            warmPhase = .prefilling
+            try send("capture", "warm-resume")
+        case (.prefilling, "capture") where LDACChannelGate.captures("^PARK_CAPTURE_RESUMED rate=\(rate) discardedFrames=([0-9]+)$", line) != nil:
+            let authorization = UUID()
+            warmPhase = .awaitingStart
+            lock.withLock {
+                if !requestedStop { warmStartAuthorization = authorization }
+            }
+            if !shouldStop { emit(.warmCaptureReady(authorization)) }
+        case (.prefilling, "media"), (.awaitingStart, "media"), (.starting, "media"), (.startAccepted, "media"):
+            guard !warmMediaReady, Self.matchesPCMReady(line, activeConfiguration.sampleRate) else { throw error }
+            warmMediaReady = true
+        case (.starting, "probe") where line == "PARK_START_ACCEPTED rate=\(rate) \(cids)":
+            warmPhase = .startAccepted
+        case (.resuming, "media") where LDACChannelGate.captures("^PARK_MEDIA_DISCARDED bytes=([0-9]+)$", line) != nil:
+            break
+        case (.resuming, "media") where LDACChannelGate.captures("^PARK_LIVE CID=\(String(format: "%04X", mediaCID)) rate=\(rate) packets=([1-9][0-9]*)$", line) != nil:
+            let resumed = lock.withLock {
+                guard !requestedStop else { return false }
+                warmPhase = nil
+                requestedGain = nil
+                warmGainLocked = false
+                return true
+            }
+            if resumed { emit(.warmResumed(capturedFormat(activeConfiguration))) }
+        default:
+            throw error
+        }
+        if warmPhase == .parking, warmCapturePaused, warmMediaReady {
+            warmPhase = .suspending
+            try send("probe", "park")
+        } else if warmPhase == .startAccepted, warmMediaReady {
+            try lock.withLock {
+                if !requestedStop {
+                    warmPhase = .resuming
+                    try send("media", "resume")
+                }
+            }
+        }
+        return true
+    }
+
+    private func advanceWarmHold(_ command: WarmCommand?) throws {
+        if warmPhase != nil, DispatchTime.now() >= warmDeadline {
+            throw LDACSessionError("LDAC could not complete its warm hold within the deadline.")
+        }
+        if let command {
+            let error = LDACSessionError("LDAC cannot hold or resume the current stream.")
+            guard active, rateChange == nil, !signalingGate.closed, !mediaGate.closed else { throw error }
+            warmCapturePaused = false
+            warmMediaReady = false
+            switch (command, warmPhase) {
+            case (.park, nil):
+                warmPhase = .parking
+                warmDeadline = .now() + 2
+                gain = 0
+                try send("media", "park")
+                try send("capture", "park")
+            case (.resume, .held):
+                warmPhase = .preparingPrefill
+                warmDeadline = .now() + 2
+                try send("media", "warm-prefill")
+            default:
+                throw error
+            }
+        }
+        if warmPhase == .awaitingStart {
+            try lock.withLock {
+                if !requestedStop, warmStartAllowed {
+                    warmStartAllowed = false
+                    warmStartAuthorization = nil
+                    warmPhase = .starting
+                    try send("probe", "resume")
+                }
+            }
+        }
+    }
+
+    private func handleRateChange(_ source: String, line: String) throws -> Bool {
+        let report = (source == "media" && line.hasPrefix("RATE_")) || (source == "probe" && line.hasPrefix("RATE_")) ||
+            (source == "capture" && (line.hasPrefix("CAPTURE_FROZEN") || line.hasPrefix("CAPTURE_FREEZE_DECLINED") ||
+                line.hasPrefix("PCM_CAPTURE_RESUMED") || line.hasPrefix("PCM_CAPTURE_CLOCK_PREPARED") ||
+                (rateChange?.sourceClock != nil && (line.hasPrefix("PCM_CAPTURE_SOURCE ") || line.hasPrefix("PCM_CAPTURE_READY ")))))
+        let prefill = source == "media" && line.hasPrefix("PCM_READY ") && rateChange != nil
+        guard report || prefill else { return false }
+        if shouldStop { return true }
+        let error = LDACSessionError("An audio helper reported an invalid live rate transition.")
+        guard var change = rateChange else { throw error }
+        guard DispatchTime.now() < deadline else {
+            throw LDACSessionError("LDAC could not confirm the live sample rate change.")
+        }
+        let selected = change.selected
+        let previous = activeConfiguration.sampleRate
+        switch (source, change.phase) {
+        case ("capture", .freezing) where line.hasPrefix("CAPTURE_FREEZE_DECLINED"):
+            guard let values = LDACChannelGate.captures("^CAPTURE_FREEZE_DECLINED rate=\(previous.rawValue) queuedFrames=([0-9]+) reserveFrames=([0-9]+) capacityFrames=([0-9]+)$", line),
+                  let queued = UInt64(values[0]), let reserve = UInt64(values[1]), let capacity = UInt64(values[2]),
+                  capacity > 0, queued <= capacity, reserve > capacity - queued else { throw error }
+            rateChange = nil
+            deadline = .distantFuture
+            try applyQuality(change.requested.quality)
+            emit(.sampleRateChangeDeferred(requested: change.requested, active: previous))
+            return true
+        case ("capture", .freezing):
+            guard let values = LDACChannelGate.captures("^CAPTURE_FROZEN rate=\(previous.rawValue) bytes=([0-9]+) sourceFrames=([0-9]+)$", line),
+                  let local = UInt64(values[0]), local.isMultiple(of: 8), UInt64(values[1]) != nil,
+                  captureEpochBytes <= UInt64.max - local else { throw error }
+            let bytes = captureEpochBytes + local
+            try send("media", "drain \(bytes)")
+            change.phase = .draining(bytes)
+            if let from = change.sourceClock, let clock {
+                applyClock(clock, from: from, to: change.requested.sampleRate, change: &change)
+            }
+        case ("media", let .draining(bytes)):
+            guard let values = LDACChannelGate.captures("^RATE_DRAINED rate=\(previous.rawValue) bytes=\(bytes) sourceFrames=([0-9]+) paddingFrames=([0-9]+)$", line),
+                  let frames = UInt64(values[0]), frames <= bytes / 8,
+                  let padding = UInt64(values[1]), padding < (previous.rawValue > 48_000 ? 512 : 256) else { throw error }
+            if change.sourceClock != nil {
+                change.phase = .drained(bytes)
+            } else {
+                try selectPeerRate(&change)
+            }
+        case ("probe", _) where change.awaitingPeerSelection && line.hasPrefix("RATE_SELECTED "):
+            guard let values = LDACChannelGate.captures("^RATE_SELECTED rate=([0-9]+) suspended=([01]) rejected=([01])$", line) else { throw error }
+            let rejected = values[2] == "1"
+            let rate = rejected ? previous : change.requested.sampleRate
+            guard values[0] == String(rate.rawValue), rejected || values[1] == "1" else { throw error }
+            change.awaitingPeerSelection = false
+            change.peerSuspended = values[1] == "1"
+            change.selected = LDACConfiguration(sampleRate: rate, quality: change.requested.quality)
+            switch change.phase {
+            case .preparing: break
+            case .capturePreparing, .capturePrepared:
+                if change.mediaRate != rate {
+                    children["capture"]?.signal(SIGTERM)
+                    change.phase = .retiringCandidate
+                } else if change.phase == .capturePrepared {
+                    try authorizePreparedCapture(&change)
+                }
+            case .candidateRetired:
+                try prepareAfterCaptureRetired(&change)
+            default:
+                try prepareRate(&change)
+            }
+        case ("probe", .rollingBackPeer) where line == "RATE_ROLLBACK rate=\(previous.rawValue)":
+            change.selected.sampleRate = previous
+            change.peerRolledBack = true
+            try prepareRate(&change)
+        case ("probe", .recoveringStartedPeer) where line == "RATE_SELECTED rate=\(previous.rawValue) suspended=1 rejected=0":
+            change.selected.sampleRate = previous
+            change.peerSuspended = true
+            change.peerRolledBack = true
+            try prepareRate(&change)
+        case ("media", .preparing) where line == change.mediaRate.map({ "RATE_PREPARED rate=\($0.rawValue)" }):
+            if change.mediaRate != selected.sampleRate {
+                try prepareRate(&change)
+                break
+            }
+            change.captureResumed = false
+            change.captureFormatWitness = false
+            change.pcmReady = false
+            if let sourceClock = change.sourceClock {
+                guard sourceClock == selected.sampleRate else { throw error }
+                captureClockClosedBytes = nil
+                if children["capture"] != nil {
+                    try send("capture", "clock-rate \(sourceClock.rawValue)")
+                    change.reusingCapture = true
+                } else {
+                    change.reusingCapture = false
+                    try launchNativeCapture(rate: sourceClock)
+                }
+                change.phase = .capturePreparing
+            } else if change.peerSuspended {
+                try send("probe", "resume")
+                change.phase = .starting
+            } else {
+                try send("capture", "rate \(selected.sampleRate.rawValue)")
+                change.phase = .prefilling
+            }
+        case ("capture", .capturePreparing) where line == "PCM_CAPTURE_CLOCK_PREPARED rate=\(selected.sampleRate.rawValue)":
+            change.phase = .capturePrepared
+            if !change.awaitingPeerSelection { try authorizePreparedCapture(&change) }
+        case ("capture", .retiringCandidate) where line == change.mediaRate.map({ "PCM_CAPTURE_CLOCK_PREPARED rate=\($0.rawValue)" }):
+            break
+        case ("capture", .prefilling) where change.sourceClock != nil &&
+            line == "PCM_CAPTURE_SOURCE rate=\(selected.sampleRate.rawValue)":
+            guard !change.captureFormatWitness else { throw error }
+            change.captureFormatWitness = true
+            captureSourceRate = selected.sampleRate.rawValue
+        case ("capture", .prefilling) where change.sourceClock != nil &&
+            line == "PCM_CAPTURE_READY rate=\(selected.sampleRate.rawValue) channels=2 format=F32 interleaved=1 bytesPerFrame=8":
+            guard change.captureFormatWitness, !change.captureResumed else { throw error }
+            change.captureResumed = true
+        case ("capture", .prefilling) where change.sourceClock == nil &&
+            line == "PCM_CAPTURE_RESUMED rate=\(selected.sampleRate.rawValue)" && !change.captureResumed:
+            change.captureResumed = true
+        case ("media", .prefilling) where !change.pcmReady && Self.matchesPCMReady(line, selected.sampleRate):
+            change.pcmReady = true
+        case ("probe", .starting) where selected.sampleRate != previous && line == "RATE_ROLLBACK rate=\(previous.rawValue)":
+            change.selected.sampleRate = previous
+            change.peerRolledBack = true
+            deadline = min(deadline, DispatchTime.now() + 7)
+            if change.sourceClock != nil {
+                children["capture"]?.signal(SIGTERM)
+                change.phase = .retiringCandidate
+            } else {
+                try prepareRate(&change)
+            }
+        case ("probe", .starting):
+            guard let signal = signalingGate.cid, let media = mediaGate.cid,
+                  line == "RATE_START_ACCEPTED rate=\(selected.sampleRate.rawValue) signalingCID=\(String(format: "%04X", signal)) mediaCID=\(String(format: "%04X", media))" else { throw error }
+            try send("capture", change.sourceClock == nil ? "rate \(selected.sampleRate.rawValue)" : "capture")
+            change.phase = .prefilling
+        case ("media", .sending) where line == "RATE_LIVE rate=\(selected.sampleRate.rawValue) channels=2 bitrateKbps=\(selected.bitrateKbps) eqmid=\(selected.quality.encoderMode)":
+            activeConfiguration = selected
+            rateChange = nil
+            deadline = .distantFuture
+            emit(.formatChanged(capturedFormat(selected)))
+            if selected.sampleRate != change.requested.sampleRate {
+                lock.withLock {
+                    if requestedConfiguration?.sampleRate == change.requested.sampleRate {
+                        requestedConfiguration?.sampleRate = selected.sampleRate
+                    }
+                }
+                emit(.sampleRateChangeRejected(requested: change.requested.sampleRate, active: selected.sampleRate))
+            }
+            return true
+        default:
+            throw error
+        }
+        if change.phase == .prefilling, change.captureResumed, change.pcmReady {
+            try send("media", "resume")
+            change.phase = .sending
+        }
+        rateChange = change
+        return true
+    }
+
+    private func applyQuality(_ quality: LDACQuality) throws {
+        guard quality != activeConfiguration.quality else { return }
+        qualityChanged = true
+        activeConfiguration.quality = quality
+        try send("media", "quality \(quality.rawValue)")
+    }
+
+
+    private func applyClock(_ clock: LDACNativeClockControl, from: LDACSampleRate, to: LDACSampleRate,
+                            change: inout RateChange) {
+        let request = UUID()
+        let restoring = to == activeConfiguration.sampleRate
+        let cutoff = shouldStop ? DispatchTime.now() + 3 : min(deadline, DispatchTime.now() + 3)
+        change.clockRequest = to
+        lock.withLock { clockApplication = .queued(request) }
+        Task { @MainActor [weak self] in
+            guard let self, self.lock.withLock({
+                guard case let .queued(pending) = self.clockApplication, pending == request else { return false }
+                if !restoring && (self.requestedStop || self.failure != nil) {
+                    self.clockApplication = .skipped
+                    return false
+                }
+                if DispatchTime.now() >= cutoff {
+                    self.clockApplication = .settled(.failure(LDACSessionError("The native clock request expired before application.")))
+                    return false
+                }
+                self.clockApplication = .applying
+                return true
+            }) else { return }
+            let result: Result<Bool, Error>
+            do { result = .success(try await clock.change(from, to, cutoff)) }
+            catch { result = .failure(error) }
+            self.lock.withLock { self.clockApplication = .settled(result) }
+        }
+    }
+
+    private func settleClock(_ change: inout RateChange, stopping: Bool = false) throws {
+        guard let requested = change.clockRequest else { return }
+        let application: ClockApplication? = lock.withLock {
+            switch clockApplication {
+            case .queued where stopping && requested != activeConfiguration.sampleRate:
+                clockApplication = nil
+                return ClockApplication.skipped
+            case .settled, .skipped:
+                let application = clockApplication
+                clockApplication = nil
+                return application
+            default: return nil
+            }
+        }
+        guard let application else { return }
+        change.clockRequest = nil
+        if case let .settled(result) = application {
+            switch result {
+            case .success(true): change.sourceClock = requested
+            case .success(false):
+                if requested == activeConfiguration.sampleRate {
+                    change.sourceClock = nil
+                    throw LDACSessionError("The original LDAC audio clock could not be restored.")
+                }
+                change.refusedClock = requested
+            case let .failure(error):
+                change.sourceClock = nil
+                throw error
+            }
+        }
+    }
+
+    private func selectPeerRate(_ change: inout RateChange) throws {
+        try send("probe", "rate \(change.requested.sampleRate.rawValue)")
+        change.phase = .selecting
+        change.awaitingPeerSelection = true
+    }
+
+    private func authorizePreparedCapture(_ change: inout RateChange) throws {
+        guard children["capture"]?.finished == false else { return }
+        if change.peerSuspended {
+            try send("probe", "resume")
+            change.phase = .starting
+        } else {
+            try send("capture", "capture")
+            change.phase = .prefilling
+        }
+    }
+
+    private func prepareRate(_ change: inout RateChange) throws {
+        let rate = change.selected.sampleRate
+        if change.clockRequest != nil {
+            change.phase = .awaitingClock
+        } else if let from = change.sourceClock, from != rate, let clock {
+            if change.refusedClock == rate {
+                guard !change.peerRolledBack, from == activeConfiguration.sampleRate, change.peerSuspended else {
+                    throw LDACSessionError("The original LDAC audio clock could not be restored.")
+                }
+                try send("probe", "rollback")
+                change.phase = .rollingBackPeer
+            } else {
+                applyClock(clock, from: from, to: rate, change: &change)
+                change.phase = .awaitingClock
+            }
+        } else {
+            try send("media", "rate \(rate.rawValue) \(change.selected.quality.rawValue)")
+            change.mediaRate = rate
+            change.phase = .preparing
+        }
+    }
+
+    private func settleClockBeforeRelease() throws {
+        guard var change = rateChange else { return }
+        defer { rateChange = change }
+        try settleClock(&change, stopping: true)
+        let previous = activeConfiguration.sampleRate
+        if change.clockRequest == nil, let from = change.sourceClock, from != previous, let clock,
+           children["capture"] == nil || children["capture"]?.finished == true {
+            guard captureStoppedCleanly else { return }
+            applyClock(clock, from: from, to: previous, change: &change)
+        }
+    }
+
+    private func launchNativeCapture(rate: LDACSampleRate) throws {
+        guard let uid = outputDeviceUID else { throw LDACSessionError("The LDAC capture output is unavailable.") }
+        captureClockClosedBytes = nil
+        captureDestroyed = false
+        captureCancelledBeforeStream = false
+        try launch("capture", executable: helpers.capture, arguments: ["--stream", "3", "0", "--live-rate", "--await-start", "--native-epoch",
+            "--device-uid", uid, "--device-rate", String(rate.rawValue), "--sample-rate", String(rate.rawValue)], pcm: pcmWrite)
+    }
+
+    private func advanceNativeRate() throws {
+        guard var change = rateChange, change.sourceClock != nil else { return }
+        defer { rateChange = change }
+        try settleClock(&change)
+        switch change.phase {
+        case let .drained(bytes):
+            guard let capture = children["capture"], !capture.finished else {
+                throw LDACSessionError("The quiesced LDAC audio tap ended before the format change.")
+            }
+            captureEpochBytes = bytes
+            try selectPeerRate(&change)
+        case .selecting: break
+        case .awaitingClock:
+            guard change.clockRequest == nil else { return }
+            try prepareRate(&change)
+        case .prefilling where !change.pcmReady &&
+            change.selected.sampleRate != activeConfiguration.sampleRate:
+            guard children["capture"]?.finished == true else { return }
+            guard captureClockClosedBytes == 0 else {
+                throw LDACSessionError("The replacement tap could not confirm cleanup without submitting new PCM.")
+            }
+            children.removeValue(forKey: "capture")
+            try send("probe", "rate \(activeConfiguration.sampleRate.rawValue)")
+            deadline = min(deadline, DispatchTime.now() + 7)
+            change.phase = .recoveringStartedPeer
+        case .retiringCandidate, .capturePreparing, .capturePrepared:
+            guard children["capture"]?.finished == true else { return }
+            guard captureClockClosedBytes == 0 else {
+                throw LDACSessionError("The replacement tap could not confirm cleanup without submitting new PCM.")
+            }
+            children.removeValue(forKey: "capture")
+            if change.phase != .retiringCandidate, change.reusingCapture {
+                change.reusingCapture = false
+                change.phase = .capturePreparing
+                try launchNativeCapture(rate: change.selected.sampleRate)
+            } else {
+                try prepareAfterCaptureRetired(&change)
+            }
+        default: return
+        }
+        if change.phase == .selecting, change.awaitingPeerSelection, change.clockRequest == nil,
+           change.sourceClock == change.requested.sampleRate {
+            try prepareRate(&change)
+        }
+    }
+
+    private func prepareAfterCaptureRetired(_ change: inout RateChange) throws {
+        if change.awaitingPeerSelection {
+            change.phase = .candidateRetired
+        } else if change.mediaRate != change.selected.sampleRate || change.peerRolledBack {
+            try prepareRate(&change)
+        } else {
+            guard change.selected.sampleRate != activeConfiguration.sampleRate, change.peerSuspended else {
+                throw LDACSessionError("The original LDAC audio tap could not be recreated.")
+            }
+            try send("probe", "rollback")
+            change.phase = .rollingBackPeer
         }
     }
 
@@ -790,29 +1383,38 @@ final class LDACNativeSession: @unchecked Sendable {
             }
             return
         }
-        if !preflightCompleted, let preflight = children["preflight"] {
-            if !shouldStop && DispatchTime.now() >= deadline {
-                failForUser(String(localized: "System audio recording access was not confirmed. Try LDAC again."))
-            }
-            if shouldStop {
-                if preflight.status == nil && !preflightStopSent {
-                    preflight.signal(SIGTERM)
-                    preflightStopSent = true
-                    preflightStopDeadline = DispatchTime.now() + 5
+        if !preflightCompleted, capturePermissionMode == .verified || children["preflight"] != nil {
+            if let preflight = children["preflight"] {
+                if !shouldStop && DispatchTime.now() >= deadline {
+                    failForUser(String(localized: "System audio recording access was not confirmed. Try LDAC again."))
                 }
-                if preflight.status == nil && DispatchTime.now() >= preflightStopDeadline {
-                    preflight.signal(SIGKILL)
-                    preflightStopDeadline = .distantFuture
-                    failForUser(String(localized: "The system audio access check could not stop cleanly."))
+                if shouldStop {
+                    if preflight.status == nil && !preflightStopSent {
+                        preflight.signal(SIGTERM)
+                        preflightStopSent = true
+                        preflightStopDeadline = DispatchTime.now() + 5
+                    }
+                    if preflight.status == nil && DispatchTime.now() >= preflightStopDeadline {
+                        preflight.signal(SIGKILL)
+                        preflightStopDeadline = .distantFuture
+                        failForUser(String(localized: "The system audio access check could not stop cleanly."))
+                    }
+                    return
                 }
-                return
-            }
-            guard preflight.finished else { return }
-            guard preflight.status == 0 && preflightReady else {
-                failForUser(String(localized: "System audio recording could not be checked. Try LDAC again."))
+                guard preflight.finished else { return }
+                guard preflight.status == 0 && preflightReady else {
+                    failForUser(String(localized: "System audio recording could not be checked. Try LDAC again."))
+                    return
+                }
+            } else if shouldStop {
                 return
             }
             preflightCompleted = true
+            if capturePermissionMode == .checkOnly {
+                diagnose("audio permission verified", stage: "preflight")
+                finish()
+                return
+            }
             try checkPriorityPreparation(stage: "priority before handoff")
             diagnose("audio permission verified", stage: "handoff")
             emit(.audioCaptureAccess(.ready))
@@ -843,7 +1445,7 @@ final class LDACNativeSession: @unchecked Sendable {
             if let connector = children["connector"], connector.finished || connector.outputEnded {
                 throw LDACSessionError("The paired Bluetooth audio connection failed.")
             }
-            if mediaRequested && connectorReady && children["media"] == nil {
+            if mediaRequested && children["media"] == nil {
                 var descriptors: [Int32] = [0, 0]
                 guard pipe(&descriptors) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
                 pcmRead = descriptors[0]
@@ -851,6 +1453,11 @@ final class LDACNativeSession: @unchecked Sendable {
                 try launch("media", executable: helpers.media, arguments: ["--media", "--pcm-fd", "3", "--address", address] + configuration.helperArguments, pcm: pcmRead)
                 Darwin.close(pcmRead)
                 pcmRead = -1
+                try launch("capture", executable: helpers.capture, arguments: ["--stream", "3", "0", "--live-rate", "--await-start"] + captureDeviceArguments, pcm: pcmWrite)
+                if clock == nil {
+                    Darwin.close(pcmWrite)
+                    pcmWrite = -1
+                }
             }
             if mediaPrepared && !preparedSent && connectorReady {
                 try send("probe", "media-prepared")
@@ -858,11 +1465,11 @@ final class LDACNativeSession: @unchecked Sendable {
             }
             if let ready = mediaReady, mediaGate.opened, !readySent {
                 guard !mediaGate.closed, mediaGate.mtu == ready.mtu else { throw LDACSessionError("The media channel disagreed with its owned callback readiness.") }
-                if children["capture"] == nil {
-                    try launch("capture", executable: helpers.capture, arguments: ["--stream", "3", "0"] + captureDeviceArguments, pcm: pcmWrite)
-                    Darwin.close(pcmWrite)
-                    pcmWrite = -1
+                if !captureStartSent {
+                    try send("capture", "capture")
+                    captureStartSent = true
                     deadline = DispatchTime.now() + 5
+                    if !recoveryAttempt, signalingGate.opened, !signalingGate.closed, !shouldStop { emit(.ownedMediaReady) }
                 }
                 if captureReady && pcmReady {
                     try send("probe", "media-ready \(String(ready.cid, radix: 16)) \(ready.mtu)")
@@ -870,7 +1477,10 @@ final class LDACNativeSession: @unchecked Sendable {
                     deadline = DispatchTime.now() + 30
                 }
             }
-            if DispatchTime.now() >= deadline { throw LDACSessionError("LDAC did not complete its required connection or live audio readiness checks.") }
+            try advanceNativeRate()
+            if DispatchTime.now() >= deadline {
+                throw LDACSessionError(rateChange == nil ? "LDAC did not complete its required connection or live audio readiness checks." : "LDAC could not confirm the live sample rate change.")
+            }
             if startAccepted && !started {
                 if let priority {
                     let state = try priority.state()
@@ -894,25 +1504,43 @@ final class LDACNativeSession: @unchecked Sendable {
                     deadline = DispatchTime.now() + 10
                 }
             }
-            for name in ["probe", "media", "capture"] {
-                if children[name]?.finished == true { throw LDACSessionError("The \(name) audio helper exited before LDAC was stopped.") }
+            for name in ["probe", "media", "capture"] where children[name]?.finished == true {
+                throw LDACSessionError("The \(name) audio helper exited before LDAC was stopped.")
             }
         }
         lock.lock()
         let changedGain = requestedGain
         requestedGain = nil
-        let changedQuality = requestedQuality
-        requestedQuality = nil
+        let requestedWarmCommand = warmCommand
+        warmCommand = nil
+        let configuration = active && rateChange == nil && warmPhase == nil && requestedWarmCommand == nil ? requestedConfiguration : nil
+        if configuration != nil { requestedConfiguration = nil }
         lock.unlock()
-        if let changedQuality, active, !shouldStop {
-            qualityChanged = true
-            try send("media", "quality \(changedQuality.rawValue)")
+        if !shouldStop { try advanceWarmHold(requestedWarmCommand) }
+        if var configuration, !shouldStop {
+            if configuration.sampleRate != activeConfiguration.sampleRate,
+               let sinkRateMask, sinkRateMask & configuration.sampleRate.avdtpBit == 0 {
+                emit(.sampleRateChangeRejected(requested: configuration.sampleRate, active: activeConfiguration.sampleRate))
+                configuration.sampleRate = activeConfiguration.sampleRate
+            }
+            if configuration.sampleRate != activeConfiguration.sampleRate {
+                let sourceClock = clock == nil ? nil : captureSourceRate.flatMap(LDACSampleRate.init(rawValue:))
+                guard clock == nil || sourceClock != nil else { throw LDACSessionError("The current LDAC capture clock was unverified.") }
+                rateChange = RateChange(configuration, sourceClock: sourceClock)
+                deadline = DispatchTime.now() + 18
+                try send("capture", sourceClock == nil ? "freeze" : "clock-freeze")
+            } else {
+                try applyQuality(configuration.quality)
+            }
         }
-        if let changedGain {
+        if let changedGain, warmPhase == nil {
             gain = changedGain
             if started && !shouldStop { try send("media", "gain \(gain)") }
         }
         if shouldStop {
+            do { try settleClockBeforeRelease() }
+            catch { fail(error.localizedDescription) }
+            if pcmWrite >= 0 { Darwin.close(pcmWrite); pcmWrite = -1 }
             if ["probe", "media", "capture"].allSatisfy({ children[$0] == nil || children[$0]?.finished == true }),
                let connector = children["connector"], !connector.finished {
                 if !connectorStopSent {
@@ -934,7 +1562,7 @@ final class LDACNativeSession: @unchecked Sendable {
                     fail("The pending Bluetooth connection could not be confirmed stopped.")
                 }
             }
-            if (started || children["capture"] != nil) && !mediaStopSent, let media = children["media"], media.status == nil {
+            if (started || captureStartSent) && !mediaStopSent, let media = children["media"], media.status == nil {
                 mediaStopSent = true
                 mediaStopDeadline = DispatchTime.now() + 5
                 try send("media", "stop")
@@ -949,7 +1577,7 @@ final class LDACNativeSession: @unchecked Sendable {
                 advancePriorityStop()
             }
             let canStopCapture = started ? feedFinished || failure != nil
-                : children["media"] == nil || mediaStopReady || children["media"]?.finished == true
+                : !captureStartSent || children["media"] == nil || mediaStopReady || children["media"]?.finished == true
             if canStopCapture && !captureStopSent, let capture = children["capture"], capture.status == nil {
                 capture.signal(SIGTERM)
                 captureStopSent = true
@@ -991,8 +1619,9 @@ final class LDACNativeSession: @unchecked Sendable {
                     }
                     return
                 }
-                if priorityCanClose && !signalingStopSent, let probe = children["probe"], probe.status == nil {
-                    try send("probe", failure == nil && feedFinished ? "media-finished" : "stop")
+                if priorityCanClose && !signalingStopSent && !mediaCloseRequired,
+                   let probe = children["probe"], probe.status == nil {
+                    try send("probe", failure == nil && feedFinished && rateChange == nil ? "media-finished" : "stop")
                     signalingStopSent = true
                 }
                 if priorityCanClose && mediaCloseRequired && !mediaCloseSent, let media = children["media"], media.status == nil {
@@ -1018,11 +1647,11 @@ final class LDACNativeSession: @unchecked Sendable {
 
     private var captureStoppedCleanly: Bool {
         guard let capture = children["capture"] else { return true }
-        return captureDestroyed && (capture.status == 0 || capture.exitCode == 1 && captureCancelledBeforeStream)
+        return captureClockClosedBytes != nil || captureDestroyed && (capture.status == 0 || capture.exitCode == 1 && captureCancelledBeforeStream)
     }
 
     private var canRestore: Bool {
-        !restoring && shouldStop && priorityCanClose && ["preflight", "disconnect", "connector", "probe", "media", "capture"].allSatisfy {
+        !restoring && shouldStop && rateChange?.clockRequest == nil && priorityCanClose && ["preflight", "disconnect", "connector", "probe", "media", "capture"].allSatisfy {
             children[$0] == nil || children[$0]?.finished == true
         }
     }
@@ -1112,7 +1741,11 @@ final class LDACNativeSession: @unchecked Sendable {
         let restoreAudio = restoreAudio
         lock.unlock()
         let recover = lock.withLock { recoveryRequested }
-        if !recover && !restoreAudio && (priorityPhase == .unused || priorityPhase == .removed) { restoring = true; finish(); return }
+        if warmHandoffInProgress || !recover && !restoreAudio && (priorityPhase == .unused || priorityPhase == .removed) {
+            restoring = true
+            finish()
+            return
+        }
         if children["disconnect"] == nil { restoring = true; finish(); return }
         if !originalConnectionEnded {
             if children["restore-disconnect"] == nil {
@@ -1138,7 +1771,7 @@ final class LDACNativeSession: @unchecked Sendable {
             do { try priority.request(false, true) }
             catch { priorityCleanupFailed(error.localizedDescription) }
         }
-        if recover || !restoreAudio { restoring = true; return }
+        if recover || !restoreAudio || originalConnectionEnded || targetUnavailableBeforeRestore { restoring = true; return }
         try launch("restore", executable: helpers.connection, arguments: ["--address", address, "--restore"])
         restoreDeadline = DispatchTime.now() + 52
         restoreTerminationSent = false
@@ -1147,9 +1780,11 @@ final class LDACNativeSession: @unchecked Sendable {
 
     private func connectionLost(_ message: String) {
         guard failure == nil else { return }
-        failure = message
         recoverableFailure = true
-        lock.withLock { recoveryRequested = true }
+        lock.withLock {
+            failure = message
+            recoveryRequested = true
+        }
         diagnose(message, isFailure: true)
         record("CONNECTION_LOST \(message)")
         emit(.connectionLost(String(localized: "The connection to the headphones was lost.")))
@@ -1168,6 +1803,9 @@ final class LDACNativeSession: @unchecked Sendable {
 
     private func fail(_ message: String, userMessage: String? = nil, stage: String? = nil) {
         hardFailure = true
+        lock.withLock {
+            if failure == nil { failure = message }
+        }
         if attentionFailure == nil {
             attentionFailure = message
             let description = userMessage ?? failureDescription
@@ -1176,7 +1814,6 @@ final class LDACNativeSession: @unchecked Sendable {
             record("FAILED \(message)")
             emit(.failed(description))
         }
-        if failure == nil { failure = message }
     }
 
     private func failForUser(_ message: String) {
@@ -1256,10 +1893,15 @@ final class LDACNativeSession: @unchecked Sendable {
         } else {
             publicMessage = capturePermissionFailure ?? publicFailureMessage ?? String(localized: "The connection to the headphones was lost.")
         }
-        emit(.finished(Completion(message: publicMessage, canRetry: safe,
-                                  requiresAttention: hardFailure || !recoverableFailure || !safe && !nativeAudioRestored || nativeReplacement,
-                                  targetDisconnected: (originalConnectionEnded || restoreDisconnected) && !nativeAudioRestored,
-                                  waitForReconnect: (originalConnectionEnded || targetUnavailableBeforeRestore) && !nativeAudioRestored)))
+        var completion = Completion(message: publicMessage, canRetry: safe,
+                                    requiresAttention: hardFailure || !recoverableFailure || !safe && !nativeAudioRestored || nativeReplacement,
+                                    targetDisconnected: (originalConnectionEnded || restoreDisconnected) && !nativeAudioRestored,
+                                    waitForReconnect: (originalConnectionEnded || targetUnavailableBeforeRestore) && !nativeAudioRestored)
+        if capturePermissionMode == .checkOnly {
+            if capturePermissionFailure != nil { completion.captureAccess = .permissionRequired }
+            else if preflightCompleted && failure == nil { completion.captureAccess = .ready }
+        }
+        emit(.finished(completion))
     }
 
     static func beginDiagnostics(in directory: URL) throws -> FileHandle {
@@ -1401,7 +2043,7 @@ final class LDACNativeSession: @unchecked Sendable {
         if let reason = LDACChannelGate.captures("(?:^| )reason=([a-z_-]+)(?: |$)", line)?.first,
            ["nonfinite", "encoder-reset", "encoder-init", "allocation", "ring-overflow", "persistent-degradation",
             "discard-counter-overflow", "packet-boundary", "sample-counter-overflow", "flush-limit",
-            "flush-padding", "adaptive-quality", "manual-quality", "invalid-read-pipe", "read", "partial-frame",
+            "flush-padding", "adaptive-quality", "manual-quality", "rate-prepare", "invalid-read-pipe", "read", "partial-frame",
             "classic-manager-unavailable", "classic-authorization-denied", "classic-initialization-incomplete",
             "classic-target-unavailable", "target_not_paired", "classic_manager_interface_unavailable",
             "classic_manager_not_ready", "classic_peer_interface_unavailable", "unexpected_peer_refresh_abi",

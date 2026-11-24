@@ -8,11 +8,16 @@ enum LDACDriverInstaller {
     enum State: Equatable {
         case missing
         case outdated
+        case updateAvailable
         case restartRequired
         case current
         case unavailable(String)
+
+        var canStream: Bool { self == .current || self == .updateAvailable }
+        var offersUpdate: Bool { self == .outdated || self == .updateAvailable }
     }
 
+    private static let minimumStreamingRevision = 10
     private static let identifier = "dev.baglayan.Acouplet.LDACOutput"
     private static let installedURL = URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL/AcoupletLDACOutput.driver", isDirectory: true)
 
@@ -22,8 +27,8 @@ enum LDACDriverInstaller {
             let team = try signingTeam(bundle: bundle)
             let development = isDevelopment(bundle: bundle)
             try validateCode(at: bundled, identifier: identifier, team: team, development: development)
-            let required = try revision(at: bundled)
-            guard required > 0 else { throw failure("The app’s LDAC driver is incomplete. Reinstall the app.") }
+            let bundledRevision = try revision(at: bundled)
+            guard bundledRevision >= minimumStreamingRevision else { throw failure("The app’s LDAC driver is incomplete. Reinstall the app.") }
             guard FileManager.default.fileExists(atPath: installedURL.path) else {
                 let legacyURL = URL(fileURLWithPath: "/Library/Audio/Plug-Ins/HAL/XM5LDACOutput.driver", isDirectory: true)
                 guard FileManager.default.fileExists(atPath: legacyURL.path) else { return .missing }
@@ -32,8 +37,10 @@ enum LDACDriverInstaller {
             }
             try validateCode(at: installedURL, identifier: identifier, team: team, development: development)
             let installed = try revision(at: installedURL)
-            guard installed >= required else { return .outdated }
-            return state(required: required, installed: installed, loaded: try LDACNativeOutput.driverRevision())
+            if installed < bundledRevision {
+                return state(required: bundledRevision, installed: installed, loaded: try? LDACNativeOutput.driverRevision())
+            }
+            return state(required: bundledRevision, installed: installed, loaded: try LDACNativeOutput.driverRevision())
         } catch {
             return .unavailable(error.localizedDescription)
         }
@@ -41,7 +48,9 @@ enum LDACDriverInstaller {
 
     static func state(required: Int, installed: Int?, loaded: Int?) -> State {
         guard let installed else { return .missing }
-        guard installed >= required else { return .outdated }
+        guard installed >= required else {
+            return installed >= minimumStreamingRevision && (loaded ?? 0) >= minimumStreamingRevision ? .updateAvailable : .outdated
+        }
         guard let loaded, loaded >= required else { return .restartRequired }
         return .current
     }

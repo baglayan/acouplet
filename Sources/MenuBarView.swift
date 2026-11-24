@@ -31,12 +31,114 @@ private enum ListeningPreset: String, CaseIterable, Identifiable {
     var focusOnVoice: Bool { self == .office }
 }
 
+struct MenuBarHeadphoneControls {
+    let address: String
+    let model: SonyDeviceModel
+    let session: UInt64
+    let batteries: SonyBatteries
+    let isChargingInCase: Bool
+    let leftConnected: Bool?
+    let rightConnected: Bool?
+    let noiseModes: [NoiseControlMode]
+    let noiseMode: NoiseControlMode?
+    let showsVoiceSpotlight: Bool
+    let voiceSpotlightSelected: Bool
+    let ambientLevelRange: ClosedRange<Int>?
+    let ambientLevel: Int
+    let ambientLevelStep: Int
+    let supportsVoiceFocus: Bool
+    let focusOnVoice: Bool
+    let showsMultipoint: Bool
+    let multipoint: SonyMultipoint
+    let equalizer: SonyEqualizer
+    let legacySurround: SonyLegacySoundEffect
+    let legacySoundPosition: SonyLegacySoundEffect
+    let dsee: DSEEControl.Presentation?
+    let supportsPowerOff: Bool
+
+    @MainActor
+    init(_ headphones: SonyHeadphonesController) {
+        address = headphones.address
+        model = headphones.deviceModel
+        session = headphones.notificationSession
+        batteries = headphones.batteries
+        isChargingInCase = headphones.isChargingInCase
+        leftConnected = headphones.leftConnected
+        rightConnected = headphones.rightConnected
+        noiseModes = headphones.availableNoiseModes
+        noiseMode = headphones.noiseControlMode
+        showsVoiceSpotlight = headphones.noiseControl?.inquiryType == 0x18
+        voiceSpotlightSelected = headphones.noiseControlDisplayState?.isNoiseCancellingSS == true
+        ambientLevelRange = headphones.ambientLevelRange
+        ambientLevel = headphones.ambientLevel
+        ambientLevelStep = headphones.ambientLevelStep
+        supportsVoiceFocus = headphones.supportsVoiceFocus
+        focusOnVoice = headphones.focusOnVoice
+        showsMultipoint = MultipointSettingControl.showsMenuEntry(for: headphones)
+        multipoint = headphones.multipoint
+        equalizer = headphones.equalizer
+        legacySurround = headphones.legacySurround
+        legacySoundPosition = headphones.legacySoundPosition
+        dsee = headphones.supportsDSEE ? DSEEControl.Presentation(headphones) : nil
+        supportsPowerOff = headphones.supportsPowerOff
+    }
+}
+
+#if !ACOUPLET_PUBLIC_APIS_ONLY
+extension LDACState {
+    var isEnabledInMenuBar: Bool {
+        switch self {
+        case .waitingForDevice, .waitingForMac, .requested, .connecting, .active: true
+        case .off, .stopping, .failed: false
+        }
+    }
+
+    var showsMenuBarProgress: Bool {
+        switch self {
+        case .requested, .connecting, .stopping: true
+        default: false
+        }
+    }
+
+    func locksMenuBarHeadphoneControls(controlsReady: Bool) -> Bool {
+        switch self {
+        case .requested, .connecting, .stopping: true
+        case .active: !controlsReady
+        case .off, .waitingForDevice, .waitingForMac, .failed: false
+        }
+    }
+}
+
+extension LDACController {
+    func locksMenuBarHeadphoneControls(for headphones: SonyHeadphonesController) -> Bool {
+        if multipointShutdownAddress == headphones.address { return true }
+        guard targetAddress == headphones.address else { return false }
+        return state.locksMenuBarHeadphoneControls(controlsReady: headphones.isReady)
+    }
+
+    func retainedMenuBarHeadphoneControls(for headphones: SonyHeadphonesController) -> MenuBarHeadphoneControls? {
+        guard locksMenuBarHeadphoneControls(for: headphones),
+              headphones.powerOffState == nil, !headphones.headphoneTestNeedsRecovery, !headphones.isBluetoothAccessDenied,
+              let origin = menuBarControlOrigin, origin.controller == ObjectIdentifier(headphones) else { return nil }
+        let controls = if case .active = state {
+            headphones.lastReadyMenuBarControls
+        } else {
+            menuBarControlsAtHandoff ?? headphones.lastReadyMenuBarControls
+        }
+        guard let retained = controls, retained.session >= origin.session,
+              retained.address == headphones.address, retained.model == headphones.deviceModel else { return nil }
+        return retained
+    }
+}
+#endif
+
 struct MenuBarView: View {
     let showSettings: () -> Void
     var closeMenu: (() -> Void)? = nil
     @EnvironmentObject private var headphones: SonyHeadphonesController
     @EnvironmentObject private var devices: SonyDeviceCoordinator
     @EnvironmentObject private var settings: SettingsStore
+    private var selectMultipointSource = MultipointSourceSelection()
     #if ACOUPLET_SPARKLE
     @EnvironmentObject private var updater: AppUpdater
     #endif
@@ -65,9 +167,13 @@ struct MenuBarView: View {
     }
 
     var body: some View {
+        let retained = retainedHeadphoneControls
+        let presentation = retained ?? (showsHeadphoneControls ? MenuBarHeadphoneControls(headphones) : nil)
+        let locksHeadphoneControls = self.locksHeadphoneControls
+        let controlPanel = controls(presentation, locksHeadphoneControls: locksHeadphoneControls)
         VStack(spacing: 0) {
             if !showsConnectOnly {
-                header
+                header(retained)
                     .padding(.horizontal, 20)
                     .padding(.top, 20)
                     .padding(.bottom, 16)
@@ -81,9 +187,9 @@ struct MenuBarView: View {
                 .padding(.bottom, 12)
             }
             ViewThatFits(in: .vertical) {
-                controls
+                controlPanel
                 ScrollView {
-                    controls
+                    controlPanel
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 .accessibilityIdentifier("headphones.controlsScroll")
@@ -106,7 +212,7 @@ struct MenuBarView: View {
             }
             #endif
             Divider()
-            footer
+            footer(retained, locksHeadphoneControls: locksHeadphoneControls)
         }
         .frame(width: 360)
         .frame(maxHeight: maximumHeight)
@@ -119,23 +225,29 @@ struct MenuBarView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("headphones.dashboard")
         .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: showsConnectOnly)
-        .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: showsHeadphoneControls)
-        .onChange(of: headphones.noiseControlMode, initial: true) { _, mode in
+        .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: presentation != nil)
+        .onChange(of: presentation?.noiseMode, initial: true) { _, mode in
             withAnimation(presentedMode != nil && mode != nil && !reduceMotion ? .smooth(duration: 0.2) : nil) {
                 presentedMode = mode
             }
         }
+        .onChange(of: locksHeadphoneControls) { _, locked in
+            if locked {
+                showsMultipoint = false
+                showsPowerOffConfirmation = false
+            }
+        }
         .alert("Turn Off \(powerOffTarget?.name ?? "")?", isPresented: $showsPowerOffConfirmation, presenting: powerOffTarget) { target in
             Button("Cancel", role: .cancel) {}
-            Button("Turn Off") { target.controller.powerOff(expectedSession: target.session) }
+            Button("Turn Off") {
+                if !self.locksHeadphoneControls { target.controller.powerOff(expectedSession: target.session) }
+            }
         } message: { _ in
             Text("Audio will stop on all connected devices. You’ll need to turn the headphones on again before reconnecting.")
         }
         .accentColor(settings.tintColor)
         .tint(settings.tintColor)
     }
-
-    private var noiseControlMode: NoiseControlMode? { presentedMode ?? headphones.noiseControlMode }
 
     private var showsHeadphoneControls: Bool {
         headphones.isReady && headphones.powerOffState == nil && !headphones.headphoneTestNeedsRecovery
@@ -149,9 +261,25 @@ struct MenuBarView: View {
 
     private var showsLDACSession: Bool {
         #if !ACOUPLET_PUBLIC_APIS_ONLY
-        return ldac.targetAddress == headphones.address && ldac.state.keepsMenuBarVisible(isSessionRunning: ldac.isSessionRunning)
+        return ldac.keepsMenuBarVisible(forAddress: headphones.address)
         #else
         return false
+        #endif
+    }
+
+    private var locksHeadphoneControls: Bool {
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        ldac.locksMenuBarHeadphoneControls(for: headphones)
+        #else
+        false
+        #endif
+    }
+
+    private var retainedHeadphoneControls: MenuBarHeadphoneControls? {
+        #if !ACOUPLET_PUBLIC_APIS_ONLY
+        devices.isSystemSleeping ? nil : ldac.retainedMenuBarHeadphoneControls(for: headphones)
+        #else
+        nil
         #endif
     }
 
@@ -162,8 +290,8 @@ struct MenuBarView: View {
         return availableHeight
     }
 
-    private var controls: some View {
-        let controlsDisabled = (headphones.isRunningHeadphoneTest && !headphones.headphoneTestNeedsRecovery)
+    private func controls(_ presentation: MenuBarHeadphoneControls?, locksHeadphoneControls: Bool) -> some View {
+        let controlsDisabled = locksHeadphoneControls || (headphones.isRunningHeadphoneTest && !headphones.headphoneTestNeedsRecovery)
             || headphones.multipointTransition?.isFinished == false || headphones.deviceActionTransition?.isFinished == false
         return VStack(alignment: .leading, spacing: 16) {
             if !showsLDACSession {
@@ -171,30 +299,35 @@ struct MenuBarView: View {
                     .disabled(controlsDisabled)
             }
             Group {
-                if showsHeadphoneControls {
+                if let presentation {
                     if headphones.isRunningHeadphoneTest {
                         Text("A headphone test is open in Settings.").font(.caption)
                     }
-                    if !headphones.availableNoiseModes.isEmpty {
-                        listeningModes
+                    if !presentation.noiseModes.isEmpty {
+                        listeningModes(presentation)
                         presets
-                        modeDetails
+                        modeDetails(presentation)
                     }
                 }
             }
             .disabled(controlsDisabled)
-            if showsHeadphoneControls, MultipointSettingControl.showsMenuEntry(for: headphones) {
-                multipointControl
+            if let presentation, presentation.showsMultipoint {
+                multipointControl(presentation.multipoint)
+                    .disabled(locksHeadphoneControls)
             }
-            if showsHeadphoneControls {
+            if let presentation {
                 Group {
-                    if headphones.equalizer.isSupported { equalizer }
-                    if headphones.equalizer.bassBoost.inquiryType != nil {
-                        BassBoostControl(effect: headphones.equalizer.bassBoost)
+                    if presentation.equalizer.isSupported { equalizer(presentation.equalizer) }
+                    if presentation.equalizer.bassBoost.inquiryType != nil {
+                        BassBoostControl(effect: presentation.equalizer.bassBoost)
                     }
-                    if headphones.legacySurround.isSupported { LegacySoundEffectControl(kind: .surround) }
-                    if headphones.legacySoundPosition.isSupported { LegacySoundEffectControl(kind: .soundPosition) }
-                    if headphones.supportsDSEE { DSEEControl() }
+                    if presentation.legacySurround.isSupported {
+                        LegacySoundEffectControl(kind: .surround, displayedEffect: presentation.legacySurround)
+                    }
+                    if presentation.legacySoundPosition.isSupported {
+                        LegacySoundEffectControl(kind: .soundPosition, displayedEffect: presentation.legacySoundPosition)
+                    }
+                    if let dsee = presentation.dsee { DSEEControl(presentation: dsee) }
                 }
                 .disabled(controlsDisabled)
             }
@@ -209,8 +342,11 @@ struct MenuBarView: View {
         .padding(.bottom, 20)
     }
 
-    private var multipointControl: some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private func multipointControl(_ multipoint: SonyMultipoint) -> some View {
+        let selectSource: @MainActor (SonyMultipointDevice) -> Void = { [headphones] in
+            selectMultipointSource($0, on: headphones)
+        }
+        return VStack(alignment: .leading, spacing: 8) {
             Divider()
             HStack {
                 Text("Multipoint")
@@ -227,11 +363,12 @@ struct MenuBarView: View {
                 .accessibilityIdentifier("multipoint.open")
                 .help("Manage Devices")
                 .background {
-                    MultipointPopover(isPresented: $showsMultipoint, headphones: headphones, settings: settings, maximumHeight: min(availableHeight, 480))
+                    MultipointPopover(isPresented: $showsMultipoint, headphones: headphones, settings: settings,
+                                       maximumHeight: min(availableHeight, 480), selectSource: selectSource)
                         .accessibilityHidden(true)
                 }
             }
-            MultipointSourcePicker()
+            MultipointSourcePicker(displayedMultipoint: multipoint, selectSource: selectSource)
             if let message = headphones.sourceTransition?.failureMessage ?? headphones.deviceActionTransition?.failureMessage {
                 Text(message).font(.caption)
             }
@@ -243,17 +380,11 @@ struct MenuBarView: View {
     private var ldacState: LDACState { ldac.targetAddress == headphones.address ? ldac.state : .off }
     private var isTurningOffMultipointForLDAC: Bool { ldac.multipointShutdownAddress == headphones.address }
 
-    private var ldacIsEnabled: Bool {
-        switch ldacState {
-        case .waitingForDevice, .requested, .connecting, .active: true
-        case .off, .stopping, .failed: false
-        }
-    }
-
     private var ldacStatusText: String {
         switch ldacState {
         case .off: String(localized: "Off")
         case .waitingForDevice: String(localized: "Waiting for headphones…")
+        case .waitingForMac: String(localized: "Waiting for this Mac…")
         case .requested: ldac.audioCaptureAccess == .checking ? String(localized: "Checking permission…") : String(localized: "Requested…")
         case .connecting: ldac.isRecovering ? String(localized: "Reconnecting…") : String(localized: "Connecting…")
         case .active(let format):
@@ -294,25 +425,29 @@ struct MenuBarView: View {
                 .help("LDAC Settings")
                 .accessibilityIdentifier("audio.ldacSettings")
                 Spacer()
-                switch ldacState {
-                case .requested, .connecting, .stopping:
+                if ldacState.showsMenuBarProgress || isTurningOffMultipointForLDAC {
                     ProgressView().controlSize(.mini).accessibilityHidden(true)
-                default:
-                    if isTurningOffMultipointForLDAC { ProgressView().controlSize(.mini).accessibilityHidden(true) }
                 }
-                Text(isTurningOffMultipointForLDAC ? String(localized: "Turning off multipoint…") : ldacStatusText)
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("audio.ldacFormat")
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(isTurningOffMultipointForLDAC ? String(localized: "Turning off multipoint…") : ldacStatusText)
+                        .accessibilityIdentifier("audio.ldacFormat")
+                    if case .active(let format) = ldacState,
+                       let rate = format.sourceSampleRateHz, rate != format.sampleRateHz {
+                        Text("Mac PCM \((Double(rate) / 1_000).formatted()) kHz")
+                            .accessibilityIdentifier("audio.ldacSourceRate")
+                    }
+                }
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
                 Toggle("LDAC", isOn: Binding(
-                    get: { ldacIsEnabled },
+                    get: { ldacState.isEnabledInMenuBar },
                     set: { ldac.setEnabled($0, forAddress: headphones.address, configuration: settings.ldacConfiguration) }
                 ))
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .tint(settings.tintColor)
-                .disabled(!ldacIsEnabled && (isTurningOffMultipointForLDAC || !ldac.canEnable(forAddress: headphones.address) || !ldac.canStartOrInstallDriver))
+                .disabled(!ldacState.isEnabledInMenuBar && (isTurningOffMultipointForLDAC || !ldac.canEnable(forAddress: headphones.address) || !ldac.canStartOrInstallDriver))
                 .accessibilityValue(ldacStatusText)
                 .accessibilityIdentifier("audio.ldac")
                 .alert("Turn off multipoint for LDAC?", isPresented: Binding(
@@ -324,10 +459,16 @@ struct MenuBarView: View {
                     Button("Keep Multipoint", role: .cancel) { ldac.resolveMultipointConflict(turnOffMultipoint: false) }
                         .accessibilityIdentifier("audio.ldacKeepMultipoint")
                 } message: {
-                    Text("These headphones offer LDAC only when multipoint is off. Turning it off restarts them and disconnects any other device.")
+                    Text("These headphones offer LDAC only when multipoint is off. Turning it off can disconnect the headphones and any other connected device.")
                 }
             }
-            if !ldac.isSessionRunning, ldacState != .waitingForDevice { LDACDriverGuidance() }
+            if !ldac.isSessionRunning, !isTurningOffMultipointForLDAC, ldacState != .waitingForDevice { LDACDriverGuidance() }
+            if case .active = ldacState, let error = ldac.sampleRateChangeError {
+                Text(error)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("audio.ldacRateChangeError")
+            }
             if case .failed(let error) = ldacState {
                 if ldac.audioCaptureAccess == .permissionRequired {
                     LDACPermissionGuidance()
@@ -340,8 +481,12 @@ struct MenuBarView: View {
 
     #endif
 
-    private var header: some View {
-        VStack(spacing: 16) {
+    private func header(_ retained: MenuBarHeadphoneControls?) -> some View {
+        let showsBatteries = headphones.isReady || retained != nil
+        let batteries = retained?.batteries ?? headphones.batteries
+        let leftConnected = retained.map(\.leftConnected) ?? headphones.leftConnected
+        let rightConnected = retained.map(\.rightConnected) ?? headphones.rightConnected
+        return VStack(spacing: 16) {
             VStack(spacing: 4) {
                 Text(headphones.deviceName)
                     .font(.headline)
@@ -353,32 +498,32 @@ struct MenuBarView: View {
                             ConnectedHeadphonePicker(showsIconOnly: true)
                         }
                     }
-                if showsHeadphoneControls {
+                if showsHeadphoneControls || retained != nil {
                     Text(headphones.statusText)
                         .multilineTextAlignment(.center)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
-            if headphones.isReady, headphones.isChargingInCase {
+            if showsBatteries, retained?.isChargingInCase ?? headphones.isChargingInCase {
                 VStack(spacing: 10) {
                     OpenChargingCaseArtwork(model: headphones.deviceModel, artwork: headphones.productArtwork,
                                             suffix: headphones.productArtworkSuffix)
                     HStack(spacing: 22) {
-                        battery("Left", value: headphones.batteries.left)
-                        battery("Right", value: headphones.batteries.right)
-                        battery("Case", value: headphones.batteries.caseBattery)
+                        battery("Left", value: batteries.left)
+                        battery("Right", value: batteries.right)
+                        battery("Case", value: batteries.caseBattery)
                     }
                 }
                 .frame(maxWidth: .infinity)
             } else if headphones.deviceModel.isEarbuds {
                 HStack(alignment: .top, spacing: 20) {
                     VStack(spacing: 10) {
-                        earbudArtwork
-                        if headphones.isReady {
+                        earbudArtwork(leftConnected: leftConnected, rightConnected: rightConnected)
+                        if showsBatteries {
                             HStack(spacing: 12) {
-                                battery("Left", value: headphones.batteries.left, connected: headphones.leftConnected)
-                                battery("Right", value: headphones.batteries.right, connected: headphones.rightConnected)
+                                battery("Left", value: batteries.left, connected: leftConnected)
+                                battery("Right", value: batteries.right, connected: rightConnected)
                             }
                         }
                     }
@@ -399,7 +544,7 @@ struct MenuBarView: View {
                         }
                         .accessibilityLabel("\(headphones.deviceModel.name) charging case")
                         .accessibilityIdentifier("device.artwork.case")
-                        if headphones.isReady { battery("Case", value: headphones.batteries.caseBattery) }
+                        if showsBatteries { battery("Case", value: batteries.caseBattery) }
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -417,24 +562,24 @@ struct MenuBarView: View {
                         .accessibilityLabel(headphones.deviceModel.name)
                         .accessibilityIdentifier("device.artwork.\(headphones.deviceModel.rawValue)")
                 }
-                if headphones.isReady { battery("Battery", value: headphones.batteries.single) }
+                if showsBatteries { battery("Battery", value: batteries.single) }
             }
         }
     }
 
-    private var earbudArtwork: some View {
+    private func earbudArtwork(leftConnected: Bool?, rightConnected: Bool?) -> some View {
         HStack(spacing: 12) {
             EarbudArtwork(model: headphones.deviceModel, side: .left, artwork: headphones.productArtwork)
                 .frame(width: 68, height: 76)
-                .opacity(headphones.leftConnected == false ? 0.35 : 1)
+                .opacity(leftConnected == false ? 0.35 : 1)
             EarbudArtwork(model: headphones.deviceModel, side: .right, artwork: headphones.productArtwork)
                 .frame(width: 68, height: 76)
-                .opacity(headphones.rightConnected == false ? 0.35 : 1)
+                .opacity(rightConnected == false ? 0.35 : 1)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isImage)
         .accessibilityLabel("\(headphones.deviceModel.name) earbuds")
-        .accessibilityValue(DeviceIcon.connectionValue(left: headphones.leftConnected, right: headphones.rightConnected))
+        .accessibilityValue(DeviceIcon.connectionValue(left: leftConnected, right: rightConnected))
         .accessibilityIdentifier("device.artwork.\(headphones.deviceModel.rawValue)")
     }
 
@@ -501,35 +646,35 @@ struct MenuBarView: View {
         }
     }
 
-    private var listeningModes: some View {
+    private func listeningModes(_ presentation: MenuBarHeadphoneControls) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Noise Control")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
             if #available(macOS 26.0, *) {
-                GlassEffectContainer(spacing: 12) { listeningModeButtons }
+                GlassEffectContainer(spacing: 12) { listeningModeButtons(presentation) }
             } else {
-                listeningModeButtons
+                listeningModeButtons(presentation)
             }
         }
     }
 
-    private var listeningModeButtons: some View {
-        HStack(spacing: 8) {
-            ForEach(headphones.availableNoiseModes) { mode in
-                modeButton(mode)
-                    .headphoneButtonStyle(prominent: noiseControlMode == mode)
-                    .tint(noiseControlMode == mode ? .primary : nil)
-                if mode == .anc, headphones.noiseControl?.inquiryType == 0x18 {
-                    voiceSpotlightButton
+    private func listeningModeButtons(_ presentation: MenuBarHeadphoneControls) -> some View {
+        let selectedMode = presentedMode ?? presentation.noiseMode
+        return HStack(spacing: 8) {
+            ForEach(presentation.noiseModes) { mode in
+                modeButton(mode, selected: selectedMode == mode)
+                    .headphoneButtonStyle(prominent: selectedMode == mode)
+                    .tint(selectedMode == mode ? .primary : nil)
+                if mode == .anc, presentation.showsVoiceSpotlight {
+                    voiceSpotlightButton(selected: presentation.voiceSpotlightSelected)
                 }
             }
         }
     }
 
-    private var voiceSpotlightButton: some View {
-        let selected = headphones.noiseControlDisplayState?.isNoiseCancellingSS == true
-        return Button { headphones.setNoiseCancellingSS() } label: {
+    private func voiceSpotlightButton(selected: Bool) -> some View {
+        Button { headphones.setNoiseCancellingSS() } label: {
             VStack(spacing: 7) {
                 Image(systemName: "person.wave.2").font(.title3)
                 Text("Voice")
@@ -547,42 +692,46 @@ struct MenuBarView: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    private func modeButton(_ mode: NoiseControlMode) -> some View {
+    private func modeButton(_ mode: NoiseControlMode, selected: Bool) -> some View {
         Button { headphones.setNoiseControl(mode) } label: {
             VStack(spacing: 7) {
                 Image(systemName: mode.symbol).font(.title3)
                 Text(mode.compactTitle)
             }
             .frame(maxWidth: .infinity, minHeight: 48)
-            .foregroundStyle(noiseControlMode == mode ? Color(nsColor: .textBackgroundColor) : Color.primary)
+            .foregroundStyle(selected ? Color(nsColor: .textBackgroundColor) : Color.primary)
         }
         .buttonBorderShape(.roundedRectangle(radius: 12))
         .disabled(!headphones.canChangeNoiseControl)
         .accessibilityLabel(mode.title)
         .accessibilityInputLabels([mode.compactTitle, mode.title])
         .accessibilityIdentifier("noiseControl.\(mode.rawValue)")
-        .accessibilityAddTraits(noiseControlMode == mode ? .isSelected : [])
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     @ViewBuilder
-    private var modeDetails: some View {
-        if noiseControlMode == .ambient {
+    private func modeDetails(_ presentation: MenuBarHeadphoneControls) -> some View {
+        if (presentedMode ?? presentation.noiseMode) == .ambient {
             VStack(alignment: .leading, spacing: 10) {
-                if let range = headphones.ambientLevelRange, range.lowerBound < range.upperBound {
+                if let range = presentation.ambientLevelRange, range.lowerBound < range.upperBound {
                     HStack {
                         Text("Ambient Sound")
                         Spacer()
-                        Text("\(headphones.ambientLevel)").monospacedDigit().foregroundStyle(Color.primary)
+                        Text("\(presentation.ambientLevel)").monospacedDigit().foregroundStyle(Color.primary)
                     }
-                    Slider(value: Binding(get: { Double(headphones.ambientLevel) }, set: { headphones.setAmbientLevel(Int($0)) }),
-                           in: Double(range.lowerBound)...Double(range.upperBound), step: Double(headphones.ambientLevelStep))
+                    Slider(value: Binding(get: { Double(retainedHeadphoneControls?.ambientLevel ?? headphones.ambientLevel) },
+                                          set: { headphones.setAmbientLevel(Int($0)) }),
+                           in: Double(range.lowerBound)...Double(range.upperBound), step: Double(presentation.ambientLevelStep))
                         .accessibilityLabel("Ambient sound level")
                 }
-                if headphones.supportsVoiceFocus {
+                if presentation.supportsVoiceFocus {
                     HStack {
                         Text("Focus on Voice")
                         Spacer()
-                        Toggle("Focus on Voice", isOn: Binding(get: { headphones.focusOnVoice }, set: headphones.setFocusOnVoice))
+                        Toggle("Focus on Voice", isOn: Binding(
+                            get: { retainedHeadphoneControls?.focusOnVoice ?? headphones.focusOnVoice },
+                            set: headphones.setFocusOnVoice
+                        ))
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .tint(settings.tintColor)
@@ -611,20 +760,21 @@ struct MenuBarView: View {
         .tint(.primary)
     }
 
-    private var equalizer: some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private func equalizer(_ equalizer: SonyEqualizer) -> some View {
+        let presets = equalizer.capabilities?.presets ?? []
+        return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("Equalizer")
                 Spacer()
                 Picker("Equalizer", selection: Binding(
-                    get: { headphones.equalizer.presetID },
+                    get: { retainedHeadphoneControls.map(\.equalizer.presetID) ?? headphones.equalizer.presetID },
                     set: { if let preset = $0 { headphones.setEqualizerPreset(preset) } }
                 )) {
-                    if !equalizerPresets.contains(where: { $0.id == headphones.equalizer.presetID }) {
-                        Text(headphones.equalizer.presetTitle ?? String(localized: "Loading…"))
-                            .tag(headphones.equalizer.presetID).disabled(true)
+                    if !presets.contains(where: { $0.id == equalizer.presetID }) {
+                        Text(equalizer.presetTitle ?? String(localized: "Loading…"))
+                            .tag(equalizer.presetID).disabled(true)
                     }
-                    ForEach(equalizerPresets) { preset in
+                    ForEach(presets) { preset in
                         Text(preset.title).tag(Optional(preset.id))
                     }
                 }
@@ -633,11 +783,11 @@ struct MenuBarView: View {
                 .fixedSize()
                 .tint(.primary)
                 .disabled(!headphones.equalizer.canSelectPreset || headphones.listeningModeExcludesEqualizer
-                          || (headphones.equalizer.supportsULT && (headphones.isEqualizerUpdatePending
+                          || (equalizer.supportsULT && (headphones.isEqualizerUpdatePending
                               || headphones.pendingChanges[.equalizerReadback] != nil)))
                 .accessibilityIdentifier("equalizer.preset")
             }
-            if let mode = headphones.equalizer.ultMode {
+            if let mode = equalizer.ultMode {
                 LabeledContent("ULT Mode", value: mode.title)
                     .font(.caption)
                     .accessibilityIdentifier("equalizer.ultSummary")
@@ -648,11 +798,7 @@ struct MenuBarView: View {
         }
     }
 
-    private var equalizerPresets: [SonyEqualizerPreset] {
-        headphones.equalizer.capabilities?.presets ?? []
-    }
-
-    private var footer: some View {
+    private func footer(_ retained: MenuBarHeadphoneControls?, locksHeadphoneControls: Bool) -> some View {
         HStack(spacing: 8) {
             Button {
                 dismissMenu()
@@ -673,9 +819,10 @@ struct MenuBarView: View {
                 .help("Refresh headphone status")
                 .accessibilityLabel("Refresh headphone status")
                 .keyboardShortcut("r")
-                .disabled(headphones.powerOffState != nil || headphones.isRunningHeadphoneTest || (showsLDACSession && !headphones.isReady))
+                .disabled(locksHeadphoneControls || headphones.powerOffState != nil || headphones.isRunningHeadphoneTest || (showsLDACSession && !headphones.isReady))
             Menu {
                 Button("Custom Equalizer…", action: showEqualizer)
+                    .disabled(locksHeadphoneControls)
                 if !settings.equalizerProfiles.isEmpty {
                     Menu("Saved Equalizers") {
                         ForEach(settings.equalizerProfiles) { profile in
@@ -686,17 +833,17 @@ struct MenuBarView: View {
                             .disabled(headphones.equalizer.settingsPayload(profile.settings) == nil)
                         }
                     }
-                    .disabled(headphones.powerOffState != nil || headphones.isRunningHeadphoneTest)
+                    .disabled(locksHeadphoneControls || headphones.powerOffState != nil || headphones.isRunningHeadphoneTest)
                 }
                 Divider()
-                if headphones.supportsPowerOff {
+                if retained?.supportsPowerOff ?? headphones.supportsPowerOff {
                     Button("Turn Off Headphones…", systemImage: "power") {
                         if let session = headphones.powerOffSession {
                             powerOffTarget = .init(controller: headphones, session: session, name: headphones.deviceName)
                             showsPowerOffConfirmation = true
                         }
                     }
-                    .disabled(!headphones.canPowerOff)
+                    .disabled(locksHeadphoneControls || !headphones.canPowerOff)
                     .help(headphones.powerOffUnavailableReason ?? String(localized: "Turn off the headphones on all connected devices"))
                     .accessibilityIdentifier("headphones.powerOff")
                     Divider()
@@ -755,10 +902,12 @@ struct LDACDriverGuidance: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             switch ldac.driverState {
-            case .missing, .outdated:
-                Text(ldac.driverState == .missing
-                     ? String(localized: "LDAC needs an audio driver. Install it, then restart your Mac.")
-                     : String(localized: "An LDAC audio driver update is required. Install it, then restart your Mac."))
+            case .missing, .outdated, .updateAvailable:
+                switch ldac.driverState {
+                case .missing: Text("LDAC needs an audio driver. Install it, then restart your Mac.")
+                case .updateAvailable: Text("An LDAC audio driver update is available. Install it, then restart your Mac.")
+                default: Text("An LDAC audio driver update is required. Install it, then restart your Mac.")
+                }
                 Button(ldac.driverState == .missing ? String(localized: "Install Audio Driver…") : String(localized: "Update Audio Driver…")) {
                     ldac.installDriver()
                 }
@@ -1272,6 +1421,7 @@ private struct MultipointPopoverContent: View {
     @ObservedObject var headphones: SonyHeadphonesController
     @ObservedObject var settings: SettingsStore
     let maximumHeight: CGFloat
+    let selectSource: @MainActor (SonyMultipointDevice) -> Void
     let onSizeChange: (CGSize) -> Void
 
     var body: some View {
@@ -1280,7 +1430,7 @@ private struct MultipointPopoverContent: View {
                 MultipointSettingControl(compact: true)
                 if MultipointControls.isVisible(for: headphones.multipoint) {
                     Divider()
-                    MultipointControls(compact: true)
+                    MultipointControls(compact: true, selectSource: selectSource)
                 }
                 Divider()
                 Button("Bluetooth Settings…") {
@@ -1314,6 +1464,7 @@ private struct MultipointPopover: NSViewRepresentable {
     let headphones: SonyHeadphonesController
     let settings: SettingsStore
     let maximumHeight: CGFloat
+    let selectSource: @MainActor (SonyMultipointDevice) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -1362,7 +1513,8 @@ private struct MultipointPopover: NSViewRepresentable {
             self.owner = owner
             self.anchor = anchor
             if owner.isPresented {
-                let content = MultipointPopoverContent(headphones: owner.headphones, settings: owner.settings, maximumHeight: owner.maximumHeight) { [weak self] size in
+                let content = MultipointPopoverContent(headphones: owner.headphones, settings: owner.settings, maximumHeight: owner.maximumHeight,
+                                                      selectSource: owner.selectSource) { [weak self] size in
                     self?.measuredContentSize = size
                     self?.schedulePresentation()
                 }
