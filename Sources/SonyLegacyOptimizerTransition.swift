@@ -7,6 +7,7 @@ struct SonyLegacyOptimizerTransition: Equatable {
 
     let id = UUID()
     let session: UInt64
+    let inquiry: SonyLegacyOptimizer.Inquiry
     private(set) var phase = Phase.checking
     private(set) var message: String?
     private(set) var result: SonyLegacyOptimizer.Measurements?
@@ -24,7 +25,12 @@ struct SonyLegacyOptimizerTransition: Equatable {
     private var hasControl = true
     private var closing = false
 
-    var initialQueries: [[UInt8]] { [[0x80, 1], SonyLegacyOptimizer.statusQuery, SonyLegacyOptimizer.measurementsQuery] }
+    init(session: UInt64, inquiry: SonyLegacyOptimizer.Inquiry = .legacy) {
+        self.session = session
+        self.inquiry = inquiry
+    }
+
+    var initialQueries: [[UInt8]] { inquiry.queries }
     var hasOutstandingReads: Bool { !reads.isEmpty }
     var canDismiss: Bool {
         if (phase == .completed || phase == .cancelled) && hasOutstandingReads { return false }
@@ -38,8 +44,8 @@ struct SonyLegacyOptimizerTransition: Equatable {
 
     var expectedPayload: [UInt8]? {
         switch phase {
-        case .starting: SonyLegacyOptimizer.startPayload
-        case .cancelling: SonyLegacyOptimizer.cancelPayload
+        case .starting: inquiry.startPayload
+        case .cancelling: inquiry.cancelPayload
         default: nil
         }
     }
@@ -50,12 +56,12 @@ struct SonyLegacyOptimizerTransition: Equatable {
             return [query]
         }
         if phase == .readingResult {
-            return reads[0x86] == nil ? [SonyLegacyOptimizer.measurementsQuery] : []
+            return reads[0x86] == nil ? [inquiry.measurementsQuery] : []
         }
         let owner: Phase = phase == .running ? .starting : phase
         if [.starting, .cancelling].contains(owner), reads[0x82] == nil,
            statusRequestedFor != owner, owner == .starting ? startTransmitted : commandTransmitted {
-            return [SonyLegacyOptimizer.statusQuery]
+            return [inquiry.statusQuery]
         }
         return []
     }
@@ -66,13 +72,13 @@ struct SonyLegacyOptimizerTransition: Equatable {
 
     mutating func transmitted(_ payload: [UInt8], session: UInt64, transmissionOrdinal: UInt64 = 0) {
         guard self.session == session, hasControl else { return }
-        if payload == SonyLegacyOptimizer.startPayload, phase == .starting || phase == .cancelling {
+        if payload == inquiry.startPayload, phase == .starting || phase == .cancelling {
             startTransmitted = true
             if phase == .starting {
                 commandTransmitted = true
                 commandTransmissionOrdinal = transmissionOrdinal
             }
-        } else if payload == SonyLegacyOptimizer.cancelPayload, phase == .cancelling {
+        } else if payload == inquiry.cancelPayload, phase == .cancelling {
             commandTransmitted = true
             commandTransmissionOrdinal = transmissionOrdinal
         } else if pendingQueries.contains(payload)
@@ -80,7 +86,7 @@ struct SonyLegacyOptimizerTransition: Equatable {
             let owner: Phase = phase == .running ? .starting : phase
             reads[payload[0]] = owner
             readTransmissionOrdinals[payload[0]] = transmissionOrdinal
-            if payload == SonyLegacyOptimizer.statusQuery {
+            if payload == inquiry.statusQuery {
                 statusReadSuperseded = false
                 if phase != .checking { statusRequestedFor = owner }
             }
@@ -88,7 +94,7 @@ struct SonyLegacyOptimizerTransition: Equatable {
     }
 
     func accepts(_ payload: [UInt8], session: UInt64, transmissionOrdinal: UInt64 = .max) -> Bool {
-        guard self.session == session, hasControl, payload.count >= 2, payload[1] == 1 else { return false }
+        guard self.session == session, hasControl, payload.count >= 2, payload[1] == inquiry.type else { return false }
         switch payload[0] {
         case 0x81, 0x83, 0x87:
             return reads[payload[0] - 1] != nil && readTransmissionOrdinals[payload[0] - 1].map { transmissionOrdinal >= $0 } == true
@@ -182,7 +188,7 @@ struct SonyLegacyOptimizerTransition: Equatable {
     }
 
     mutating func start(model: SonyLegacyOptimizer) -> Bool {
-        guard phase == .ready, reads.isEmpty, model.canStart else { return false }
+        guard phase == .ready, reads.isEmpty, model.inquiry == inquiry, model.canStart else { return false }
         baseline = model.status?.phase
         outcomeUnknown = true
         move(to: .starting)
