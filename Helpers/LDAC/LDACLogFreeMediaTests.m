@@ -35,7 +35,11 @@ static int StalledKevent(int fd, const struct kevent *changes, int changeCount,
 
 static DirectMediaProbe *checkedProbe;
 static uint64_t checkedInputFrames;
+static uint64_t checkedBoundaryFrames;
 static BOOL checkedPCM;
+static atomic_bool checkWarmMute;
+static BOOL checkedWarmMute;
+static uint64_t checkedWarmBlocks;
 
 static float ClockedSample(uint64_t frame, unsigned int channel) {
     return ((int)((frame * 17 + channel * 997) % 4093) - 2046) / 8192.0f;
@@ -43,15 +47,22 @@ static float ClockedSample(uint64_t frame, unsigned int channel) {
 
 static int CheckedEncode(HANDLE_LDAC_BT encoder, void *pcm, int *used,
                          unsigned char *stream, int *bytes, int *frames) {
+    uint64_t validFrames = 128;
     if (pcm && checkedProbe) {
         uint64_t first = checkedInputFrames + checkedProbe.pcmSkippedBytes / 8;
+        if (first < checkedBoundaryFrames) validFrames = MIN(validFrames, checkedBoundaryFrames - first);
         float *input = pcm;
         for (unsigned int frame = 0; frame < 128; frame++)
             for (unsigned int channel = 0; channel < 2; channel++)
-                checkedPCM &= input[frame * 2 + channel] == ClockedSample(first + frame, channel);
+                checkedPCM &= input[frame * 2 + channel] == (frame < validFrames ? ClockedSample(first + frame, channel) : 0);
+    }
+    if (pcm && atomic_load(&checkWarmMute)) {
+        const float *input = pcm;
+        for (unsigned int sample = 0; sample < 256; ++sample) checkedWarmMute &= input[sample] == 0;
+        checkedWarmBlocks++;
     }
     int result = ldacBT_encode(encoder, pcm, used, stream, bytes, frames);
-    if (pcm && checkedProbe) checkedInputFrames += *used / 8;
+    if (pcm && checkedProbe) checkedInputFrames += MIN((uint64_t)*used / 8, validFrames);
     return result;
 }
 
@@ -368,6 +379,270 @@ static BOOL FullRingCheck(void) {
     return Check(passed && probe.pcmEnded && !probe.failed, "full-ring-defers-read-until-encoder-frees-space");
 }
 
+static void WriteClockedFrames(int fd, uint64_t first, NSUInteger frames) {
+    while (frames) {
+        float samples[256];
+        NSUInteger block = MIN(frames, 128);
+        for (NSUInteger frame = 0; frame < block; frame++)
+            for (unsigned int channel = 0; channel < 2; channel++)
+                samples[frame * 2 + channel] = ClockedSample(first + frame, channel);
+        if (write(fd, samples, block * 8) != (ssize_t)(block * 8)) abort();
+        frames -= block;
+        first += block;
+    }
+}
+
+static BOOL RateDrainControlCheck(void) {
+    const struct { const char *command; uint64_t readBytes; BOOL valid; } cases[] = {
+        {"drain 0\n", 0, YES},
+        {"drain 4294967296\n", 8, YES},
+        {"drain 9\n", 0, NO},
+        {"drain 0\n", 8, NO},
+        {"drain -1\n", 0, NO},
+        {"drain 18446744073709551616\n", 0, NO}
+    };
+    int input = dup(STDIN_FILENO);
+    if (input < 0) abort();
+    BOOL passed = YES;
+    for (NSUInteger index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int control[2];
+        if (pipe(control) || dup2(control[0], STDIN_FILENO) < 0) abort();
+        size_t length = strlen(cases[index].command);
+        if (write(control[1], cases[index].command, length) != (ssize_t)length) abort();
+        DirectMediaProbe *probe = TestProbe();
+        probe.pcmContinuous = YES;
+        probe.pcmReadBytes = cases[index].readBytes;
+        PollLiveControls(probe);
+        passed &= probe.rateDrainRequested == cases[index].valid && probe.failed != cases[index].valid;
+        close(control[0]); close(control[1]);
+    }
+    if (dup2(input, STDIN_FILENO) < 0) abort();
+    close(input);
+    int pcm[2];
+    if (pipe(pcm) || fcntl(pcm[0], F_SETFL, O_NONBLOCK) != 0) abort();
+    DirectMediaProbe *probe = TestProbe();
+    LDACProfile profile;
+    if (!SelectProfile(48000, @"low", &profile)) abort();
+    probe.profile = profile;
+    probe.pcmFD = pcm[0];
+    probe.pcmRing = calloc(1, profile.capacityBytes);
+    if (!probe.pcmRing) abort();
+    probe.pcmActive = probe.pcmStarted = probe.rateDrainRequested = YES;
+    probe.rateDrainBytes = 8;
+    uint8_t samples[16] = {0};
+    if (write(pcm[1], samples, sizeof(samples)) != sizeof(samples)) abort();
+    [probe pollPCM];
+    passed &= probe.pcmBytes == 8 && probe.pcmReadBytes == 8;
+    probe.pcmBytes = 0;
+    passed &= !PrepareLiveRate(probe, profile) && !probe.ratePrepared;
+    close(pcm[1]);
+    close(pcm[0]);
+    if (pipe(pcm) || fcntl(pcm[0], F_SETFL, O_NONBLOCK) != 0) abort();
+    probe.pcmFD = pcm[0];
+    probe.ratePaused = probe.ratePrepared = YES;
+    probe.pcmBytes = profile.prefillBytes - 8;
+    if (write(pcm[1], samples, sizeof(samples)) != sizeof(samples)) abort();
+    [probe pollPCM];
+    passed &= probe.pcmReady && probe.pcmBytes == profile.prefillBytes;
+    probe.ratePaused = probe.ratePrepared = probe.rateDrainRequested = NO;
+    [probe pollPCM];
+    passed &= probe.pcmBytes == profile.prefillBytes + 8;
+
+    probe.ratePaused = probe.ratePrepared = probe.parkRequested = YES;
+    probe.pcmHead = probe.pcmBytes = 0;
+    probe.pcmReady = NO;
+    uint64_t bytesRead = probe.pcmReadBytes, discarded = probe.pcmDiscardedBytes;
+    uint8_t fresh[4096];
+    memset(fresh, 0x5A, sizeof(fresh));
+    for (NSUInteger bytes = 0; bytes < profile.capacityBytes;) {
+        size_t length = MIN(sizeof(fresh), profile.capacityBytes - bytes);
+        if (write(pcm[1], fresh, length) != (ssize_t)length) abort();
+        [probe pollPCM];
+        bytes += length;
+    }
+    if (write(pcm[1], samples, sizeof(samples)) != sizeof(samples)) abort();
+    [probe pollPCM];
+    BOOL held = probe.pcmReady && probe.pcmBytes == profile.capacityBytes &&
+        probe.pcmReadBytes - bytesRead == profile.capacityBytes && probe.pcmDiscardedBytes == discarded &&
+        probe.pcmHead == 0 && probe.pcmRing[0] == 0x5A;
+    close(pcm[1]);
+    return Check(passed, "rate-drain-controls-limit-old-and-new-epoch-reads") &&
+        Check(held, "warm-prefill-keeps-all-fresh-PCM-within-owned-ring");
+}
+
+enum LiveRateScenario { ImmediatePause, PreserveDrain, RollbackDrain, CancelDrain, WarmResume };
+
+static BOOL LiveRateCheck(enum LiveRateScenario scenario) {
+    BOOL warm = scenario == WarmResume;
+    BOOL preserving = scenario != ImmediatePause && !warm;
+    BOOL rollback = scenario == RollbackDrain;
+    BOOL cancelling = scenario == CancelDrain;
+    int sockets[2], controls[2], pcm[2], logs[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) || pipe(controls) || pipe(pcm) || pipe(logs)) abort();
+    int savedInput = dup(STDIN_FILENO), savedOutput = dup(STDOUT_FILENO);
+    if (savedInput < 0 || savedOutput < 0 || dup2(controls[0], STDIN_FILENO) < 0) abort();
+    LDACProfile oldRate, newRate;
+    if (!SelectProfile(48000, @"low", &oldRate) ||
+        !SelectProfile(warm || rollback ? 48000 : 96000, warm ? @"low" : @"high", &newRate)) abort();
+    DirectMediaProbe *probe = TestProbe();
+    probe.encoderMTU = 679;
+    if (!PrepareLiveRate(probe, oldRate)) abort();
+    probe.ratePrepared = NO;
+    memset(probe.pcmRing, 0, oldRate.prefillBytes);
+    uint64_t oldPrefillFrames = oldRate.prefillBytes / 8;
+    uint64_t oldSourceFrames = oldPrefillFrames + 851;
+    if (preserving) {
+        float *initial = (float *)probe.pcmRing;
+        for (uint64_t frame = 0; frame < oldPrefillFrames; frame++)
+            for (unsigned int channel = 0; channel < 2; channel++)
+                initial[frame * 2 + channel] = ClockedSample(frame, channel);
+        probe.pcmReadBytes = oldRate.prefillBytes;
+        checkedBoundaryFrames = oldSourceFrames;
+        checkedProbe = probe;
+        checkedInputFrames = 0;
+        checkedPCM = YES;
+    }
+    probe.pcmBytes = oldRate.prefillBytes;
+    probe.pcmReady = YES;
+    probe.pcmFD = pcm[0];
+    probe.pcmActive = YES;
+    if (fcntl(pcm[0], F_SETFL, O_NONBLOCK) != 0) abort();
+    TestMediaChannel *channel = (TestMediaChannel *)TestChannel(0x19, 0x42, 679);
+    channel.socketFD = sockets[0];
+    RecordOwnedOpen(probe, (CBL2CAPChannel *)channel, 0);
+    if (dup2(logs[1], STDOUT_FILENO) < 0) abort();
+    close(logs[1]);
+    __block NSUInteger oldPackets = 0, newPackets = 0;
+    __block BOOL wireValid = YES, verified = NO, drainVerified = NO;
+    __block BOOL cancelled = NO;
+    __block atomic_bool drainSubmitted;
+    atomic_init(&drainSubmitted, false);
+    __block atomic_ulong heldPackets;
+    atomic_init(&heldPackets, ULONG_MAX);
+    checkedWarmMute = YES;
+    checkedWarmBlocks = 0;
+    uint64_t oldEncodedFrames = EncodedSampleLimit(oldSourceFrames, oldRate);
+    int socketReader = sockets[1], controlWriter = controls[1], pcmWriter = pcm[1], logReader = logs[0];
+    dispatch_group_t readers = dispatch_group_create();
+    dispatch_group_async(readers, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        uint32_t timestamp = 0;
+        double firstPacketAt = 0;
+        while (YES) {
+            struct pollfd input = {socketReader, POLLIN, 0};
+            if (poll(&input, 1, 4000) != 1) { wireValid = NO; break; }
+            uint8_t packet[1024];
+            ssize_t count = recv(socketReader, packet, sizeof(packet), 0);
+            if (!count) break;
+            if (count < 16) { wireValid = NO; break; }
+            LDACFrameFormat format;
+            BOOL afterHold = warm && oldPackets >= atomic_load(&heldPackets);
+            if (afterHold && !atomic_load(&checkWarmMute)) wireValid = NO;
+            BOOL newFrame = (!warm || afterHold) && FrameHeadersMatch(packet + 13, count - 13, packet[12], newRate, &format) &&
+                format.bitrateKbps == (warm ? 330 : 990);
+            wireValid &= newFrame || (!newPackets && FrameHeadersMatch(packet + 13, count - 13, packet[12], oldRate, &format) && format.bitrateKbps == 330);
+            wireValid &= (((NSUInteger)packet[2] << 8) | packet[3]) == oldPackets + newPackets;
+            wireValid &= (((uint32_t)packet[4] << 24) | ((uint32_t)packet[5] << 16) |
+                          ((uint32_t)packet[6] << 8) | packet[7]) == timestamp;
+            if (newFrame) {
+                if (!newPackets && preserving) wireValid &= timestamp == oldEncodedFrames;
+                if (++newPackets == 8 && write(controlWriter, "stop\n", 5) != 5) abort();
+            } else {
+                double now = MonotonicTime();
+                if (!oldPackets) firstPacketAt = now;
+                if (preserving && timestamp + packet[12] * oldRate.frameSamples == oldEncodedFrames)
+                    wireValid &= now - firstPacketAt >= (double)timestamp / oldRate.sampleRate - 0.04;
+                oldPackets++;
+                if (cancelling && !cancelled && oldPackets >= 3 && atomic_load(&drainSubmitted)) {
+                    if (write(controlWriter, "stop\n", 5) != 5) abort();
+                    cancelled = YES;
+                }
+            }
+            timestamp += packet[12] * (newFrame ? newRate.frameSamples : oldRate.frameSamples);
+        }
+        if (cancelling) wireValid &= timestamp < oldEncodedFrames;
+        if (!wireValid) { shutdown(socketReader, SHUT_RDWR); if (write(controlWriter, "stop\n", 5) != 5) abort(); }
+    });
+    dispatch_group_async(readers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        FILE *log = fdopen(logReader, "r");
+        if (!log) abort();
+        char line[2048];
+        char expected[256];
+        snprintf(expected, sizeof(expected), "RATE_DRAINED rate=48000 bytes=%llu sourceFrames=%llu paddingFrames=%llu\n",
+                 oldSourceFrames * 8, oldSourceFrames, oldEncodedFrames - oldSourceFrames);
+        while (fgets(line, sizeof(line), log)) {
+            if (strncmp(line, "LIVE_SENT ", 10) == 0) {
+                if (warm) {
+                    if (write(controlWriter, "park\n", 5) != 5) abort();
+                } else if (preserving) {
+                    WriteClockedFrames(pcmWriter, oldPrefillFrames, oldSourceFrames - oldPrefillFrames);
+                    if (dprintf(controlWriter, "drain %llu\n", oldSourceFrames * 8) < 0) abort();
+                    atomic_store(&drainSubmitted, true);
+                } else if (write(controlWriter, "pause\n", 6) != 6) abort();
+            } else if (warm && strncmp(line, "PARK_MEDIA_PAUSED ", 18) == 0) {
+                unsigned long packets;
+                if (sscanf(line, "PARK_MEDIA_PAUSED CID=0042 packets=%lu", &packets) != 1 || !packets) abort();
+                atomic_store(&heldPackets, packets);
+                float stale[256];
+                for (NSUInteger index = 0; index < 256; index++) stale[index] = NAN;
+                if (write(pcmWriter, stale, sizeof(stale)) != sizeof(stale)) abort();
+                RunLoopFor(0.15);
+                if (write(controlWriter, "warm-prefill\n", 13) != 13) abort();
+            } else if (preserving && strncmp(line, "RATE_DRAINED ", 13) == 0) {
+                drainVerified = strcmp(line, expected) == 0;
+                if (write(controlWriter, "rate 96000 high\n", 16) != 16) abort();
+            } else if (strcmp(line, "RATE_PAUSED rate=48000\n") == 0) {
+                float stale[256];
+                for (NSUInteger index = 0; index < 256; index++) stale[index] = NAN;
+                if (write(pcmWriter, stale, sizeof(stale)) != sizeof(stale) || write(controlWriter, "rate 96000 high\n", 16) != 16) abort();
+            } else if (strcmp(line, warm ? "PARK_MEDIA_PREFILL_PREPARED rate=48000\n" : "RATE_PREPARED rate=96000\n") == 0) {
+                if (rollback) {
+                    if (write(controlWriter, "rate 48000 high\n", 16) != 16) abort();
+                } else if (preserving) {
+                    dispatch_group_async(readers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                        WriteClockedFrames(pcmWriter, oldSourceFrames, newRate.capacityBytes / 8 + 2048);
+                    });
+                } else {
+                    float input[256];
+                    for (NSUInteger index = 0; index < 256; index++) input[index] = index % 2 ? -0.25 : 0.25;
+                    for (NSUInteger bytes = 0; bytes < newRate.prefillBytes; bytes += sizeof(input))
+                        if (write(pcmWriter, input, sizeof(input)) != sizeof(input)) abort();
+                }
+            } else if (rollback && strcmp(line, "RATE_PREPARED rate=48000\n") == 0) {
+                dispatch_group_async(readers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    WriteClockedFrames(pcmWriter, oldSourceFrames, newRate.capacityBytes / 8 + 2048);
+                });
+            } else if (strncmp(line, "PCM_READY ", 10) == 0) {
+                if (warm) atomic_store(&checkWarmMute, true);
+                if (write(controlWriter, "resume\n", 7) != 7) abort();
+            } else if (warm ? strncmp(line, "PARK_LIVE CID=0042 rate=48000 ", 29) == 0 :
+                       strcmp(line, rollback ? "RATE_LIVE rate=48000 channels=2 bitrateKbps=990 eqmid=0\n" :
+                                              "RATE_LIVE rate=96000 channels=2 bitrateKbps=990 eqmid=0\n") == 0) {
+                verified = YES;
+            }
+        }
+        fclose(log);
+    });
+    BOOL fed = FeedLive(probe, (CBL2CAPChannel *)channel, 1, 0);
+    checkedProbe = nil;
+    checkedBoundaryFrames = 0;
+    shutdown(sockets[0], SHUT_WR);
+    if (dup2(savedOutput, STDOUT_FILENO) < 0 || dup2(savedInput, STDIN_FILENO) < 0) abort();
+    if (dispatch_group_wait(readers, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC))) abort();
+    close(savedInput); close(savedOutput); close(controls[0]); close(controls[1]); close(pcm[1]);
+    close(sockets[0]); close(sockets[1]);
+    atomic_store(&checkWarmMute, false);
+    if (warm) return Check(fed && verified && wireValid && oldPackets == atomic_load(&heldPackets) && newPackets >= 8 &&
+                           probe.channel == (CBL2CAPChannel *)channel && !probe.closed &&
+                           probe.pcmDiscardedBytes > 0 && checkedWarmMute && checkedWarmBlocks > 0,
+                           "same-rate-warm-hold-discards-PCM-and-resumes-muted-on-owned-socket");
+    if (cancelling) return Check(fed && wireValid && cancelled && !drainVerified && !verified && !newPackets && checkedPCM,
+                                 "live-rate-drain-cancels-without-completion");
+    BOOL content = preserving ? drainVerified && checkedPCM && checkedInputFrames > oldSourceFrames : probe.pcmDiscardedBytes > 0;
+    return Check(fed && verified && wireValid && oldPackets > 0 && newPackets >= 8 && content &&
+                 probe.channel == (CBL2CAPChannel *)channel && !probe.closed, rollback ? "live-rate-drain-rollback-retains-PCM" :
+                 preserving ? "live-rate-drain-preserves-paced-and-padded-PCM" : "live-rate-same-socket-packets-and-stale-PCM-rejection");
+}
+
 static BOOL SenderCheck(BOOL adaptive, useconds_t delay, int stall, int terminal) {
     int sockets[2], controls[2], pcm[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0 || pipe(controls) != 0 || pipe(pcm) != 0) abort();
@@ -673,13 +948,19 @@ static BOOL IndependentSourceCheck(BOOL adaptive, int scenario) {
 }
 
 int main(void) {
+    setbuf(stdout, NULL);
     if (!ManualQualityChecks()) return 1;
     @autoreleasepool {
         BOOL refresh = RefreshChecks();
         BOOL lifecycle = LifecycleChecks();
         BOOL daemon = RejectDaemonCloseCheck();
         BOOL policy = AdaptiveChecks();
-        BOOL ring = FullRingCheck();
+        BOOL ring = FullRingCheck() && RateDrainControlCheck();
+        ring &= LiveRateCheck(ImmediatePause);
+        ring &= LiveRateCheck(PreserveDrain);
+        ring &= LiveRateCheck(RollbackDrain);
+        ring &= LiveRateCheck(CancelDrain);
+        ring &= LiveRateCheck(WarmResume);
         BOOL sender = SenderCheck(NO, 1000, NO, 0);
         sender &= SenderCheck(NO, 4000, NO, 0);
         sender &= SenderCheck(YES, 6000, NO, 0);

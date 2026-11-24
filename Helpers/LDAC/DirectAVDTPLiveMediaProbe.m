@@ -176,13 +176,20 @@ static BOOL SocketObservationChecks(void) {
     return passed;
 }
 
-static BOOL ParseUnsigned(NSString *text, uint32_t *value) {
+static BOOL ParseUnsigned64(NSString *text, uint64_t *value) {
     const char *input = text.UTF8String;
     if (!input || input[0] < '0' || input[0] > '9') return NO;
     errno = 0;
     char *end = NULL;
-    unsigned long parsed = strtoul(input, &end, 10);
-    if (errno || *end || parsed > UINT32_MAX) return NO;
+    unsigned long long parsed = strtoull(input, &end, 10);
+    if (errno || *end) return NO;
+    *value = parsed;
+    return YES;
+}
+
+static BOOL ParseUnsigned(NSString *text, uint32_t *value) {
+    uint64_t parsed;
+    if (!ParseUnsigned64(text, &parsed) || parsed > UINT32_MAX) return NO;
     *value = (uint32_t)parsed;
     return YES;
 }
@@ -575,6 +582,13 @@ static BOOL SelfTest(void) {
 @property BOOL pcmReady;
 @property BOOL pcmComplete;
 @property BOOL pcmEnded;
+@property BOOL ratePauseRequested;
+@property BOOL parkRequested;
+@property BOOL rateDrainRequested;
+@property uint64_t rateDrainBytes;
+@property BOOL ratePaused;
+@property BOOL ratePrepared;
+@property BOOL rateResumeRequested;
 @property HANDLE_LDAC_BT encoder;
 @property int encoderMTU;
 @property double pcmDeadline;
@@ -613,18 +627,27 @@ static BOOL SelfTest(void) {
     if (!self.pcmActive || self.pcmEnded || (self.failed && !self.pcmComplete)) return;
     while (YES) {
         uint8_t discarded[4096];
-        if (!self.pcmStarted && !self.pcmComplete) {
+        BOOL discarding = self.pcmComplete || (self.ratePaused && !self.ratePrepared);
+        if (!self.parkRequested && (!self.pcmStarted || (self.ratePaused && !self.rateDrainRequested)) && !discarding) {
             NSUInteger bytes = PCMSkipBytes(self.pcmBytes, self.profile.prefillBytes, UINT64_MAX);
             self.pcmHead = (self.pcmHead + bytes) % self.profile.capacityBytes;
             self.pcmBytes -= bytes;
             self.pcmDiscardedBytes += bytes;
         }
         NSUInteger available = self.profile.capacityBytes - self.pcmBytes;
-        if (!available && !self.pcmComplete) return;
+        if (!available && !discarding) return;
         NSUInteger tail = (self.pcmHead + self.pcmBytes) % self.profile.capacityBytes;
         NSUInteger maximum = MIN(available, self.profile.capacityBytes - tail);
         uint8_t *destination = self.pcmRing + tail;
-        if (self.pcmComplete) { destination = discarded; maximum = sizeof(discarded); }
+        if (discarding) { destination = discarded; maximum = sizeof(discarded); }
+        if (!discarding && self.ratePaused && self.rateDrainRequested) {
+            if (self.pcmReady) return;
+            maximum = MIN(maximum, self.profile.prefillBytes - self.pcmBytes);
+        }
+        if (self.rateDrainRequested && !self.ratePrepared && !self.pcmComplete) {
+            if (self.pcmReadBytes >= self.rateDrainBytes) return;
+            maximum = (NSUInteger)MIN(maximum, self.rateDrainBytes - self.pcmReadBytes);
+        }
         ssize_t count = read(self.pcmFD, destination, maximum);
         if (count < 0 && errno == EINTR) continue;
         if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
@@ -640,7 +663,7 @@ static BOOL SelfTest(void) {
             return;
         }
         self.pcmReadBytes += (uint64_t)count;
-        if (self.pcmComplete) { self.pcmDiscardedBytes += (uint64_t)count; continue; }
+        if (discarding) { self.pcmDiscardedBytes += (uint64_t)count; continue; }
         self.pcmBytes += (NSUInteger)count;
         if (!self.pcmReady && self.pcmBytes >= self.profile.prefillBytes) {
             self.pcmReady = YES;
@@ -919,6 +942,45 @@ static BOOL PreparedPCMStopChecks(void) {
     return passed;
 }
 
+static BOOL AtRateDrainBoundary(DirectMediaProbe *probe) {
+    if (probe.pcmReadBytes != probe.rateDrainBytes || probe.pcmBytes) return NO;
+    uint8_t extra;
+    ssize_t count;
+    do { count = read(probe.pcmFD, &extra, sizeof(extra)); } while (count < 0 && errno == EINTR);
+    return count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+}
+
+static BOOL PrepareLiveRate(DirectMediaProbe *probe, LDACProfile profile) {
+    probe.ratePrepared = NO;
+    if (probe.rateDrainRequested) {
+        if (!AtRateDrainBoundary(probe)) return NO;
+    } else {
+        [probe pollPCM];
+    }
+    if (probe.failed) return NO;
+    HANDLE_LDAC_BT encoder = ldacBT_get_handle();
+    uint8_t *ring = malloc(profile.capacityBytes);
+    if (!encoder || !ring || ldacBT_init_handle_encode(encoder, probe.encoderMTU, profile.eqmid,
+        LDACBT_CHANNEL_MODE_STEREO, LDACBT_SMPL_FMT_F32, profile.sampleRate) != 0 ||
+        !EncoderMatchesProfile(encoder, profile)) {
+        if (encoder) ldacBT_free_handle(encoder);
+        free(ring);
+        return NO;
+    }
+    ldacBT_free_handle(probe.encoder);
+    free(probe.pcmRing);
+    probe.encoder = encoder;
+    probe.pcmRing = ring;
+    probe.pcmDiscardedBytes += probe.pcmBytes;
+    probe.pcmHead = probe.pcmBytes = 0;
+    probe.pcmReady = NO;
+    probe.pendingQuality = nil;
+    probe.profile = profile;
+    probe.ratePrepared = YES;
+    printf("%s rate=%u\n", probe.parkRequested ? "PARK_MEDIA_PREFILL_PREPARED" : "RATE_PREPARED", profile.sampleRate);
+    return YES;
+}
+
 static void PollLiveControls(DirectMediaProbe *probe) {
     NSString *command;
     while ((command = AvailableCommand(probe))) {
@@ -926,6 +988,42 @@ static void PollLiveControls(DirectMediaProbe *probe) {
             probe.stopRequested = YES;
             probe.closeRequested |= [command isEqualToString:@"close"];
             printf("STOP_REQUESTED source=stdin close=%d\n", probe.closeRequested);
+        } else if (probe.stopRequested) {
+            continue;
+        } else if (probe.pcmContinuous && !probe.ratePaused && !probe.ratePauseRequested && !probe.rateDrainRequested &&
+                   [command isEqualToString:@"park"]) {
+            probe.parkRequested = YES;
+            probe.ratePauseRequested = YES;
+        } else if (probe.ratePaused && probe.parkRequested && !probe.ratePrepared && [command isEqualToString:@"warm-prefill"]) {
+            [probe pollPCM];
+            if (!PrepareLiveRate(probe, probe.profile)) {
+                printf("PCM_FAILED reason=warm-prefill\n");
+                probe.failed = YES;
+            }
+        } else if (probe.pcmContinuous && !probe.ratePaused && !probe.ratePauseRequested && !probe.rateDrainRequested &&
+                   [command hasPrefix:@"drain "]) {
+            uint64_t watermark;
+            if (!ParseUnsigned64([command substringFromIndex:6], &watermark) || watermark % 8 ||
+                watermark < probe.pcmReadBytes || (watermark - probe.pcmReadBytes + probe.pcmBytes) % 8) {
+                printf("PCM_FAILED reason=invalid-rate-drain\n");
+                probe.failed = YES;
+            } else {
+                probe.rateDrainBytes = watermark;
+                probe.rateDrainRequested = YES;
+            }
+        } else if (probe.pcmContinuous && [command isEqualToString:@"pause"] && !probe.ratePaused && !probe.rateDrainRequested) {
+            probe.ratePauseRequested = YES;
+        } else if (probe.ratePaused && !probe.parkRequested && !probe.rateResumeRequested && [command hasPrefix:@"rate "]) {
+            NSArray<NSString *> *fields = [command componentsSeparatedByString:@" "];
+            LDACProfile profile;
+            uint32_t rate = 0;
+            if (fields.count != 3 || !ParseUnsigned(fields[1], &rate) || !SelectProfile(rate, fields[2], &profile) ||
+                !PrepareLiveRate(probe, profile)) {
+                printf("PCM_FAILED reason=rate-prepare\n");
+                probe.failed = YES;
+            }
+        } else if (probe.ratePaused && probe.ratePrepared && probe.pcmReady && [command isEqualToString:@"resume"]) {
+            probe.rateResumeRequested = YES;
         } else if ([command hasPrefix:@"quality "]) {
             LDACProfile selected;
             NSString *quality = [command substringFromIndex:8];
@@ -935,7 +1033,7 @@ static void PollLiveControls(DirectMediaProbe *probe) {
                 printf("COMMAND_REJECTED reason=invalid-quality\n");
                 probe.failed = YES;
             }
-        } else if ([command hasPrefix:@"gain "]) {
+        } else if (!probe.parkRequested && [command hasPrefix:@"gain "]) {
             double gain = 0;
             if (ParseGain([command substringFromIndex:5], &gain)) {
                 probe.targetGain = gain;
@@ -996,7 +1094,9 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
     BOOL flagsChanged = NO, lowWaterChanged = NO, noSigPipeChanged = NO;
     NSUInteger sentPackets = 0, drainedPackets = 0, sentBytes = 0;
     uint64_t sentSamples = 0, drainedSamples = 0, sourceSamples = 0, generatedSamples = 0;
-    uint64_t sentRTPSamples = 0;
+    uint64_t sentRTPSamples = 0, timestampBase = 0;
+    BOOL rateChanged = NO;
+    BOOL returningFromPark = NO;
 #if ACOUPLET_LDAC_PROBE_ONLY
     uint64_t targetSamples = (uint64_t)seconds * profile.sampleRate;
     const BOOL continuous = seconds == 0;
@@ -1070,13 +1170,73 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
             RecordSenderStage(&timing, SenderControl);
             PollLiveControls(probe);
             RecordSenderStage(&timing, SenderOther);
-            if (continuous && !probe.stopRequested && !finishing) [probe checkBacklog];
             if (probe.closed || probe.failed || probe.inputEnded) break;
+            if (probe.parkRequested && probe.stopRequested) { targetSamples = sourceSamples; flushed = YES; break; }
+            if (probe.ratePauseRequested && !probe.stopRequested) {
+                probe.ratePauseRequested = NO;
+                probe.ratePaused = YES;
+                uint64_t discardedBeforePark = probe.pcmDiscardedBytes;
+                if (probe.parkRequested) {
+                    probe.gain = probe.targetGain = 0;
+                    probe.gainRampRemaining = 0;
+                    probe.gainAckReady = NO;
+                    probe.pcmDiscardedBytes += probe.pcmBytes;
+                    probe.pcmHead = probe.pcmBytes = 0;
+                    probe.pcmReady = NO;
+                    printf("PARK_MEDIA_PAUSED CID=%04X packets=%lu\n", owned.cid, sentPackets);
+                } else if (probe.rateDrainRequested) {
+                    printf("RATE_DRAINED rate=%u bytes=%llu sourceFrames=%llu paddingFrames=%llu\n",
+                           profile.sampleRate, probe.rateDrainBytes, sourceSamples, generatedSamples - sourceSamples);
+                } else {
+                    printf("RATE_PAUSED rate=%u\n", profile.sampleRate);
+                }
+                while (!probe.rateResumeRequested && !probe.stopRequested && !probe.closed && !probe.failed && !probe.inputEnded) {
+                    PollLiveControls(probe);
+                    [probe pollInput];
+                    [probe pollPCM];
+                    RunLoopFor(0.001);
+                }
+                if (probe.stopRequested) { targetSamples = sourceSamples; flushed = YES; break; }
+                if (probe.closed || probe.failed || probe.inputEnded) break;
+                returningFromPark = probe.parkRequested;
+                if (returningFromPark) {
+                    printf("PARK_MEDIA_DISCARDED bytes=%llu\n", probe.pcmDiscardedBytes - discardedBeforePark);
+                    probe.parkRequested = NO;
+                }
+                probe.rateDrainRequested = NO;
+                probe.ratePaused = probe.ratePrepared = probe.rateResumeRequested = NO;
+                profile = probe.profile;
+                transmittedFormat = (LDACFrameFormat){profile.frameBytes, profile.bitrateKbps};
+                adaptivePolicy = LDACAdaptivePolicyInit();
+                adaptiveEnabled = profile.adaptive;
+                adaptiveSourceReady = YES;
+                probe.pcmReserveBytes = MIN(profile.capacityBytes, MAX(profile.prefillBytes, (probe.pcmBytes / PCMBlockBytes) * PCMBlockBytes));
+                probe.pcmSkippedBytes = adaptiveSkippedBytes = 0;
+                sourceSamples = generatedSamples = sentSamples = drainedSamples = 0;
+                targetSamples = 0;
+                finishing = NO;
+                flushCalls = 0;
+                timestampBase = sentRTPSamples;
+                started = MonotonicTime();
+                nextProgress = started + 1;
+                recovery = (RecoveryState){0};
+                backlogLimit = (double)(profile.capacityBytes - probe.pcmBytes) / (profile.sampleRate * 8);
+                probe.pcmDeadline = started + backlogLimit;
+                if (probe.gainRampRemaining) probe.gainRampRemaining = profile.gainRampFrames;
+                timing = NewSenderTiming();
+                rateChanged = YES;
+            }
+            BOOL draining = probe.rateDrainRequested && !probe.stopRequested;
+            if (continuous && !probe.stopRequested && !finishing && [probe checkBacklog]) break;
             if (probe.stopRequested) { finishing = YES; targetSamples = sourceSamples; }
+            else if (draining) {
+                targetSamples = sourceSamples + (probe.rateDrainBytes - probe.pcmReadBytes + probe.pcmBytes) / 8;
+                finishing = targetSamples == sourceSamples;
+            }
 #if ACOUPLET_LDAC_PROBE_ONLY
             else if (!continuous && sourceSamples == targetSamples) finishing = YES;
 #endif
-            if (finishing && !sourceSamples) { flushed = YES; break; }
+            BOOL boundedInput = !continuous || draining;
             if (sourceSamples > UINT64_MAX - 2048 || generatedSamples > UINT64_MAX - 2048 ||
                 probe.pcmSkippedBytes / 8 > UINT64_MAX - generatedSamples - 2048 || sentPackets == NSUIntegerMax) {
                 printf("ENCODER_FAILED reason=sample-counter-overflow\n");
@@ -1088,12 +1248,14 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                 [probe pollPCM];
                 RecordSenderStage(&timing, SenderOther);
             }
+            NSUInteger inputFrames = 0;
             if (!finishing) {
-                NSUInteger inputFrames = continuous ? 128 : MIN((uint64_t)128, targetSamples - sourceSamples);
+                inputFrames = boundedInput ? (NSUInteger)MIN((uint64_t)128, targetSamples - sourceSamples) : 128;
                 NSUInteger requiredBytes = inputFrames * 8;
                 adaptiveSourceReady &= probe.pcmBytes >= requiredBytes;
                 BOOL underflowBreached = NO;
-                while (probe.pcmBytes < requiredBytes && !probe.closed && !probe.failed && !probe.inputEnded && !probe.stopRequested &&
+                while (probe.pcmBytes < requiredBytes && !probe.closed && !probe.failed && !probe.inputEnded && !probe.stopRequested && !probe.ratePauseRequested &&
+                       draining == probe.rateDrainRequested &&
                        MonotonicTime() < due + 0.25 && MonotonicTime() < deadline) {
                     RecordSenderStage(&timing, SenderControl);
                     PollLiveControls(probe);
@@ -1128,7 +1290,7 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                     RunLoopFor(0.001);
                     RecordSenderStage(&timing, SenderOther);
                 }
-                if (probe.stopRequested) continue;
+                if (probe.stopRequested || probe.ratePauseRequested || draining != probe.rateDrainRequested) continue;
                 if (probe.pcmBytes < requiredBytes || probe.closed || probe.failed || probe.inputEnded) {
                     limitStopped = !probe.closed && !probe.failed && !probe.inputEnded;
                     if (limitStopped) {
@@ -1165,17 +1327,27 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
             LDACFrameFormat packetFormat = {profile.frameBytes, profile.bitrateKbps};
             uint64_t timestamp = generatedSamples + probe.pcmSkippedBytes / 8;
             RecordSenderStage(&timing, SenderEncode);
-            if (!EncodePacket(probe.encoder, profile, flushing ? NULL : pcm, sentPackets, timestamp,
+            if ((!flushing || sourceSamples) && !EncodePacket(probe.encoder, profile, flushing ? NULL : pcm, sentPackets, timestampBase + timestamp,
                     owned.outgoingMTU, (NSUInteger)baseline, packet, &packetLength, &frames, &packetFormat)) break;
             RecordSenderStage(&timing, SenderOther);
             if (!flushing) {
-                NSUInteger inputFrames = continuous ? 128 : MIN((uint64_t)128, targetSamples - sourceSamples);
                 probe.pcmHead = (probe.pcmHead + inputFrames * 8) % profile.capacityBytes;
                 probe.pcmBytes -= inputFrames * 8;
                 sourceSamples += inputFrames;
             }
             uint64_t packetSamples = (uint64_t)frames * profile.frameSamples;
             if (!packetLength) {
+                if (flushing && draining) {
+                    if (!AtRateDrainBoundary(probe) || sourceSamples != targetSamples ||
+                        generatedSamples < sourceSamples || (sourceSamples && generatedSamples > EncodedSampleLimit(sourceSamples, profile)) ||
+                        generatedSamples != sentSamples || drainedPackets != sentPackets) {
+                        printf("PCM_FAILED reason=rate-drain-accounting\n");
+                        probe.failed = YES;
+                        break;
+                    }
+                    probe.ratePauseRequested = YES;
+                    continue;
+                }
                 if (flushing) { flushed = YES; break; }
                 RecordSenderStage(&timing, SenderControl);
                 PollLiveControls(probe);
@@ -1190,7 +1362,8 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                 break;
             }
             generatedSamples += packetSamples;
-            while (!probe.closed && !probe.failed && !probe.inputEnded && MonotonicTime() < due && MonotonicTime() < deadline) {
+            while (!probe.closed && !probe.failed && !probe.inputEnded && !probe.parkRequested &&
+                   MonotonicTime() < due && MonotonicTime() < deadline) {
                 RecordSenderStage(&timing, SenderControl);
                 PollLiveControls(probe);
                 RecordSenderStage(&timing, SenderInput);
@@ -1201,6 +1374,7 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                 RunLoopFor(0.001);
                 RecordSenderStage(&timing, SenderOther);
             }
+            if (probe.parkRequested) continue;
             double now = MonotonicTime();
             double lateness = now - due;
             if (probe.closed || probe.failed || probe.inputEnded || owned.socketFD != fd || now >= deadline) {
@@ -1256,7 +1430,7 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
             sentPackets++;
             sentBytes += (NSUInteger)sent;
             sentSamples += packet[12] * profile.frameSamples;
-            sentRTPSamples = timestamp + packet[12] * profile.frameSamples;
+            sentRTPSamples = timestampBase + timestamp + packet[12] * profile.frameSamples;
             BOOL drained = NO;
             BOOL drainBreached = NO;
             double lastDrainObservation = afterSend;
@@ -1269,7 +1443,7 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                 [probe pollPCM];
                 RunLoopFor(0);
                 if (probe.closed || probe.failed || probe.inputEnded || owned.socketFD != fd) break;
-                if (continuous && !probe.stopRequested && !finishing && [probe checkBacklog]) break;
+                if (continuous && !probe.stopRequested && !finishing && !probe.ratePauseRequested && [probe checkBacklog]) break;
                 double pollAt = MonotonicTime();
                 maximumSchedulerGap = fmax(maximumSchedulerGap, pollAt - lastDrainObservation);
                 double previousPollAt = lastPollAt;
@@ -1328,12 +1502,19 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                 maximumSend = fmax(maximumSend, afterSend - beforeSend);
                 maximumWait = fmax(maximumWait, maximumPollDuration);
                 maximumLocalStall = fmax(maximumLocalStall, maximumSchedulerGap);
-                maximumDebt = fmax(maximumDebt, now - PacketDue(started, sentRTPSamples, profile));
+                maximumDebt = fmax(maximumDebt, now - PacketDue(started, sentRTPSamples - timestampBase, profile));
                 timing = NewSenderTiming();
                 drainedPackets++;
                 drainedSamples = sentSamples;
                 probe.pcmDeadline = PacketDue(started, drainedSamples, profile) + backlogLimit;
-                if (drainedPackets == 1) printf("LIVE_SENT packets=1 rate=%u channels=2 bitrateKbps=%d eqmid=%d\n",
+                if (returningFromPark) {
+                    printf("PARK_LIVE CID=%04X rate=%u packets=%lu\n", owned.cid, profile.sampleRate, drainedPackets);
+                    rateChanged = returningFromPark = NO;
+                } else if (rateChanged) {
+                    printf("RATE_LIVE rate=%u channels=2 bitrateKbps=%d eqmid=%d\n",
+                           profile.sampleRate, packetFormat.bitrateKbps, profile.eqmid);
+                    rateChanged = NO;
+                } else if (drainedPackets == 1) printf("LIVE_SENT packets=1 rate=%u channels=2 bitrateKbps=%d eqmid=%d\n",
                     profile.sampleRate, packetFormat.bitrateKbps, profile.eqmid);
                 else if (profile.adaptive && packetFormat.frameBytes != transmittedFormat.frameBytes)
                     printf("LIVE_FORMAT rate=%u channels=2 bitrateKbps=%d frameBytes=%d\n",
@@ -1351,7 +1532,7 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
                     printf("SENDER_TIMING packets=%lu waits=%lu serviceMean=%.6f serviceMax=%.6f sendMax=%.6f waitMax=%.6f localStallMax=%.6f debtMax=%.6f debt=%.6f clock=uptime-raw\n",
                            intervalPackets, intervalWaits, intervalService / intervalPackets, maximumService,
                            maximumSend, maximumWait, maximumLocalStall, maximumDebt,
-                           fmax(0, now - PacketDue(started, sentRTPSamples, profile)));
+                           fmax(0, now - PacketDue(started, sentRTPSamples - timestampBase, profile)));
                     intervalPackets = intervalWaits = 0;
                     intervalService = maximumService = maximumSend = maximumWait = maximumLocalStall = maximumDebt = 0;
                     nextProgress = now + 1;
@@ -1378,7 +1559,8 @@ static BOOL FeedLive(DirectMediaProbe *probe, CBL2CAPChannel *owned, double gain
             }
             if (!drained || limitStopped) { printf("DRAIN_STOP packet=%lu elapsed=%.6f\n", sentPackets - 1, MonotonicTime() - started); break; }
         }
-        if (!probe.closed && !probe.failed && !probe.inputEnded && !limitStopped && flushed && sourceSamples == targetSamples && generatedSamples == sentSamples && drainedPackets == sentPackets)
+        if (!probe.closed && !probe.failed && !probe.inputEnded && !limitStopped && flushed && sourceSamples == targetSamples &&
+            ((probe.ratePaused || probe.parkRequested) && probe.stopRequested || generatedSamples == sentSamples) && drainedPackets == sentPackets)
             result = 0;
     } while (NO);
     probe.pcmComplete = YES;
@@ -1481,8 +1663,8 @@ int main(int argc, const char *argv[]) {
         IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
         printf("BEFORE time=%.6f address=%s paired=%d connected=%d\n", NSDate.date.timeIntervalSince1970,
                device.addressString.UTF8String, device.isPaired, SonyClassicIsConnected(device));
-        if (!device || !device.isPaired || !SonyClassicIsConnected(device)) {
-            fprintf(stderr, "The exact Sony target must already be paired and connected; launch only after signaling Open acceptance\n");
+        if (!device || !device.isPaired) {
+            printf("NO_OPEN reason=target-not-paired\n");
             return 3;
         }
         Class managerClass = NSClassFromString(@"CBClassicManager");

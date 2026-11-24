@@ -108,11 +108,11 @@ static NSUInteger FixedCommandLength(const uint8_t *bytes, NSUInteger length) {
 static NSUInteger FixedResponseLength(const uint8_t *bytes, NSUInteger length, uint8_t transaction, uint8_t signal) {
     if (length < 2 || bytes[1] != signal || (bytes[0] >> 4) != transaction || (bytes[0] & 12)) return 0;
     if ((bytes[0] & 3) == 1 && signal >= 1 && signal <= 13) return 2;
-    if ((bytes[0] & 3) == 2) return signal == 3 || (signal >= 6 && signal <= 10) ? 2 : 0;
+    if ((bytes[0] & 3) == 2) return signal == 3 || (signal >= 5 && signal <= 10) ? 2 : 0;
     if ((bytes[0] & 3) != 3) return 0;
     switch (signal) {
         case 1: case 2: case 4: case 6: case 8: case 12: return 3;
-        case 3: case 7: case 9: return 4;
+        case 3: case 5: case 7: case 9: return 4;
         default: return 0;
     }
 }
@@ -171,11 +171,11 @@ static int Parse(const uint8_t *bytes, NSUInteger length, uint8_t transaction, u
         NSUInteger size;
         switch (signal) {
             case 1: case 2: case 4: case 6: case 8: case 12: size = 3; break;
-            case 3: case 7: case 9: size = 4; break;
+            case 3: case 5: case 7: case 9: size = 4; break;
             default: return -1;
         }
         if (length >= size) Candidate(bytes, length, size, YES, parsed, &solutions, &unsupported);
-    } else if (signal == 3 || (signal >= 6 && signal <= 10)) {
+    } else if (signal == 3 || (signal >= 5 && signal <= 10)) {
         Candidate(bytes, length, 2, NO, parsed, &solutions, &unsupported);
     } else if (signal == 1) {
         uint64_t seen = 0;
@@ -250,10 +250,15 @@ static int Parse(const uint8_t *bytes, NSUInteger length, uint8_t transaction, u
 @property BOOL peerStopped;
 @property BOOL delayReporting;
 @property BOOL lastRejected;
+@property BOOL suspended;
+@property BOOL parked;
 @property BOOL mediaExpected;
 @property UInt8 selectedSink;
+@property UInt8 sinkRates;
 @property UInt16 mediaCID;
 @property uint32_t sampleRate;
+@property uint32_t acceptedReconfigurationRate;
+@property uint32_t previousRate;
 @property(strong) NSString *quality;
 - (void)pollInput;
 @end
@@ -436,8 +441,9 @@ static NSData *PeerReply(DirectPlaybackProbe *probe, NSData *packet) {
             if (bytes[2] != 0x04) { error = 0x12; break; }
             if (bytes[1] == 4 && !probe.configured) { error = 0x31; break; }
             {
+                uint32_t rate = bytes[1] == 4 && probe.acceptedReconfigurationRate ? probe.acceptedReconfigurationRate : probe.sampleRate;
                 NSMutableData *reply = [NSMutableData dataWithBytes:response length:2];
-                [reply appendData:ServiceBytes(probe.sampleRate, bytes[1] == 12 || (bytes[1] == 4 && probe.delayReporting))];
+                [reply appendData:ServiceBytes(rate, bytes[1] == 12 || (bytes[1] == 4 && probe.delayReporting))];
                 return reply;
             }
         case 8:
@@ -541,7 +547,7 @@ static BOOL QueryCancelled(DirectPlaybackProbe *probe) {
         (probe.stopRequested && !probe.protocolCleanup);
 }
 
-static NSData *AwaitResponse(DirectPlaybackProbe *probe, uint8_t transaction, uint8_t signal) {
+static NSData *AwaitResponse(DirectPlaybackProbe *probe, uint8_t transaction, uint8_t signal, uint32_t acceptedRate) {
     probe.lastRejected = NO;
     BOOL markerSent = NO;
     double deadline = MIN(probe.hardDeadline, MonotonicTime() + 3);
@@ -572,6 +578,7 @@ static NSData *AwaitResponse(DirectPlaybackProbe *probe, uint8_t transaction, ui
         if (!fixed) [probe.pending replaceBytesInRange:NSMakeRange(parsed.consumed - 2, 2) withBytes:NULL length:0];
         [probe.pending replaceBytesInRange:NSMakeRange(0, parsed.responseLength) withBytes:NULL length:0];
         probe.framingUncertain = NO;
+        if (acceptedRate && !parsed.rejected) probe.acceptedReconfigurationRate = acceptedRate;
         if (ServicePendingSignals(probe, 0, 0) < 0) return nil;
         if (probe.peerStopped) return nil;
         probe.lastRejected = parsed.rejected;
@@ -589,7 +596,8 @@ static NSData *AwaitResponse(DirectPlaybackProbe *probe, uint8_t transaction, ui
     return nil;
 }
 
-static NSData *Query(DirectPlaybackProbe *probe, uint8_t *transaction, uint8_t signal, NSData *payload) {
+static NSData *QueryWithAcceptedRate(DirectPlaybackProbe *probe, uint8_t *transaction, uint8_t signal, NSData *payload,
+                                    uint32_t acceptedRate) {
     probe.lastRejected = NO;
     if (*transaction >= 15 || probe.framingUncertain || QueryCancelled(probe)) return nil;
     double deadline = MIN(probe.hardDeadline, MonotonicTime() + 3);
@@ -609,12 +617,66 @@ static NSData *Query(DirectPlaybackProbe *probe, uint8_t *transaction, uint8_t s
     if (signal == 3) probe.configurationSent = YES;
     probe.framingUncertain = YES;
     if (!SendSignal(probe, request)) return nil;
-    return AwaitResponse(probe, label, signal);
+    return AwaitResponse(probe, label, signal, acceptedRate);
+}
+
+static NSData *Query(DirectPlaybackProbe *probe, uint8_t *transaction, uint8_t signal, NSData *payload) {
+    return QueryWithAcceptedRate(probe, transaction, signal, payload, 0);
 }
 
 static BOOL EmptyAcceptance(NSData *reply) { return reply != nil && reply.length == 2; }
 
-static BOOL WaitControl(DirectPlaybackProbe *probe, NSString *command) {
+static BOOL VerifyConfiguration(DirectPlaybackProbe *probe, uint8_t *transaction, NSData *target, uint32_t rate) {
+    uint8_t label = *transaction;
+    NSData *readback = Query(probe, transaction, 4, target);
+    NSData *services = ServiceBytes(rate, probe.delayReporting);
+    BOOL matches = readback && DecodeReply(readback, label, 4, probe.selectedSink, NO) != nil &&
+        readback.length == services.length + 2;
+    const uint8_t *actual = readback.bytes, *expected = services.bytes;
+    for (NSUInteger offset = 2; matches && offset < readback.length; offset += 2 + actual[offset + 1]) {
+        BOOL found = NO;
+        for (NSUInteger index = 0; index < services.length; index += 2 + expected[index + 1]) {
+            if (actual[offset] == expected[index] && actual[offset + 1] == expected[index + 1] &&
+                memcmp(actual + offset, expected + index, 2 + expected[index + 1]) == 0) found = YES;
+        }
+        matches = found;
+    }
+    if (!matches) printf("CONFIGURATION_VERIFICATION_FAILED\n");
+    return matches;
+}
+
+static BOOL Reconfigure(DirectPlaybackProbe *probe, uint8_t *transaction, NSData *target, uint32_t rate) {
+    NSMutableData *payload = [target mutableCopy];
+    NSData *services = ServiceBytes(rate, NO);
+    [payload appendData:[services subdataWithRange:NSMakeRange(2, services.length - 2)]];
+    return EmptyAcceptance(QueryWithAcceptedRate(probe, transaction, 5, payload, rate));
+}
+
+static BOOL SelectLiveRate(DirectPlaybackProbe *probe, uint8_t *transaction, uint32_t rate) {
+    uint8_t seid = probe.selectedSink << 2;
+    NSData *target = [NSData dataWithBytes:&seid length:1];
+    BOOL rejected = !(probe.sinkRates & RateBit(rate));
+    if (!rejected) {
+        if (!EmptyAcceptance(Query(probe, transaction, 9, target))) {
+            if (!probe.lastRejected) return NO;
+            rejected = YES;
+        } else {
+            probe.suspended = YES;
+            if (!Reconfigure(probe, transaction, target, rate)) {
+                if (!probe.lastRejected) return NO;
+                rejected = YES;
+            }
+            uint32_t effectiveRate = rejected ? probe.sampleRate : rate;
+            if (!VerifyConfiguration(probe, transaction, target, effectiveRate)) return NO;
+            probe.previousRate = rejected ? 0 : probe.sampleRate;
+            probe.sampleRate = effectiveRate;
+        }
+    }
+    printf("RATE_SELECTED rate=%u suspended=%d rejected=%d\n", probe.sampleRate, probe.suspended, rejected);
+    return YES;
+}
+
+static BOOL WaitControl(DirectPlaybackProbe *probe, NSString *command, uint8_t *transaction) {
     BOOL closing = [command isEqualToString:@"media-closed"];
     NSTimeInterval timeout = [command isEqualToString:@"media-finished"] ? (probe.continuous ? INFINITY : 70) : closing ? 5 : 30;
     printf("WAIT_CONTROL %s deadline=%.0fs\n", command.UTF8String, timeout);
@@ -642,6 +704,44 @@ static BOOL WaitControl(DirectPlaybackProbe *probe, NSString *command) {
             printf("MEDIA_READY CID=%04X outgoingMTU=%u\n", probe.mediaCID, mtu);
             return YES;
         }
+        if (transaction && [line hasPrefix:@"rate "]) {
+            uint32_t rate = 0;
+            if (probe.suspended || !ParseSampleRate([line substringFromIndex:5].UTF8String, &rate) ||
+                rate == probe.sampleRate || !SelectLiveRate(probe, transaction, rate)) break;
+            continue;
+        }
+        if (transaction && [line isEqualToString:@"park"]) {
+            if (probe.suspended || !probe.streamOpened || !probe.mediaCID) break;
+            uint8_t seid = probe.selectedSink << 2;
+            NSData *target = [NSData dataWithBytes:&seid length:1];
+            if (!EmptyAcceptance(Query(probe, transaction, 9, target))) break;
+            probe.suspended = YES;
+            probe.parked = YES;
+            printf("PARK_SUSPENDED signalingCID=%04X mediaCID=%04X\n", probe.realCID, probe.mediaCID);
+            continue;
+        }
+        if (transaction && probe.suspended &&
+            ([line isEqualToString:@"resume"] || [line isEqualToString:@"rollback"])) {
+            uint8_t seid = probe.selectedSink << 2;
+            NSData *target = [NSData dataWithBytes:&seid length:1];
+            BOOL rollbackRequested = [line isEqualToString:@"rollback"];
+            if (rollbackRequested || !EmptyAcceptance(Query(probe, transaction, 7, target))) {
+                if (probe.parked) break;
+                uint32_t rollback = probe.previousRate;
+                if ((!rollbackRequested && !probe.lastRejected) || !rollback ||
+                    !Reconfigure(probe, transaction, target, rollback) || !VerifyConfiguration(probe, transaction, target, rollback)) break;
+                probe.previousRate = 0;
+                probe.sampleRate = rollback;
+                printf("RATE_ROLLBACK rate=%u\n", rollback);
+                continue;
+            }
+            probe.previousRate = 0;
+            probe.suspended = NO;
+            printf("%s rate=%u signalingCID=%04X mediaCID=%04X\n",
+                   probe.parked ? "PARK_START_ACCEPTED" : "RATE_START_ACCEPTED", probe.sampleRate, probe.realCID, probe.mediaCID);
+            probe.parked = NO;
+            continue;
+        }
         if ([line isEqualToString:command]) return YES;
         printf("UNEXPECTED_CONTROL expected=%s\n", command.UTF8String);
         break;
@@ -650,20 +750,20 @@ static BOOL WaitControl(DirectPlaybackProbe *probe, NSString *command) {
     return NO;
 }
 
-static BOOL LDACSelection(NSData *reply, uint32_t sampleRate, BOOL *delayReporting) {
+static uint8_t LDACRates(NSData *reply, BOOL *delayReporting) {
     const uint8_t *bytes = reply.bytes;
-    BOOL ldac = NO;
+    uint8_t rates = 0;
     *delayReporting = NO;
     for (NSUInteger offset = 2; offset < reply.length;) {
         uint8_t category = bytes[offset++];
         uint8_t size = bytes[offset++];
         const uint8_t vendor[] = {0x00, 0xFF, 0x2D, 0x01, 0x00, 0x00, 0xAA, 0x00};
         if (category == 7 && size == 10 && memcmp(bytes + offset, vendor, sizeof(vendor)) == 0)
-            ldac = !!((bytes[offset + 8] & RateBit(sampleRate)) && (bytes[offset + 9] & 1));
+            rates = bytes[offset + 9] & 1 ? bytes[offset + 8] : 0;
         if (category == 8 && size == 0) *delayReporting = YES;
         offset += size;
     }
-    return ldac;
+    return rates;
 }
 
 static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
@@ -688,8 +788,10 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
                 break;
             }
             BOOL delayReporting = NO;
-            if (!probe.selectedSink && LDACSelection(reply, probe.sampleRate, &delayReporting)) {
+            uint8_t rates = LDACRates(reply, &delayReporting);
+            if (!probe.selectedSink && (rates & RateBit(probe.sampleRate))) {
                 probe.selectedSink = seid;
+                probe.sinkRates = rates;
                 probe.delayReporting = NO;
                 break;
             }
@@ -701,7 +803,7 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
         }
         printf("PREPARE_MEDIA\n");
         stage = "media";
-        if (!WaitControl(probe, @"media-prepared")) break;
+        if (!WaitControl(probe, @"media-prepared", NULL)) break;
         printf("LDAC_SELECTED remoteSEID=%u localSourceSEID=1 delayReporting=%d rate=%u channels=2 quality=%s\n",
                probe.selectedSink, probe.delayReporting, probe.sampleRate, probe.quality.UTF8String);
         uint8_t seids[] = {(uint8_t)(probe.selectedSink << 2), 0x04};
@@ -718,40 +820,23 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
         if (probe.stopRequested) break;
         NSData *target = [NSData dataWithBytes:seids length:1];
         stage = "readback";
-        uint8_t readbackLabel = transaction;
-        NSData *readback = Query(probe, &transaction, 4, target);
-        NSData *services = ServiceBytes(probe.sampleRate, probe.delayReporting);
-        BOOL matches = readback && DecodeReply(readback, readbackLabel, 4, probe.selectedSink, NO) != nil &&
-            readback.length == services.length + 2;
-        const uint8_t *actual = readback.bytes, *expected = services.bytes;
-        for (NSUInteger offset = 2; matches && offset < readback.length; offset += 2 + actual[offset + 1]) {
-            BOOL found = NO;
-            for (NSUInteger index = 0; index < services.length; index += 2 + expected[index + 1]) {
-                if (actual[offset] == expected[index] && actual[offset + 1] == expected[index + 1] &&
-                    memcmp(actual + offset, expected + index, 2 + expected[index + 1]) == 0) found = YES;
-            }
-            matches = found;
-        }
-        if (!matches) {
-            printf("CONFIGURATION_VERIFICATION_FAILED\n");
-            break;
-        }
+        if (!VerifyConfiguration(probe, &transaction, target, probe.sampleRate)) break;
         printf("CONFIGURATION_VERIFIED rate=%u channels=2\n", probe.sampleRate);
         stage = "open";
         if (!EmptyAcceptance(Query(probe, &transaction, 6, target))) break;
         probe.streamOpened = YES;
         probe.mediaExpected = YES;
-        printf("OPEN_ACCEPTED signalingCID=%04X remoteSEID=%u\n", probe.realCID, probe.selectedSink);
+        printf("OPEN_ACCEPTED signalingCID=%04X remoteSEID=%u rateMask=%02X\n", probe.realCID, probe.selectedSink, probe.sinkRates);
         if (probe.stopRequested) break;
         stage = "media";
-        if (!WaitControl(probe, @"media-ready")) break;
+        if (!WaitControl(probe, @"media-ready", NULL)) break;
         stage = "start";
         if (!EmptyAcceptance(Query(probe, &transaction, 7, target))) break;
         started = YES;
         printf("START_ACCEPTED signalingCID=%04X mediaCID=%04X\n", probe.realCID, probe.mediaCID);
         if (probe.stopRequested) break;
         stage = "playback";
-        if (!WaitControl(probe, @"media-finished")) break;
+        if (!WaitControl(probe, @"media-finished", probe.continuous ? &transaction : NULL)) break;
         stage = "close";
         if (!EmptyAcceptance(Query(probe, &transaction, 8, target))) break;
         probe.streamOpened = NO;
@@ -789,7 +874,7 @@ static BOOL PlaybackSequence(DirectPlaybackProbe *probe) {
     if (probe.mediaExpected) {
         printf("MEDIA_CLOSE_REQUIRED CID=%04X\n", probe.mediaCID);
         printf("WAIT_MEDIA_CLOSED\n");
-        if (!WaitControl(probe, @"media-closed")) {
+        if (!WaitControl(probe, @"media-closed", NULL)) {
             completed = NO;
             if (probe.stdinEnded) {
                 printf("MEDIA_CLOSE_UNCONFIRMED parentEOF=1 CID=%04X\n", probe.mediaCID);
@@ -855,14 +940,14 @@ static BOOL SelfTest(void) {
     NSData *aac = [NSData dataWithBytes:aacCaps length:sizeof(aacCaps)];
     passed &= DecodeReply(sbc, 2, 12, 1, NO) != nil && DecodeReply(aac, 3, 12, 2, NO) != nil;
     BOOL hasDelay = NO;
-    passed &= DecodeReply(actual, 4, 12, 3, NO) != nil && LDACSelection(actual, 48000, &hasDelay) && hasDelay;
+    passed &= DecodeReply(actual, 4, 12, 3, NO) != nil && (LDACRates(actual, &hasDelay) & RateBit(48000)) && hasDelay;
     const uint32_t rates[] = {44100, 48000, 88200, 96000};
     for (NSUInteger rate = 0; rate < 4; rate++) {
         probe.sampleRate = rates[rate];
         probe.configured = YES;
-        passed &= LDACSelection(actual, rates[rate], &hasDelay) && hasDelay;
-        passed &= LDACSelection(capabilities, rates[rate], &hasDelay) == (rates[rate] == 48000);
-        passed &= !LDACSelection(sbc, rates[rate], &hasDelay) && !LDACSelection(aac, rates[rate], &hasDelay);
+        passed &= (LDACRates(actual, &hasDelay) & RateBit(rates[rate])) && hasDelay;
+        passed &= !!(LDACRates(capabilities, &hasDelay) & RateBit(rates[rate])) == (rates[rate] == 48000);
+        passed &= !LDACRates(sbc, &hasDelay) && !LDACRates(aac, &hasDelay);
         const uint8_t signals[] = {2, 4, 12};
         for (NSUInteger index = 0; index < 3; index++) {
             uint8_t signal = signals[index];

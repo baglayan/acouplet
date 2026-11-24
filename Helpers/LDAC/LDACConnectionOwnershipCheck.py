@@ -156,7 +156,15 @@ int main(int argc, const char **argv) {
         retired.originalHandle = 1;
         assert(Cancel(replaced, retired) == 0 && replaced.closes == 0);
         puts("PASS cancellation before completion, failed acquisition with valid zero, after successful completion and replacement");
-        NSArray *restore = @[@"fixture", @"--address", @"02-00-00-00-00-01", @"--restore", @"--disconnect"];
+        NSArray *reconnect = @[@"fixture", @"--address", @"02-00-00-00-00-01", @"--restore"];
+        int restored = Invoke(reconnect, NO, 0, 0);
+        assert(restored == 6 && elapsed >= 45 && fixtureDevice.connected && fixtureDevice.opens == 1 && fixtureDevice.closes == 0);
+        publishAt = 0.25;
+        restored = Invoke(reconnect, NO, 0, 0);
+        assert(restored == 0 && elapsed >= publishAt && fixtureDevice.opens == 1 && fixtureDevice.closes == 0);
+        publishAt = -1;
+        puts("PASS restoration needs native output publication even when the new ACL callback succeeded");
+        NSArray *restore = [reconnect arrayByAddingObject:@"--disconnect"];
         int status = Invoke(restore, YES, 2, 0);
         assert(status == 6 && fixtureDevice.closes == 0);
         puts("PASS no owned handle: preserves existing ACL");

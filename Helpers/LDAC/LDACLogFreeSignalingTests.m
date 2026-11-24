@@ -183,7 +183,7 @@ static void UnmatchedResponseCase(NSData *foreign, NSUInteger boundary, NSUInteg
         Check([Query(probe, &transaction, 6, Hex(@"0c")) isEqualToData:accepted], "unmatched response cannot satisfy Open");
         Check(transaction == 8 && !probe.lastRejected, "only active response changes transaction result");
     }
-    if (boundary >= 2) Check(WaitControl(probe, @"media-prepared"), "control wait drains unmatched response before peer command");
+    if (boundary >= 2) Check(WaitControl(probe, @"media-prepared", NULL), "control wait drains unmatched response before peer command");
     Check(!probe.pending.length && !probe.framingUncertain && !probe.failed && !probe.streamOpened,
           "unmatched response leaves protocol and stream state intact");
     Check(output.writes.count == (boundary == 2 ? 2 : 1), "unmatched response has no acknowledgment or marker");
@@ -239,7 +239,7 @@ static void FramingPrefixes(NSData *incoming, NSUInteger responseLength, NSUInte
     }
 }
 
-struct ProtocolThread { int readFD; int writeFD; BOOL stop; };
+struct ProtocolThread { int readFD; int writeFD; BOOL stop; unsigned int rateMode; char openReport[96]; };
 static void *ParentProtocol(void *opaque) {
     struct ProtocolThread *state = opaque;
     char line[1024];
@@ -254,25 +254,48 @@ static void *ParentProtocol(void *opaque) {
         length = 0;
         const char *command = NULL;
         if (!strcmp(line, "PREPARE_MEDIA")) command = "media-prepared\n";
-        else if (!strncmp(line, "OPEN_ACCEPTED ", 14)) command = "media-ready 2002 679\n";
-        else if (!strncmp(line, "START_ACCEPTED ", 15)) command = state->stop ? "stop\n" : "media-finished\n";
+        else if (!strncmp(line, "OPEN_ACCEPTED ", 14)) {
+            strlcpy(state->openReport, line, sizeof(state->openReport));
+            command = "media-ready 2002 679\n";
+        }
+        else if (!strncmp(line, "START_ACCEPTED ", 15)) command = state->rateMode >= 7 ? "park\n" : state->rateMode ? "rate 96000\n" : state->stop ? "stop\n" : "media-finished\n";
+        else if (!strcmp(line, "PARK_SUSPENDED signalingCID=1001 mediaCID=2002")) command = state->rateMode >= 10 ? NULL : state->rateMode == 8 ? "stop\n" : "resume\n";
+        else if (!strcmp(line, "PARK_START_ACCEPTED rate=48000 signalingCID=1001 mediaCID=2002")) command = "media-finished\n";
+        else if (!strncmp(line, "RATE_SELECTED ", 14)) command = strstr(line, "suspended=1") ? "resume\n" : "media-finished\n";
+        else if (!strncmp(line, "RATE_ROLLBACK ", 14)) command = "resume\n";
+        else if (!strncmp(line, "RATE_START_ACCEPTED ", 20)) command = "media-finished\n";
         else if (!strcmp(line, "WAIT_MEDIA_CLOSED")) command = "media-closed\n";
         if (command) write(state->writeFD, command, strlen(command));
     }
     close(state->readFD);
     return NULL;
 }
-static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL cancelConfiguration, BOOL reordered, BOOL relabeledMarker) {
+static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL cancelConfiguration, BOOL reordered, BOOL relabeledMarker, unsigned int rateMode) {
     ResetParent();
     DirectPlaybackProbe *probe = Probe();
     probe.sampleRate = rate;
+    probe.continuous = rateMode != 0;
     TestInput *input = (id)probe.input;
     TestOutput *output = (id)probe.output;
     __block BOOL closed = NO;
     __block NSUInteger queries = 0;
     __block uint8_t lastLabel = 0;
+    __block uint32_t configuredRate = rate;
+    __block unsigned int starts = 0;
+    __block unsigned int peerConfigurations = 0;
     output.onWrite = ^(NSData *packet) {
         const uint8_t *bytes = packet.bytes;
+        if (bytes[0] == 0x72 && bytes[1] == 4) {
+            NSData *expected = Hex(configuredRate == 96000 ? @"72 04 01 00 07 0a 00 ff 2d 01 00 00 aa 00 04 01" :
+                                                            @"72 04 01 00 07 0a 00 ff 2d 01 00 00 aa 00 10 01");
+            Check([packet isEqualToData:expected], "crossed Get Configuration reports the accepted LDAC rate");
+            peerConfigurations++;
+        }
+        if (bytes[0] == 0xe2 && (rateMode == 10 || rateMode == 11 || rateMode == 13)) {
+            Check([packet isEqualToData:Hex(rateMode == 11 ? @"e2 0a" : @"e2 08")],
+                  "the owned peer terminal command is accepted while held");
+            closed = YES;
+        }
         if (bytes[0] & 15) return;
         if (bytes[0] == 0xF0 && bytes[1] == 0x3F) {
             uint8_t marker[] = {(uint8_t)(((relabeledMarker ? lastLabel : 15) << 4) | 1), 0x3F};
@@ -288,15 +311,30 @@ static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL
         if (bytes[1] == 1) [response appendData:Hex(@"0c 08 10 08")];
         else if (bytes[1] == 2) {
             Check(packet.length == 3 && bytes[2] == 0x0c, "selected LDAC sink needs no later endpoint queries");
-            [response appendData:Hex(@"01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07")];
+            [response appendData:rateMode == 4 ? Hex(@"01 00 07 0a 00 ff 2d 01 00 00 aa 00 10 07") : Hex(@"01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07")];
         } else if (bytes[1] == 4) {
-            NSData *services = ServiceBytes(wrongConfiguration ? 44100 : rate, NO);
+            NSData *services = ServiceBytes(wrongConfiguration ? 44100 : configuredRate, NO);
             if (reordered) {
                 [response appendData:[services subdataWithRange:NSMakeRange(2, services.length - 2)]];
                 [response appendData:[services subdataWithRange:NSMakeRange(0, 2)]];
             } else [response appendData:services];
-        }
-        else if (bytes[1] == 8 || bytes[1] == 10) closed = YES;
+        } else if (bytes[1] == 9) {
+            Check(packet.length == 3 && bytes[2] == 0x0c, "Suspend uses the open sink");
+            if (rateMode == 3 || rateMode == 14) { header[0] |= 1; response = [[NSData dataWithBytes:header length:2] mutableCopy]; [response appendData:Hex(@"0c 31")]; }
+            if (rateMode >= 10 && rateMode <= 12) [response appendData:Hex(rateMode == 10 ? @"e0 08 04" : rateMode == 11 ? @"e0 0a 04" : @"e0 09 04")];
+            if (rateMode == 13) response = [Hex(@"e0 08 04") mutableCopy];
+        } else if (bytes[1] == 5) {
+            BOOL rollback = rateMode == 6 && starts == 2;
+            Check([[packet subdataWithRange:NSMakeRange(2, packet.length - 2)] isEqualToData:
+                   Hex(rollback ? @"0c 07 0a 00 ff 2d 01 00 00 aa 00 10 01" : @"0c 07 0a 00 ff 2d 01 00 00 aa 00 04 01")],
+                  "Reconfigure updates only the LDAC codec on the open sink");
+            if (rateMode == 2) { header[0] |= 1; response = [[NSData dataWithBytes:header length:2] mutableCopy]; [response appendData:Hex(@"07 29")]; }
+            else if (rateMode != 5) configuredRate = rollback ? rate : 96000;
+            if (rateMode == 1 || rateMode == 6) [response appendData:Hex(@"70 04 04")];
+        } else if (bytes[1] == 7) {
+            Check(packet.length == 3 && bytes[2] == 0x0c, "Start uses the open sink");
+            if (++starts == 2 && (rateMode == 6 || rateMode == 9)) { header[0] |= 1; response = [[NSData dataWithBytes:header length:2] mutableCopy]; [response appendData:Hex(@"0c 31")]; }
+        } else if (bytes[1] == 8 || bytes[1] == 10) closed = YES;
         Chunks(input, response, 0, NO);
     };
     int events[2];
@@ -304,7 +342,7 @@ static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL
     int savedOutput = dup(STDOUT_FILENO);
     Check(dup2(events[1], STDOUT_FILENO) == STDOUT_FILENO, "redirect events");
     close(events[1]);
-    struct ProtocolThread state = {events[0], parentWrite, stop};
+    struct ProtocolThread state = {events[0], parentWrite, stop, rateMode, {0}};
     pthread_t thread;
     Check(pthread_create(&thread, NULL, ParentProtocol, &state) == 0, "start parent protocol");
     BOOL result = PlaybackSequence(probe);
@@ -312,20 +350,32 @@ static void PlaybackCase(BOOL stop, BOOL wrongConfiguration, uint32_t rate, BOOL
     dup2(savedOutput, STDOUT_FILENO);
     close(savedOutput);
     pthread_join(thread, NULL);
-    Check(result == (!wrongConfiguration && !cancelConfiguration), "actual playback sequence result");
+    Check(result == (!wrongConfiguration && !cancelConfiguration && rateMode != 5 && rateMode != 9 && rateMode != 12 && rateMode != 14), "actual playback sequence result");
     if (cancelConfiguration) {
         Check(closed && probe.configurationSent && probe.framingUncertain && queries == 4,
               "canceled configuration sends one Abort without claiming cleanup confirmation");
         output.onWrite = nil;
         return;
     }
+    if (rateMode == 12) {
+        Check(closed && probe.framingUncertain && starts == 1 && queries == 8,
+              "an unframed peer Suspend fails closed without a second Start");
+        output.onWrite = nil;
+        return;
+    }
     Check(closed && !probe.configurationSent && !probe.configured && !probe.streamOpened, "actual cleanup state");
-    Check(!probe.pending.length && !probe.framingUncertain && !probe.failed, "actual sequence parser state");
-    Check(queries == (wrongConfiguration ? 5 : 7), "actual sequence query count");
+    Check(!probe.pending.length && probe.framingUncertain == (rateMode == 13) && !probe.failed, "actual sequence parser state");
+    NSUInteger rateQueries = rateMode == 1 || rateMode == 2 ? 4 : rateMode == 3 ? 1 : rateMode == 5 ? 3 : rateMode == 6 ? 7 : rateMode == 8 || rateMode == 14 ? 1 : rateMode == 7 || rateMode == 9 ? 2 : 0;
+    Check(queries == (wrongConfiguration ? 5 : 7) + rateQueries, "actual sequence query count");
+    if (rateMode >= 7) Check(starts == (rateMode == 7 || rateMode == 9 ? 2 : 1) && configuredRate == rate,
+                              "held sink preserves format and does not Start after STOP");
+    Check(peerConfigurations == (rateMode == 1 ? 1 : rateMode == 6 ? 2 : 0), "peer queried each accepted LDAC reconfiguration");
+    if (rateMode) Check(probe.sampleRate == (rateMode == 1 ? 96000 : 48000) && probe.mediaCID == 0x2002 && probe.realCID == 0x1001,
+                        "live rate and rollback retain both owned channels");
     output.onWrite = nil;
 }
 
-static void EndpointSelectionCase(NSArray<NSData *> *responses, NSUInteger expectedQueries, uint8_t expectedSink) {
+static void EndpointSelectionCase(NSArray<NSData *> *responses, NSUInteger expectedQueries, uint8_t expectedSink, uint8_t expectedRateMask) {
     ResetParent();
     DirectPlaybackProbe *probe = Probe();
     TestInput *input = (id)probe.input;
@@ -363,7 +413,7 @@ static void EndpointSelectionCase(NSArray<NSData *> *responses, NSUInteger expec
     int savedOutput = dup(STDOUT_FILENO);
     Check(dup2(events[1], STDOUT_FILENO) == STDOUT_FILENO, "redirect events");
     close(events[1]);
-    struct ProtocolThread state = {events[0], parentWrite, NO};
+    struct ProtocolThread state = {events[0], parentWrite, NO, 0, {0}};
     pthread_t thread;
     Check(pthread_create(&thread, NULL, ParentProtocol, &state) == 0, "start parent protocol");
     BOOL result = PlaybackSequence(probe);
@@ -372,6 +422,8 @@ static void EndpointSelectionCase(NSArray<NSData *> *responses, NSUInteger expec
     close(savedOutput);
     pthread_join(thread, NULL);
     Check(result == (expectedSink != 0) && probe.selectedSink == expectedSink, "endpoint selection result");
+    NSString *open = expectedSink ? [NSString stringWithFormat:@"OPEN_ACCEPTED signalingCID=1001 remoteSEID=%u rateMask=%02X", expectedSink, expectedRateMask] : @"";
+    Check(!strcmp(state.openReport, open.UTF8String), "only the opened sink's rate mask reaches the parent");
     Check(queries == expectedQueries && configurations == (expectedSink ? 1 : 0), "endpoint selection query count");
     Check(!probe.configurationSent && !probe.configured && !probe.streamOpened, "endpoint selection leaves no configuration");
     output.onWrite = nil;
@@ -391,7 +443,7 @@ int main(void) {
             longRunning.hardDeadline = INFINITY;
             ParentLine("media-finished\n");
             clockCallsUntilAdvance = 2;
-            Check(WaitControl(longRunning, @"media-finished") == continuous.boolValue,
+            Check(WaitControl(longRunning, @"media-finished", NULL) == continuous.boolValue,
                   "continuous playback outlives finite media wait deadline");
             clockOffset = 0;
         }
@@ -605,7 +657,7 @@ int main(void) {
                     Check([packet isEqualToData:Hex(@"70 06 0c")], "unframeable input receives no reply");
                     Chunks(input, incoming, 0, NO);
                 };
-                if (boundary == 3) Check(!WaitControl(probe, @"media-prepared"), "control wait rejects unframeable response");
+                if (boundary == 3) Check(!WaitControl(probe, @"media-prepared", NULL), "control wait rejects unframeable response");
                 else {
                     uint8_t transaction = 7;
                     Check(Query(probe, &transaction, 6, Hex(@"0c")) == nil, "query boundary rejects unframeable response");
@@ -662,7 +714,7 @@ int main(void) {
             Check([packet isEqualToData:Hex(@"22 0d")], "idle delay accepted");
             ParentLine("media-prepared\n");
         };
-        Check(WaitControl(idle, @"media-prepared"), "peer command serviced without parent activity");
+        Check(WaitControl(idle, @"media-prepared", NULL), "peer command serviced without parent activity");
         Check(idleOutput.writes.count == 1 && !idle.pending.length, "idle command accounted");
         idleOutput.onWrite = nil;
         for (NSUInteger variant = 0; variant < 3; variant++) {
@@ -687,7 +739,7 @@ int main(void) {
         peerClose.configurationSent = YES;
         peerClose.streamOpened = YES;
         Chunks((id)peerClose.input, Hex(@"20 08 04"), 0, YES);
-        Check(!WaitControl(peerClose, @"media-finished") && peerClose.peerStopped &&
+        Check(!WaitControl(peerClose, @"media-finished", NULL) && peerClose.peerStopped &&
               !peerClose.configurationSent && [((TestOutput *)peerClose.output).writes.lastObject isEqualToData:Hex(@"22 08")],
               "peer Close during playback wait is answered and stops playback without parent activity");
         for (NSUInteger terminal = 0; terminal < 3; terminal++) {
@@ -745,23 +797,27 @@ int main(void) {
             Check(!AcquisitionTrigger(invalid, 100, 300), "bad acquisition rejected");
         Check(!AcquisitionTrigger(@"acquire 100 200", 100, 200 + NSEC_PER_SEC + 1), "stale acquisition rejected");
         NSData *laterLDAC = Hex(@"32 02 01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07");
-        EndpointSelectionCase(@[Hex(@"23 02 12"), laterLDAC], 2, 2);
-        EndpointSelectionCase(@[Hex(@"21 02"), laterLDAC], 2, 2);
-        EndpointSelectionCase(@[Hex(@"23 02 12"), Hex(@"33 02 12")], 2, 0);
-        EndpointSelectionCase(@[Hex(@"23 02"), laterLDAC], 1, 0);
-        EndpointSelectionCase(@[Hex(@"22 02 01 00 07 01 ff"), laterLDAC], 1, 0);
+        EndpointSelectionCase(@[Hex(@"23 02 12"), laterLDAC], 2, 2, 0x3c);
+        EndpointSelectionCase(@[Hex(@"21 02"), laterLDAC], 2, 2, 0x3c);
+        EndpointSelectionCase(@[Hex(@"22 02 01 00 07 0a 00 ff 2d 01 00 00 aa 00 04 01"),
+                               Hex(@"32 02 01 00 07 0a 00 ff 2d 01 00 00 aa 00 30 01")], 2, 2, 0x30);
+        EndpointSelectionCase(@[Hex(@"23 02 12"), Hex(@"33 02 12")], 2, 0, 0);
+        EndpointSelectionCase(@[Hex(@"23 02"), laterLDAC], 1, 0, 0);
+        EndpointSelectionCase(@[Hex(@"22 02 01 00 07 01 ff"), laterLDAC], 1, 0, 0);
         EndpointSelectionCase(@[Hex(@"23 02 12"), Hex(@"32 02 01 00 07 0a 10 ff 2d 01 00 00 aa 00 3c 07"),
-                               Hex(@"42 02 01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07")], 2, 0);
+                               Hex(@"42 02 01 00 07 0a 00 ff 2d 01 00 00 aa 00 3c 07")], 2, 0, 0);
         for (NSNumber *rate in @[@44100, @48000, @88200, @96000]) {
-            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, NO, NO);
-            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, NO, YES);
-            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, YES, NO);
-            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, YES, YES);
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, NO, NO, 0);
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, NO, YES, 0);
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, YES, NO, 0);
+            PlaybackCase(NO, NO, rate.unsignedIntValue, NO, YES, YES, 0);
         }
-        PlaybackCase(YES, NO, 48000, NO, NO, NO);
-        PlaybackCase(NO, YES, 48000, NO, NO, NO);
-        PlaybackCase(NO, YES, 48000, NO, YES, NO);
-        PlaybackCase(NO, NO, 48000, YES, NO, NO);
+        PlaybackCase(YES, NO, 48000, NO, NO, NO, 0);
+        PlaybackCase(NO, YES, 48000, NO, NO, NO, 0);
+        PlaybackCase(NO, YES, 48000, NO, YES, NO, 0);
+        PlaybackCase(NO, NO, 48000, YES, NO, NO, 0);
+        for (unsigned int rateMode = 1; rateMode <= 14; rateMode++)
+            PlaybackCase(NO, NO, 48000, NO, NO, NO, rateMode);
         dup2(originalInput, STDIN_FILENO);
         close(originalInput);
         if (parentWrite >= 0) close(parentWrite);
