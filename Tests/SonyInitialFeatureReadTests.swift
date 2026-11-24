@@ -184,6 +184,57 @@ final class SonyInitialFeatureReadTests: XCTestCase {
         XCTAssertEqual(featureQueries(controller).filter { $0 == [0xE2, 1] }.count, 2)
     }
 
+    func testDSEEWithDisableReasonsControlsAcquisitionAndConfirmedEdits() throws {
+        let controller = makeController(generation: .v2, functions: [0xED], firstQuery: [0xE0, 0x0B])
+        defer { controller.simulateControlLoss() }
+        for reply: [UInt8] in [[0xE1, 0x0B, 3], [0xE3, 0x0B, 0, 1, 0x0B], [0xE7, 0x0B, 1]] {
+            let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+            XCTAssertEqual(frame.payload, [reply[0] - 1, 0x0B])
+            controller.simulateProtocolMessage(reply)
+            acknowledge(frame, on: controller)
+        }
+        XCTAssertEqual(controller.dseeType, .ultimate)
+        XCTAssertEqual(controller.dseeMode, .automatic)
+        XCTAssertEqual(controller.dseeAvailable, true)
+        XCTAssertFalse(controller.canSetDSEE)
+        controller.setDSEE(.off)
+        XCTAssertNil(controller.simulatedPendingFrame)
+
+        controller.simulateProtocolMessage([0xE5, 0x0B, 1, 2, 0x0B, 0])
+        controller.simulateProtocolMessage([0xE5, 0x0B, 0, 0])
+        XCTAssertTrue(controller.canSetDSEE)
+        controller.setDSEE(.off)
+        let write = try XCTUnwrap(controller.simulatedPendingFrame)
+        XCTAssertEqual(write.payload, [0xE8, 0x0B, 0])
+        acknowledge(write, on: controller)
+        controller.simulateProtocolMessage([0xE9, 1, 0])
+        XCTAssertEqual(controller.dseeMode, .automatic)
+        XCTAssertEqual(controller.pendingChanges[.dsee], [0])
+        controller.simulateProtocolMessage([0xE9, 0x0B, 0])
+        XCTAssertEqual(controller.dseeMode, .off)
+        XCTAssertNil(controller.pendingChanges[.dsee])
+    }
+
+    func testDSEEWithDisableReasonsDiscardsQueuedWriteWhenRestrictionsChange() throws {
+        let controller = makeController(generation: .v2, functions: [0xED], firstQuery: [0xE0, 0x0B])
+        defer { controller.simulateControlLoss() }
+        for reply: [UInt8] in [[0xE1, 0x0B, 3], [0xE3, 0x0B, 0, 0], [0xE7, 0x0B, 1]] {
+            controller.simulateProtocolMessage(reply)
+            acknowledge(try XCTUnwrap(controller.simulatedPendingFrame), on: controller)
+        }
+        controller.requestCurrentSettings()
+        let read = try XCTUnwrap(controller.simulatedPendingFrame)
+        controller.setDSEE(.off)
+        XCTAssertEqual(controller.pendingChanges[.dsee], [0])
+        controller.simulateProtocolMessage([0xE5, 0x0B, 0, 1, 0xFE])
+        acknowledge(read, on: controller)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0xE8, 0x0B, 0] })
+        XCTAssertEqual(controller.dseeMode, .automatic)
+        XCTAssertNil(controller.pendingChanges[.dsee])
+        XCTAssertNotNil(controller.settingErrors[.dsee])
+    }
+
     func testInitialStatusResponseBeforeNativeWriteCannotAdvanceAcquisition() throws {
         let controller = makeController(generation: .v2)
         defer { controller.simulateControlLoss() }

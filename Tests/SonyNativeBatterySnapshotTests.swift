@@ -345,6 +345,57 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
     }
 
     @MainActor
+    func testReportedCaseThresholdFeedsExistingCaseWarning() throws {
+        let controller = batteryController(functions: [0x29, 0x2A])
+        defer { controller.simulateControlLoss() }
+        deliverBattery([0x23, 0x09, 40, 0, 50, 0, 45, 50], to: controller)
+        XCTAssertEqual(controller.batteries.left?.lowBatteryThreshold, 45)
+        XCTAssertEqual(controller.batteries.right?.lowBatteryThreshold, 50)
+        XCTAssertTrue(controller.lowBatteryReadings.allSatisfy { $0.reportedCaseThreshold == nil })
+
+        var policy = SonyLowBatteryPolicy()
+        func warnings() -> [SonyLowBatteryPolicy.Warning] {
+            policy.warnings(for: "WF", readings: controller.lowBatteryReadings, at: Date())
+        }
+        deliverBattery([0x23, 0x0A, 40, 0, 40], to: controller)
+        XCTAssertTrue(warnings().isEmpty)
+        deliverBattery([0x25, 0x0A, 39, 0, 40], to: controller)
+        let warning = try XCTUnwrap(warnings().first)
+        XCTAssertEqual(warning.group, .caseBattery)
+        XCTAssertEqual(warning.reading.level, 39)
+        policy.didPresent(warning, at: Date())
+        deliverBattery([0x25, 0x0A, 39, 0, 40], to: controller)
+        XCTAssertTrue(warnings().isEmpty)
+        deliverBattery([0x25, 0x0A, 5, 0, 0xFF], to: controller)
+        XCTAssertEqual(controller.batteries.caseBattery?.lowBatteryThreshold, 0xFF)
+        XCTAssertTrue(warnings().isEmpty)
+        deliverBattery([0x25, 0x0A, 39, 0, 40], to: controller)
+        XCTAssertTrue(warnings().isEmpty)
+        deliverBattery([0x25, 0x0A, 40, 0, 40], to: controller)
+        XCTAssertTrue(warnings().isEmpty)
+        deliverBattery([0x25, 0x0A, 39, 1, 40], to: controller)
+        XCTAssertTrue(warnings().isEmpty)
+        deliverBattery([0x25, 0x0A, 39, 0, 40], to: controller)
+        XCTAssertEqual(warnings().first?.reading.level, 39)
+    }
+
+    @MainActor
+    func testBatteryNotificationsCannotReplaceNegotiatedReportVariant() {
+        let controller = batteryController(functions: [0x29, 0x2A, 0x22])
+        defer { controller.simulateControlLoss() }
+        deliverBattery([0x23, 0x09, 73, 0, 76, 0, 20, 25], to: controller)
+        deliverBattery([0x23, 0x02, 65, 0], to: controller)
+        let negotiated = controller.batteries
+        deliverBattery([0x25, 0x00, 20, 0], to: controller)
+        deliverBattery([0x25, 0x08, 20, 0, 35], to: controller)
+        deliverBattery([0x25, 0x01, 21, 0, 31, 0], to: controller)
+        deliverBattery([0x25, 0x0A, 25, 0, 45], to: controller)
+        XCTAssertEqual(controller.batteries, negotiated)
+        XCTAssertEqual(controller.batteries.left?.lowBatteryThreshold, 20)
+        XCTAssertEqual(controller.batteries.caseBattery?.level, 65)
+    }
+
+    @MainActor
     func testBatteryNotificationSupersedesOnlyItsTransmittedPollWithoutRefreshingTime() {
         let cases: [(UInt8, UInt8, [UInt8], [UInt8])] = [
             (0x20, 0x00, [80, 0], [79, 1]),
@@ -389,7 +440,9 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
     func testBatteryReadsRequireActualTransmissionAndKeepPartsIndependent() {
         let controller = batteryController(functions: [0x29, 0x2A], acknowledgeReads: false)
         defer { controller.simulateControlLoss() }
-        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x22, 0x09])
+        acknowledgeBatteryCommands(controller, until: [0x22, 0x09])
+        XCTAssertEqual(batteryReadCount(controller, inquiry: 0x09), 1)
+        XCTAssertEqual(batteryReadCount(controller, inquiry: 0x0A), 0)
         deliverBattery([0x25, 0x09, 73, 0, 76, 1, 20, 20], to: controller)
         let paired = controller.batteries
         let reportedAt = controller.lastSyncDate
@@ -400,13 +453,16 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
         controller.defersSimulatedWrites = true
         let pending = controller.simulatedPendingFrame!
         controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - pending.sequence, payload: []))
+        XCTAssertEqual(controller.simulatedPendingFrame?.type, 0x0C)
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x22, 0x0A])
+        XCTAssertEqual(batteryReadCount(controller, inquiry: 0x0A), 0)
         controller.defersSimulatedWrites = false
         deliverBattery([0x23, 0x0A, 80, 0, 20], to: controller)
         XCTAssertNil(controller.batteries.caseBattery)
         XCTAssertEqual(controller.lastSyncDate, reportedAt)
         controller.completeSimulatedWrite()
         acknowledgeBatteryCommands(controller)
+        XCTAssertEqual(batteryReadCount(controller, inquiry: 0x0A), 1)
         deliverBattery([0x23, 0x0A, 80, 0, 20], type: 0x0E, to: controller)
         XCTAssertNil(controller.batteries.caseBattery)
         deliverBattery([0x23, 0x0A, 80, 0, 10, 20], to: controller)
@@ -486,14 +542,16 @@ final class SonyNativeBatterySnapshotTests: XCTestCase {
     }
 
     @MainActor
-    private func acknowledgeBatteryCommands(_ controller: SonyHeadphonesController) {
+    private func acknowledgeBatteryCommands(_ controller: SonyHeadphonesController, until query: [UInt8]? = nil) {
         var count = 0
         while let frame = controller.simulatedPendingFrame, count < 50 {
+            if frame.type == 0x0C, frame.payload == query { return }
             replyToOrdinaryNoiseMetadata(frame, controller: controller)
             controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - frame.sequence, payload: []))
             count += 1
         }
-        XCTAssertNil(controller.simulatedPendingFrame)
+        if let query { XCTFail("Battery query \(query) was not reached") }
+        else { XCTAssertNil(controller.simulatedPendingFrame) }
     }
 
     @MainActor

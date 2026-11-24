@@ -81,6 +81,22 @@ struct SonyEqualizerCapabilities: Equatable, Sendable {
     }
 }
 
+enum SonyEqualizerULTMode: UInt8, CaseIterable, Identifiable, Sendable {
+    case off = 0
+    case ult1 = 1
+    case ult2 = 2
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .off: String(localized: "Off")
+        case .ult1: "ULT 1"
+        case .ult2: "ULT 2"
+        }
+    }
+}
+
 struct SonyBassBoost: Equatable, Sendable {
     let inquiryType: UInt8?
     private(set) var range: ClosedRange<Int>?
@@ -681,6 +697,7 @@ struct SonyEqualizer: Equatable, Sendable {
     private(set) var status: UInt8?
     private(set) var errorCodes: [UInt8]?
     private(set) var presetID: UInt8?
+    private(set) var ultMode: SonyEqualizerULTMode?
     private(set) var rawValues: [UInt8]?
 
     init(supportedFunctions: Set<UInt8> = [], generation: SonyProtocolInfo.Generation = .v2) {
@@ -703,18 +720,19 @@ struct SonyEqualizer: Equatable, Sendable {
 
     var isSupported: Bool { inquiryType != nil }
 
-    private var isOrdinary: Bool {
-        generation == .v1 ? inquiryType == 1 || inquiryType == 3 : inquiryType == 0 || inquiryType == 2 || inquiryType == 4
-    }
+    mutating func invalidatePresetInventory() { capabilities = nil }
+
+    var supportsULT: Bool { generation == .v2 && inquiryType == 3 }
+
+    private var parameterCountIndex: Int { supportsULT ? 4 : 3 }
 
     var queryPayloads: [[UInt8]] {
         guard let inquiryType else { return [] }
-        let capability: [[UInt8]] = [[0x50, inquiryType, 1]]
-        return isOrdinary ? capability + [[0x52, inquiryType], [0x5A, inquiryType], [0x56, inquiryType]] : capability
+        return [[0x50, inquiryType, 1], [0x52, inquiryType], [0x5A, inquiryType], [0x56, inquiryType]]
     }
 
     var parameterQueryPayload: [UInt8]? {
-        guard isOrdinary, let inquiryType else { return nil }
+        guard let inquiryType else { return nil }
         return [0x56, inquiryType]
     }
 
@@ -732,11 +750,12 @@ struct SonyEqualizer: Equatable, Sendable {
             ?? SonyEqualizerPreset(id: presetID, name: nil).title
     }
 
-    var canSelectPreset: Bool { isOrdinary && available == true && capabilities != nil }
+    var canSelectPreset: Bool { inquiryType != nil && available == true && capabilities != nil && (!supportsULT || ultMode != nil) }
 
     var flatSettings: EqualizerSettings? {
-        guard isOrdinary, let capabilities, let bandInformation,
+        guard let capabilities, let bandInformation,
               capabilities.levelSteps > 1, !bandInformation.isEmpty else { return nil }
+        if supportsULT, bandInformation.count > Int(Int8.max) { return nil }
         return EqualizerSettings(layout: bandInformation, levelSteps: capabilities.levelSteps,
                                  values: Array(repeating: 0, count: bandInformation.count))
     }
@@ -750,9 +769,31 @@ struct SonyEqualizer: Equatable, Sendable {
     }
 
     var canEdit: Bool {
-        canSelectPreset && (generation == .v1 ? inquiryType == 1 && presetID == EqualizerPreset.manual.rawValue : inquiryType != 2 && presetID != nil)
+        if supportsULT {
+            guard canSelectPreset, let presetID, presetID != 0xFF, settings != nil else { return false }
+            return EqualizerPreset(rawValue: presetID) != nil || capabilities?.presets.contains { $0.id == presetID } == true
+        }
+        return canSelectPreset && (generation == .v1 ? inquiryType == 1 && presetID == EqualizerPreset.manual.rawValue : inquiryType != 2 && presetID != nil)
             && flatSettings != nil
             && capabilities?.presets.contains { $0.id == EqualizerPreset.manual.rawValue } == true
+    }
+
+    var clearBassIndex: Int? {
+        guard let bandInformation, let first = bandInformation.firstIndex(of: .clearBass),
+              first == bandInformation.lastIndex(of: .clearBass) else { return nil }
+        return first
+    }
+
+    func displayedLevel(_ level: Int, at index: Int) -> Int {
+        guard ultMode == .ult2, index == clearBassIndex,
+              let offset = capabilities?.ultAdditionalSteps, let range = flatSettings?.levelRange else { return level }
+        return min(level + Int(offset), range.upperBound)
+    }
+
+    func settingLevel(_ displayedLevel: Int, at index: Int) -> Int {
+        guard ultMode == .ult2, index == clearBassIndex,
+              let offset = capabilities?.ultAdditionalSteps, let range = flatSettings?.levelRange else { return displayedLevel }
+        return max(displayedLevel - Int(offset), range.lowerBound)
     }
 
     var requiresManualSelection: Bool {
@@ -762,9 +803,15 @@ struct SonyEqualizer: Equatable, Sendable {
     }
 
     func presetPayload(_ preset: UInt8) -> [UInt8]? {
-        guard canSelectPreset, let inquiryType, generation != .v1 || preset != 0xFF,
+        guard canSelectPreset, let inquiryType, (generation != .v1 && !supportsULT) || preset != 0xFF,
               capabilities?.presets.contains(where: { $0.id == preset }) == true else { return nil }
+        if let ultMode { return [0x58, inquiryType, preset, ultMode.rawValue, 0] }
         return [0x58, inquiryType, preset, 0]
+    }
+
+    func ultModePayload(_ mode: SonyEqualizerULTMode) -> [UInt8]? {
+        guard supportsULT, canEdit, let inquiryType, let presetID, let rawValues else { return nil }
+        return [0x58, inquiryType, presetID, mode.rawValue, UInt8(rawValues.count)] + rawValues
     }
 
     func settingsPayload(_ settings: EqualizerSettings) -> [UInt8]? {
@@ -773,27 +820,40 @@ struct SonyEqualizer: Equatable, Sendable {
               settings.values.count == flatSettings.layout.count, let range = settings.levelRange,
               settings.values.allSatisfy(range.contains) else { return nil }
         let center = (Int(settings.levelSteps) - 1) / 2
+        if let ultMode, let presetID {
+            return [0x58, inquiryType, presetID, ultMode.rawValue, UInt8(settings.values.count)]
+                + settings.values.map { UInt8($0 + center) }
+        }
         return [0x58, inquiryType, generation == .v1 ? 0xFF : EqualizerPreset.manual.rawValue, UInt8(settings.values.count)]
             + settings.values.map { UInt8($0 + center) }
     }
 
-    func acceptsSetPayload(_ payload: [UInt8]) -> Bool {
-        guard payload.count >= 4, payload[0] == 0x58, payload[1] == inquiryType,
-              payload.count == 4 + Int(payload[3]) else { return false }
-        if payload[3] == 0 { return presetPayload(payload[2]) == payload }
-        guard payload[2] == (generation == .v1 ? 0xFF : EqualizerPreset.manual.rawValue), let flatSettings,
-              payload[3] == flatSettings.layout.count else { return false }
+    func acceptsSetPayload(_ payload: [UInt8], changingULTMode: Bool = false) -> Bool {
+        let start = parameterCountIndex + 1
+        guard payload.count >= start, payload[0] == 0x58, payload[1] == inquiryType,
+              payload.count == start + Int(payload[parameterCountIndex]) else { return false }
+        if payload[parameterCountIndex] == 0 { return presetPayload(payload[2]) == payload }
+        if supportsULT, changingULTMode, let mode = SonyEqualizerULTMode(rawValue: payload[3]) {
+            return ultModePayload(mode) == payload
+        }
+        guard let flatSettings, payload[parameterCountIndex] == flatSettings.layout.count else { return false }
         let center = (Int(flatSettings.levelSteps) - 1) / 2
         let settings = EqualizerSettings(layout: flatSettings.layout, levelSteps: flatSettings.levelSteps,
-                                         values: payload.dropFirst(4).map { Int($0) - center })
+                                         values: payload.dropFirst(start).map { Int($0) - center })
         return settingsPayload(settings) == payload
     }
 
     func confirmationValue(_ payload: [UInt8]) -> [UInt8] {
+        if supportsULT { return payload[4] == 0 ? Array(payload[2..<4]) : Array(payload.dropFirst(2)) }
         if generation == .v1, payload[0] == 0x58, payload[2] == 0xFF, payload[3] != 0 {
             return [EqualizerPreset.manual.rawValue] + payload.dropFirst(3)
         }
         return payload[2] == EqualizerPreset.manual.rawValue && payload[3] != 0 ? Array(payload.dropFirst(2)) : [payload[2]]
+    }
+
+    func confirms(_ expected: [UInt8], value: [UInt8]?) -> Bool {
+        guard let value else { return false }
+        return expected == value || (expected.count == (supportsULT ? 2 : 1) && value.starts(with: expected))
     }
 
     @discardableResult
@@ -804,7 +864,6 @@ struct SonyEqualizer: Equatable, Sendable {
             guard let capabilities = SonyEqualizerCapabilities(payload: payload, generation: generation) else { return false }
             self.capabilities = capabilities
         case 0x53, 0x55:
-            guard isOrdinary else { return false }
             if inquiryType == 4 {
                 guard payload.count >= 4, payload.count == 4 + Int(payload[3]) else { return false }
                 errorCodes = Array(payload.dropFirst(4))
@@ -814,22 +873,26 @@ struct SonyEqualizer: Equatable, Sendable {
             }
             status = payload[2]
         case 0x5B:
-            guard isOrdinary, payload.count >= 3, payload.count == 3 + 3 * Int(payload[2]) else { return false }
+            guard payload.count >= 3, payload.count == 3 + 3 * Int(payload[2]) else { return false }
             bandInformation = stride(from: 3, to: payload.count, by: 3).map { index in
                 SonyEqualizerBand(informationType: payload[index],
                                   value: UInt16(payload[index + 1]) << 8 | UInt16(payload[index + 2]))
             }
         case 0x57, 0x59:
-            guard isOrdinary, payload.count >= 4, payload.count == 4 + Int(payload[3]) else { return false }
-            if payload[3] != 0, let flatSettings {
+            let start = parameterCountIndex + 1
+            guard payload.count >= start, payload.count == start + Int(payload[parameterCountIndex]) else { return false }
+            if supportsULT {
+                guard payload[4] <= Int8.max else { return false }
+                ultMode = SonyEqualizerULTMode(rawValue: payload[3])
+            } else if payload[3] != 0, let flatSettings {
                 guard payload[3] == flatSettings.layout.count,
                       payload.dropFirst(4).allSatisfy({ $0 < flatSettings.levelSteps }) else { return false }
             } else if generation == .v1, payload[3] != 0, let capabilities {
                 guard payload.dropFirst(4).allSatisfy({ $0 < capabilities.levelSteps }) else { return false }
             }
             presetID = generation == .v1 && payload[2] == 0xFF ? nil : payload[2]
-            if generation == .v1 || payload[3] != 0 {
-                rawValues = payload[3] == 0 ? nil : Array(payload.dropFirst(4))
+            if supportsULT || generation == .v1 || payload[3] != 0 {
+                rawValues = payload[parameterCountIndex] == 0 ? nil : Array(payload.dropFirst(start))
             }
         default:
             return false

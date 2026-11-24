@@ -82,6 +82,7 @@ struct SonyEarTipFit: Equatable, Sendable {
     static let capabilityQueryPayload: [UInt8] = [0xF0, 0x06]
     static let statusQueryPayload: [UInt8] = [0xF2, 0x06]
     static let operationQueryPayload: [UInt8] = [0xF6, 0x06]
+    static let selectionStatusQueryPayload: [UInt8] = [0xF2, 0x07]
     static let selectionQueryPayload: [UInt8] = [0xF6, 0x07]
     static let enterModePayload: [UInt8] = [0xF4, 0x06, 0x01, 0x01]
     static let exitModePayload: [UInt8] = [0xF4, 0x06, 0x00, 0x01]
@@ -89,6 +90,7 @@ struct SonyEarTipFit: Equatable, Sendable {
     let isSupported: Bool
     let supportsEarpieceSelection: Bool
     private(set) var capability: Capability?
+    private(set) var selectionAvailable: Bool?
     private(set) var selectedSeries: Series?
     private(set) var status: Status?
     private(set) var operation: Operation?
@@ -105,10 +107,20 @@ struct SonyEarTipFit: Equatable, Sendable {
     }
 
     var queryPayloads: [[UInt8]] {
-        guard isSupported else { return [] }
-        return (capability == nil ? [Self.capabilityQueryPayload] : [])
-            + [Self.statusQueryPayload, Self.operationQueryPayload]
-            + (supportsEarpieceSelection ? [Self.selectionQueryPayload] : [])
+        let measurement = isSupported ? (capability == nil ? [Self.capabilityQueryPayload] : [])
+            + [Self.statusQueryPayload, Self.operationQueryPayload] : []
+        return measurement + (supportsEarpieceSelection ? [Self.selectionStatusQueryPayload, Self.selectionQueryPayload] : [])
+    }
+
+    var selectionTitle: String {
+        selectedSeries?.title ?? String(localized: "Unknown")
+    }
+
+    mutating func resetMeasurement() {
+        capability = nil
+        status = nil
+        operation = nil
+        result = nil
     }
 
     static func startPayload(series: Series) -> [UInt8] {
@@ -121,14 +133,21 @@ struct SonyEarTipFit: Equatable, Sendable {
 
     @discardableResult
     mutating func update(_ payload: [UInt8], frameType: UInt8 = 0x0C) -> Bool {
-        guard isSupported, frameType == 0x0C, payload.count >= 2 else { return false }
+        guard frameType == 0x0C, payload.count >= 2 else { return false }
         if payload[1] == 0x07 {
-            guard supportsEarpieceSelection, payload.count == 3, payload[0] == 0xF7 || payload[0] == 0xF9,
-                  let series = Series(rawValue: payload[2]) else { return false }
-            selectedSeries = series
+            guard supportsEarpieceSelection, payload.count == 3 else { return false }
+            switch payload[0] {
+            case 0xF3, 0xF5:
+                guard payload[2] <= 1 else { return false }
+                selectionAvailable = payload[2] == 0
+            case 0xF7, 0xF9:
+                guard let series = Series(rawValue: payload[2]) else { return false }
+                selectedSeries = series
+            default: return false
+            }
             return true
         }
-        guard payload[1] == 0x06 else { return false }
+        guard isSupported, payload[1] == 0x06 else { return false }
         switch payload[0] {
         case 0xF1:
             guard payload.count >= 4 else { return false }
@@ -168,5 +187,70 @@ struct SonyEarTipFit: Equatable, Sendable {
             return false
         }
         return true
+    }
+}
+
+struct SonyWearingPosition: Equatable, Sendable {
+    enum Shape: UInt8, Sendable { case canal, openRing }
+
+    enum Result: String, Sendable {
+        case correct, reversedSides, insideOut, upsideDown, adjust, failed
+
+        var message: String {
+            switch self {
+            case .correct: String(localized: "The earbuds are oriented correctly.")
+            case .reversedSides: String(localized: "Check that the left and right earbuds are in the correct ears.")
+            case .insideOut: String(localized: "Check that the earbuds are facing inward correctly.")
+            case .upsideDown: String(localized: "Check that neither earbud is upside down.")
+            case .adjust: String(localized: "Adjust how the earbuds sit, then look straight ahead and try again.")
+            case .failed: String(localized: "The earbuds could not complete the position check.")
+            }
+        }
+    }
+
+    static let capabilities: Set<UInt8> = [0xF6, 0xFF]
+    static let frameType: UInt8 = 0x0E
+    static let infoQuery: [UInt8] = [0xF0, 0x07]
+    static let statusQuery: [UInt8] = [0xF2, 0x08]
+    static let startPayload: [UInt8] = [0xF8, 0x08, 0]
+
+    let isSupported: Bool
+    private(set) var shape: Shape?
+    private(set) var duration: UInt8?
+    private(set) var available: Bool?
+
+    init(supportedFunctions2: Set<UInt8> = []) {
+        isSupported = !supportedFunctions2.isDisjoint(with: Self.capabilities)
+    }
+
+    var queryPayloads: [[UInt8]] { isSupported ? [Self.infoQuery, Self.statusQuery] : [] }
+
+    @discardableResult
+    mutating func update(_ payload: [UInt8]) -> Bool {
+        guard isSupported else { return false }
+        if payload.count == 4, payload.starts(with: [0xF1, 7]), let shape = Shape(rawValue: payload[2]), payload[3] < 128 {
+            self.shape = shape
+            duration = payload[3]
+            return true
+        }
+        guard payload.count == 3, [0xF3, 0xF5].contains(payload[0]), payload[1] == 8, payload[2] <= 1 else { return false }
+        available = payload[2] == 0
+        return true
+    }
+
+    static func decodeResult(_ payload: [UInt8]) -> Result? {
+        guard payload.count >= 16, payload.starts(with: [0xF9, 8]), payload[2] <= 1 else { return nil }
+        let count = Int(payload[3])
+        guard payload.count == 16 + 4 * count,
+              (0..<(2 * count)).allSatisfy({ payload[4 + 2 * $0] <= 5 && payload[5 + 2 * $0] <= 1 }) else { return nil }
+        if payload[2] == 1 { return .failed }
+        let left = payload[4..<(4 + 2 * count)]
+        let right = payload[(4 + 2 * count)..<(4 + 4 * count)]
+        guard left.elementsEqual(right) else { return .adjust }
+        let issues = stride(from: 4, to: 4 + 2 * count, by: 2).filter { payload[$0 + 1] == 1 }.map { payload[$0] }
+        if issues.contains(4) { return .reversedSides }
+        if issues.contains(2) { return .insideOut }
+        if issues.contains(3) { return .upsideDown }
+        return issues.isEmpty ? .correct : .adjust
     }
 }

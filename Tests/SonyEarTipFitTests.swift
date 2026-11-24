@@ -6,7 +6,7 @@ final class SonyEarTipFitTests: XCTestCase {
         for functions: Set<UInt8> in [[], [0xF0], [0xF1, 0xF5, 0xF7]] {
             var fit = SonyEarTipFit(supportedFunctions: functions)
             XCTAssertFalse(fit.isSupported)
-            XCTAssertTrue(fit.queryPayloads.isEmpty)
+            XCTAssertEqual(fit.queryPayloads, functions.contains(0xF7) ? [[0xF2, 7], [0xF6, 7]] : [])
             for payload in validPayloads { XCTAssertFalse(fit.update(payload)) }
         }
         var fit = SonyEarTipFit(supportedFunctions: [0xF6])
@@ -140,7 +140,7 @@ final class SonyEarTipFitTests: XCTestCase {
     func testSelectedSeriesReadRequiresAdvertisedSupportAndPreservesNotDetermined() {
         var fit = SonyEarTipFit(supportedFunctions: [0xF6, 0xF7])
         XCTAssertTrue(fit.supportsEarpieceSelection)
-        XCTAssertEqual(fit.queryPayloads, [[0xF0, 6], [0xF2, 6], [0xF6, 6], [0xF6, 7]])
+        XCTAssertEqual(fit.queryPayloads, [[0xF0, 6], [0xF2, 6], [0xF6, 6], [0xF2, 7], [0xF6, 7]])
         XCTAssertTrue(fit.update([0xF1, 6, 5, 1, 1, 1, 2]))
         XCTAssertNil(fit.measurementSeries)
         for value: UInt8 in [0, 1, 2, 3, 255] {
@@ -153,12 +153,35 @@ final class SonyEarTipFitTests: XCTestCase {
         XCTAssertEqual(fit.selectedSeries?.title, "Not determined")
         let prior = fit
         for payload: [UInt8] in [[0xF7, 7], [0xF7, 7, 1, 0], [0xF7, 7, 4], [0xF9, 7, 254],
-                                 [0xF1, 7, 1], [0xF3, 7, 0], [0xF5, 7, 1], [0xF8, 7, 2]] {
+                                 [0xF1, 7, 1], [0xF3, 7], [0xF5, 7, 1, 0], [0xF8, 7, 2]] {
             XCTAssertFalse(fit.update(payload))
             XCTAssertEqual(fit, prior)
         }
         XCTAssertFalse(fit.update([0xF7, 7, 1], frameType: 0x0E))
         XCTAssertEqual(fit, prior)
+    }
+
+    func testEarpieceSelectionReportsAvailabilityAndSeriesWithoutFitMeasurement() {
+        var selection = SonyEarTipFit(supportedFunctions: [0xF7])
+        XCTAssertFalse(selection.isSupported)
+        XCTAssertTrue(selection.supportsEarpieceSelection)
+        XCTAssertEqual(selection.queryPayloads, [[0xF2, 7], [0xF6, 7]])
+        XCTAssertEqual(selection.selectionTitle, "Unknown")
+        XCTAssertFalse(selection.update([0xF3, 6, 0, 0, 1, 0]))
+        XCTAssertTrue(selection.update([0xF3, 7, 1]))
+        XCTAssertEqual(selection.selectionAvailable, false)
+        XCTAssertTrue(selection.update([0xF7, 7, 2]))
+        XCTAssertEqual(selection.selectionTitle, "Hybrid silicone")
+        XCTAssertTrue(selection.update([0xF5, 7, 0]))
+        XCTAssertEqual(selection.selectionAvailable, true)
+        XCTAssertEqual(selection.selectedSeries, .hybrid)
+        XCTAssertFalse(selection.update([0xF9, 7, 0xFE]))
+        XCTAssertEqual(selection.selectedSeries, .hybrid)
+        XCTAssertTrue(selection.update([0xF9, 7, 0xFF]))
+        XCTAssertEqual(selection.selectionTitle, "Not determined")
+        XCTAssertFalse(selection.update([0xF5, 7, 0xFF]))
+        XCTAssertEqual(selection.selectionAvailable, true)
+        XCTAssertNil(selection.measurementSeries)
     }
 
     func testFallbackSeriesIsUsedOnlyWithoutSelectionSupport() {

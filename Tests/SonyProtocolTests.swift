@@ -108,7 +108,7 @@ final class SonyProtocolTests: XCTestCase {
         let packet = SonyFrameCodec.encode(type: 0x0C, sequence: 0, payload: [0x25, 0, 60, 0])
         for split in 1..<packet.count {
             let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
-            controller.simulateDeviceConnection(named: "WF-1000XM5")
+            controller.simulateDeviceConnection(named: "WH-1000XM5")
             defer { controller.simulateControlLoss() }
             controller.simulateProtocolData(packet.prefix(split))
             controller.refreshEqualizer()
@@ -669,8 +669,10 @@ final class SonyProtocolTests: XCTestCase {
         XCTAssertEqual(SonyBatteries.queryTypes(supportedFunctions: []), [])
         XCTAssertEqual(SonyBatteries.queryTypes(supportedFunctions: [0x20]), [0x00])
         XCTAssertEqual(SonyBatteries.queryTypes(supportedFunctions: [0x21, 0x22]), [0x01, 0x02])
-        XCTAssertEqual(SonyBatteries.queryTypes(supportedFunctions: [0x28, 0x29, 0x2A]), [0x08, 0x09, 0x0A])
-        XCTAssertEqual(SonyBatteries.queryTypes(supportedFunctions: [0x20, 0x28, 0x21, 0x29, 0x22, 0x2A]), [0x00, 0x01, 0x02])
+        XCTAssertEqual(SonyBatteries.queryTypes(supportedFunctions: [0x28, 0x29, 0x2A]), [0x08, 0x0A])
+        XCTAssertEqual(SonyBatteries.queryTypes(supportedFunctions: [0x29, 0x2A]), [0x09, 0x0A])
+        XCTAssertEqual(SonyBatteries.queryTypes(supportedFunctions: [0x21, 0x28, 0x2A]), [0x01, 0x0A])
+        XCTAssertEqual(SonyBatteries.queryTypes(supportedFunctions: [0x20, 0x28, 0x21, 0x29, 0x22, 0x2A]), [0x00, 0x02])
         var batteries = SonyBatteries()
         XCTAssertTrue(batteries.update([0x23, 0x01, 70, 0, 80, 1]))
         XCTAssertEqual(batteries.left?.level, 70)
@@ -1090,7 +1092,8 @@ final class SonyProtocolTests: XCTestCase {
             XCTAssertEqual(controller.headGesturePractice.isSupported,
                            [.wfXM5, .wfXM6, .whXM6, .wh1000XX].contains(model), model.name)
             XCTAssertEqual(controller.touchAssignments.keys != nil, [.wfXM5, .wfXM6].contains(model), model.name)
-            XCTAssertEqual(controller.equalizer.isSupported, ![.whULT900N, .wh1000XX].contains(model), model.name)
+            XCTAssertEqual(controller.equalizer.isSupported, model != .wh1000XX, model.name)
+            XCTAssertEqual(controller.equalizer.supportsULT, model == .whULT900N, model.name)
             if legacy {
                 XCTAssertEqual(controller.equalizer.generation, .v1, model.name)
                 XCTAssertEqual(controller.equalizer.inquiryType, 1, model.name)
@@ -2589,8 +2592,9 @@ final class SonyReceiveSequenceTests: XCTestCase {
         XCTAssertEqual(controller.batteryLevel, 50)
         controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 1, payload: [0x25, 0, 70, 0]))
         XCTAssertEqual(controller.batteryLevel, 70)
-        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 1, payload: [0x25, 0, 80, 0]), beginConnection: true)
-        XCTAssertEqual(controller.batteryLevel, 80)
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x0C, sequence: 1, payload: [0x01, 0, 0x40, 0]), beginConnection: true)
+        XCTAssertEqual(controller.protocolInformation?.generation, .v1)
+        XCTAssertNil(controller.batteryLevel)
         XCTAssertEqual(controller.linkState, .handshaking)
     }
 

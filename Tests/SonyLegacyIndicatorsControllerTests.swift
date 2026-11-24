@@ -31,6 +31,7 @@ final class SonyLegacyIndicatorsControllerTests: XCTestCase {
             XCTAssertEqual(controller.audioFeatures, SonyAudioFeatures())
             XCTAssertFalse(payloads(controller).contains([0x12, 1]))
             XCTAssertFalse(payloads(controller).contains([0x12, 2]))
+            XCTAssertTrue(controller.diagnosticReport.contains("Headphone codec observed with selected source: Unavailable"))
         }
     }
 
@@ -118,7 +119,7 @@ final class SonyLegacyIndicatorsControllerTests: XCTestCase {
         acknowledgeAll(controller)
         for read in reads { deliver(read.reply, to: controller) }
         XCTAssertEqual(controller.audioCodec, .ldac)
-        XCTAssertEqual(controller.upscalingIndicatorType, .dseeHXAI)
+        XCTAssertEqual(controller.upscalingIndicatorType, .extreme)
         XCTAssertEqual(controller.upscalingIndicatorStatus, .valid)
         XCTAssertEqual(controller.leftConnected, true)
         XCTAssertEqual(controller.rightConnected, false)
@@ -363,8 +364,8 @@ final class SonyLegacyIndicatorsControllerTests: XCTestCase {
         let snapshot = try XCTUnwrap(reply.snapshot)
         let device = try XCTUnwrap(snapshot.devices.first)
         XCTAssertEqual(device.codec, SonyAudioCodec.ldac.title)
-        XCTAssertEqual(device.upscalingType, SonyLegacyIndicators.UpscalingType.dseeHXAI.title)
-        XCTAssertEqual(device.upscalingStatus, SonyLegacyIndicators.UpscalingStatus.valid.title)
+        XCTAssertEqual(device.upscalingType, SonyDSEEType.extreme.title)
+        XCTAssertEqual(device.upscalingStatus, SonyUpscalingStatus.valid.title)
         XCTAssertNil(device.dsee)
         XCTAssertNil(device.dseeTitle)
         XCTAssertEqual(try JSONDecoder().decode(SonyPreferencePaneSnapshot.self, from: JSONEncoder().encode(snapshot)), snapshot)

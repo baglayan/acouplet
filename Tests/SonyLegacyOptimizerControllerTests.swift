@@ -3,6 +3,81 @@ import XCTest
 
 final class SonyLegacyOptimizerControllerTests: XCTestCase {
     @MainActor
+    func testModernOptimizersDiscoverOwnedStateAndReadFreshResults() throws {
+        let variants: [(UInt8, [UInt8], [UInt8], Bool?, Double?)] = [
+            (0, [5, 3, 4], [1, 9], true, 0.9),
+            (1, [5, 3], [1], true, nil),
+            (2, [5, 4], [9], nil, 0.9)
+        ]
+        for (inquiry, capability, result, personal, pressure) in variants {
+            let controller = try modernController(function: 0x80 + inquiry)
+            defer { controller.simulateControlLoss() }
+            XCTAssertTrue(controller.beginLegacyOptimizer())
+            let id = try XCTUnwrap(controller.legacyOptimizerTransition?.id)
+            let optimizerQueries: [[UInt8]] = [[0x80, inquiry], [0x82, inquiry], [0x86, inquiry]]
+            for (query, response) in zip(optimizerQueries, [[0x81, inquiry] + capability, [0x83, inquiry, 0, 0], [0x87, inquiry] + result]) {
+                deliver([response[0], 0x30] + response.dropFirst(2), to: controller)
+                XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .checking)
+                deliver(response, to: controller)
+                try acknowledge(query, on: controller)
+            }
+            XCTAssertTrue(controller.canStartLegacyOptimizer)
+            let expectedStart: [UInt8] = [0x84, inquiry, 0, 1]
+            XCTAssertFalse(payloads(controller).contains(expectedStart))
+            controller.startLegacyOptimizer(id: id)
+            try acknowledge(expectedStart, on: controller)
+            try acknowledge([0x82, inquiry], on: controller)
+            deliver([0x83, inquiry, 0, 0], to: controller)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .starting)
+            deliver([0x85, (inquiry + 1) % 3, 0, 0x10], to: controller)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .starting)
+            deliver([0x85, inquiry, 0, 0x10], to: controller)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .running)
+            deliver([0x89, inquiry] + result, to: controller)
+            XCTAssertNil(controller.legacyOptimizerTransition?.result)
+            deliver([0x85, inquiry, 0, 0x11], to: controller)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .readingResult)
+            try acknowledge([0x86, inquiry], on: controller)
+            deliver([0x89, inquiry] + result, to: controller)
+            XCTAssertNil(controller.legacyOptimizerTransition?.result)
+            deliver([0x87, inquiry] + result, to: controller)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .completed)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.result?.personalMeasured, personal)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.result?.pressureAtmospheres, pressure)
+        }
+    }
+
+    @MainActor
+    func testModernOptimizerBlocksUnavailableOrAlreadyRunningTestThenConfirmsOwnCancellation() throws {
+        for (availability, phase): (UInt8, UInt8) in [(1, 0), (0, 0x10), (0, 0)] {
+            let controller = try modernController(function: 0x82)
+            defer { controller.simulateControlLoss() }
+            XCTAssertTrue(controller.beginLegacyOptimizer())
+            let id = try XCTUnwrap(controller.legacyOptimizerTransition?.id)
+            for response: [UInt8] in [[0x81, 2, 5, 4], [0x83, 2, availability, phase], [0x87, 2, 0]] {
+                deliver(response, to: controller)
+                try acknowledge([response[0] - 1, 2], on: controller)
+            }
+            controller.startLegacyOptimizer(id: id)
+            if availability != 0 || phase != 0 {
+                XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .unavailable)
+                XCTAssertFalse(payloads(controller).contains { $0.first == 0x84 })
+                continue
+            }
+            try acknowledge([0x84, 2, 0, 1], on: controller)
+            deliver([0x83, 2, 0, 0x10], to: controller)
+            try acknowledge([0x82, 2], on: controller)
+            controller.cancelLegacyOptimizer(id: id)
+            try acknowledge([0x84, 2, 0, 0], on: controller)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .cancelling)
+            deliver([0x85, 1, 0, 0], to: controller)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .cancelling)
+            deliver([0x85, 2, 0, 0], to: controller)
+            XCTAssertEqual(controller.legacyOptimizerTransition?.phase, .cancelled)
+        }
+    }
+
+    @MainActor
     func testEndAndMeasurementsInOneReadCannotCompleteNewResultQuery() throws {
         for deferred in [false, true] {
             let controller = readyController()
@@ -371,6 +446,25 @@ final class SonyLegacyOptimizerControllerTests: XCTestCase {
     private func readyController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateGalleryDevice(model: .whXM4)
+        return controller
+    }
+
+    @MainActor
+    private func modernController(function: UInt8) throws -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        func acknowledgeCommands() throws {
+            for _ in 0..<40 {
+                guard let frame = controller.simulatedPendingFrame else { return }
+                try acknowledge(frame.payload, on: controller)
+            }
+        }
+        controller.simulateDeviceConnection(named: "WH-1000XM5", controlBusy: true)
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+        try acknowledgeCommands()
+        controller.simulateProtocolMessage([0x07, 0, 1, function, 0])
+        try acknowledgeCommands()
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(payloads(controller).contains { [0x80, 0x82, 0x84, 0x86].contains($0[0]) })
         return controller
     }
 

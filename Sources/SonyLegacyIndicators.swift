@@ -1,30 +1,6 @@
 import Foundation
 
 struct SonyLegacyIndicators: Equatable, Sendable {
-    enum UpscalingType: UInt8, Sendable {
-        case dseeHX = 0, dsee = 1, dseeHXAI = 2
-
-        var title: String {
-            switch self {
-            case .dseeHX: "DSEE HX"
-            case .dsee: "DSEE"
-            case .dseeHXAI: "DSEE Extreme"
-            }
-        }
-    }
-
-    enum UpscalingStatus: UInt8, Sendable {
-        case off = 0, valid = 1, invalid = 2
-
-        var title: String {
-            switch self {
-            case .off: String(localized: "Off")
-            case .valid: String(localized: "Active")
-            case .invalid: String(localized: "Inactive")
-            }
-        }
-    }
-
     static let codecFunction: UInt8 = 0x13
     static let upscalingFunction: UInt8 = 0x12
     static let connectionStatusFunction: UInt8 = 0x17
@@ -58,8 +34,12 @@ struct SonyLegacyIndicators: Equatable, Sendable {
         }
     }
 
-    var upscalingType: UpscalingType? { upscalingTypeValue.flatMap(UpscalingType.init(rawValue:)) }
-    var upscalingStatus: UpscalingStatus? { upscalingStatusValue.flatMap(UpscalingStatus.init(rawValue:)) }
+    var upscalingType: SonyDSEEType? {
+        guard let upscalingTypeValue, upscalingTypeValue < SonyDSEEType.ultimate.rawValue else { return nil }
+        return SonyDSEEType(rawValue: upscalingTypeValue)
+    }
+
+    var upscalingStatus: SonyUpscalingStatus? { upscalingStatusValue.flatMap(SonyUpscalingStatus.init(rawValue:)) }
 
     var leftConnected: Bool? {
         switch leftConnectionValue {

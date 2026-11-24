@@ -60,12 +60,27 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     enum Setting: Hashable {
-        case dsee
+        case dsee, soundLeakageReduction, voiceContents
         case legacySoundEffect(SonyLegacySoundEffect.Kind)
+        case bassBoost, lrBalanceCorrection, turnKeyEQ, ultSoundEffectAssignment, customSoundEffect
+        case soundEffect, customEQ
         case system(SonySystemFeature)
         case automaticPowerOff, voiceAssistant, sidetone, touchAssignments, touchCustomActions, speakToChatOptions
-        case voiceGuidance, voiceGuidanceVolume
+        case voiceGuidance, voiceGuidanceVolume, voiceGuidanceLanguage
+        case voiceGuidanceTone(SonyVoiceGuidance.Tone)
+        case soundPressureMode, musicHandover, microphoneOperation, adaptiveVolumeWithLimitation
+        case maxVolumeEnabled, maxVolumePreset
         case batteryCare, autoPowerSave, powerSaveEffect, touchPanelBacklight, stamina, powerSavingMode, bluetoothStandby, autoStandby
+        case speakerLighting(SonySpeakerLighting.Parameter)
+        case speakerDJ
+        case speakerKaraoke(SonyKaraoke.Setting)
+        case auracastScan, auracastReception
+        case leAudioStandby
+        case tvSoundBooster
+        case soundFieldOptimization
+        case upmix(SonyUpmix.Variant)
+        case backgroundMusic
+        case listeningModeAssignments
         case equalizer, equalizerReadback, playbackVolume, callVolume, noiseControl, noiseToggle, noiseTest
     }
 
@@ -92,6 +107,22 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         var timeout: DispatchWorkItem?
     }
 
+    private struct PartyLightingDrag {
+        enum Target: Equatable {
+            case lighting(SonySpeakerLighting.PartyItem)
+            case dj(SonyDJControl.Effect)
+        }
+
+        let target: Target
+        var move: [UInt8]
+        var started = false
+        var ending = false
+
+        func payload(operation: UInt8) -> [UInt8] {
+            [move[0], move[1], operation] + move.dropFirst(3)
+        }
+    }
+
     private struct BluetoothStandbyChange {
         let requestID: UUID
         let session: UInt64
@@ -116,6 +147,17 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         let requestID: UUID?
         let resolvesUnconfirmed: Bool
         var isObsolete = false
+    }
+
+    private struct CodecSource: Equatable {
+        let session: UInt64
+        let generation: UInt64
+        let connectionID: UInt8
+    }
+
+    private struct CodecRead {
+        var transmissionOrdinal: UInt64?
+        var source: (source: CodecSource, deadline: ContinuousClock.Instant)?
     }
 
     private struct SystemRead {
@@ -157,6 +199,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         let requestID: UUID?
         var transmitted = false
         var timedOut = false
+        var isObsolete = false
     }
 
     private struct PlaybackRead {
@@ -170,7 +213,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         var refreshRequested = false
     }
 
-    private enum PlaybackRefresh: Hashable { case all, musicVolume }
+    private enum PlaybackRefresh: Hashable { case all, musicVolume, legacyMetadata }
 
     private struct InitialFeatureReadSequence {
         var groups: [[[UInt8]]] = []
@@ -226,6 +269,14 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         var timedOut = false
     }
 
+    private struct ExposureRead {
+        let id = UUID()
+        let current: Bool
+        let deadline = DispatchTime.now() + 120
+        var transmissionOrdinal: UInt64?
+        var history: SonyExposureHistory
+    }
+
     private struct WearingStatusRead {
         var transmissionOrdinal: UInt64 = 0
         let id = UUID()
@@ -277,6 +328,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     @Published private(set) var noiseControlDisplayState: SonyNoiseControl.State?
     let noiseModeChanges = PassthroughSubject<SonyNoiseModeChange, Never>()
     let audioSourceChanges = PassthroughSubject<SonyMultipointDevice, Never>()
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    let musicSourceConfirmations = PassthroughSubject<SonyMultipointDevice?, Never>()
+    #endif
     @Published private(set) var batteries = SonyBatteries()
     @Published private(set) var isChargingInCase = false
     private var chargingCaseTimeout: DispatchWorkItem?
@@ -322,7 +376,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     @Published private(set) var customEqualizer = EqualizerSettings.flat
     @Published private(set) var equalizerReadbackID: UUID?
     @Published private var requestedEqualizerPayload: [UInt8]?
+    private var requestedEqualizerULTModeChange = false
     @Published private(set) var firmwareVersion: String?
+    @Published private(set) var displayFirmwareVersion: String?
+    var firmwareVersionLabel: String? { displayFirmwareVersion ?? firmwareVersion }
     @Published private(set) var firmwareUpdateIdentity: SonyFirmwareUpdateIdentity?
     @Published private(set) var protocolVersion: UInt32?
     @Published private(set) var protocolInformation: SonyProtocolInfo?
@@ -336,19 +393,42 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     @Published private(set) var audioFeatures = SonyAudioFeatures()
     @Published private(set) var systemFeatures = SonySystemFeatures()
     @Published private(set) var powerFeatures = SonyPowerFeatures()
+    @Published private(set) var speakerLighting = SonySpeakerLighting()
+    @Published private(set) var djControl = SonyDJControl()
+    @Published private(set) var karaoke = SonyKaraoke()
+    @Published private(set) var auracast = SonyAuracast()
+    @Published private(set) var lightingModeAlert: SonyConnectionAlert?
     @Published private(set) var bluetoothStandbyAlert: SonyConnectionAlert?
+    @Published private(set) var turnKeyImportAlert: SonyConnectionAlert?
+    @Published private var turnKeyImportJudged = false
+    private var turnKeyImportReply: [UInt8]?
+    private var ultAssignmentBaseline: SonyULTSoundEffectAssignment?
+    private var customSoundEffectBaseline: SonyCustomSoundEffect?
+    private var soundEffectSelectionBeforeWrite: UInt8?
+    private var customEQBeforeWrite: SonyCustomEQ?
     @Published private(set) var touchAssignments = SonyTouchAssignments()
     @Published private(set) var voiceGuidance = SonyVoiceGuidance()
     @Published private(set) var earTipFit = SonyEarTipFit()
     @Published private(set) var earTipFitTransition: SonyEarTipFitTransition?
+    @Published private(set) var wearingPosition = SonyWearingPosition()
+    @Published private(set) var checkingWearingPosition = false
+    @Published private(set) var wearingPositionResult: SonyWearingPosition.Result?
+    @Published private(set) var wearingPositionTimedOut = false
     @Published private(set) var headGesturePractice = SonyHeadGesturePractice()
     @Published private(set) var headGesturePracticeTransition: SonyHeadGesturePracticeTransition?
     @Published private(set) var earbudFinder: EarbudFinderController?
     private var earbudFinderObservation: AnyCancellable?
     @Published private(set) var soundPressure = SonySoundPressure()
+    @Published private(set) var volumeProtection = SonyVolumeProtection()
+    @Published private(set) var usbProtection = SonyUSBProtection()
     @Published private(set) var soundPressureReadError: String?
     @Published private(set) var soundPressureAutomaticRefreshSuspended = false
     @Published private var soundPressureRead: SoundPressureRead?
+    @Published private(set) var exposureHistory: SonyExposureHistory?
+    @Published private(set) var currentExposure: SonyExposureHistory?
+    @Published private(set) var exposureReadError: String?
+    @Published private var exposureRequest: UUID?
+    @Published private var exposureRequiresReconnect = false
     @Published private(set) var wearingStatus = SonyWearingStatus()
     @Published private(set) var wearingStatusReadID: UUID?
     @Published private(set) var playback = SonyPlayback()
@@ -360,10 +440,28 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     @Published private(set) var pendingPlaybackCommand: SonyPlaybackCommand?
     @Published private(set) var playbackReadError: String?
     @Published private(set) var multipoint = SonyMultipoint()
-    @Published private(set) var sourceTransition: SonySourceTransition?
+    @Published private(set) var linkAutoSwitch = SonyLinkAutoSwitch()
+    @Published private(set) var microphoneOperation = SonyMicrophoneOperation()
+    @Published private(set) var adaptiveVolumeWithLimitation = SonyAdaptiveVolumeWithLimitation()
+    @Published private(set) var adaptiveVolumeCaution: SonyConnectionAlert?
+    @Published private(set) var voiceAssistantSideAlert: SonyVoiceAssistantSideAlert?
+    @Published private(set) var voiceAssistantSetupOptions: [SonyVoiceAssistantOption]?
+    @Published private(set) var leAudioRestrictions = SonyLEAudioRestrictions()
+    @Published private(set) var leAudioStandby = SonyLEAudioStandby()
+    @Published private(set) var leAudioCapabilities = SonyLEAudioCapabilities()
+    @Published private(set) var sourceTransition: SonySourceTransition? {
+        didSet {
+            if let sourceTransition, sourceTransition.requestID != oldValue?.requestID {
+                invalidateCodecSource()
+            }
+        }
+    }
+    private var sourceSelectionAuthorization: (requestID: UUID, payload: [UInt8], isCurrent: () -> Bool)?
     @Published private(set) var deviceActionTransition: SonyDeviceActionTransition?
     @Published private(set) var multipointTransition: SonyMultipointTransition?
     @Published private var inventoryRead: InventoryRead?
+    @Published private(set) var legacyPairingModeRequest: Bool?
+    @Published private(set) var legacyPairingModeError: String?
     @Published private(set) var lastConnectionAlert: SonyConnectionAlert?
     @Published private(set) var connectionTransition: SonyConnectionTransition?
     @Published private(set) var connectionModeError: String?
@@ -434,16 +532,23 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     var rightConnected: Bool? {
         protocolInformation?.generation == .v1 ? legacyIndicators.rightConnected : audioFeatures.rightConnected
     }
-    var supportsUpscalingStatus: Bool { protocolInformation?.generation == .v1 && legacyIndicators.supportsUpscalingStatus }
-    var upscalingIndicatorType: SonyLegacyIndicators.UpscalingType? { supportsUpscalingStatus ? legacyIndicators.upscalingType : nil }
-    var upscalingIndicatorStatus: SonyLegacyIndicators.UpscalingStatus? { supportsUpscalingStatus ? legacyIndicators.upscalingStatus : nil }
+    var supportsUpscalingStatus: Bool {
+        protocolInformation?.generation == .v1 ? legacyIndicators.supportsUpscalingStatus : audioFeatures.supportsUpscalingStatus
+    }
+    var upscalingIndicatorType: SonyDSEEType? {
+        protocolInformation?.generation == .v1 ? legacyIndicators.upscalingType : audioFeatures.upscalingType
+    }
+    var upscalingIndicatorStatus: SonyUpscalingStatus? {
+        protocolInformation?.generation == .v1 ? legacyIndicators.upscalingStatus : audioFeatures.upscalingStatus
+    }
     var supportsDSEE: Bool { legacyControls?.dsee.isSupported ?? audioFeatures.supportsDSEE }
     var dseeType: SonyDSEEType? { legacyControls == nil ? audioFeatures.dseeType : legacyControls?.dsee.type }
     var dseeMode: SonyDSEEMode? { legacyControls == nil ? audioFeatures.dseeMode : legacyControls?.dsee.mode }
     var dseeAvailable: Bool? { legacyControls == nil ? audioFeatures.dseeAvailable : legacyControls?.dsee.available }
     var canSetDSEE: Bool {
-        guard isReady, pendingChanges[.dsee] == nil, unconfirmedChanges[.dsee] == nil else { return false }
-        return legacyControls?.dsee.canSet ?? (audioFeatures.dseeAvailable == true && audioFeatures.dseeMode?.sonyValue != nil)
+        guard isReady, !listeningModeExcludesDSEE,
+              pendingChanges[.dsee] == nil, unconfirmedChanges[.dsee] == nil else { return false }
+        return legacyControls?.dsee.canSet ?? audioFeatures.canSetDSEE
     }
 
     func legacySoundEffect(_ kind: SonyLegacySoundEffect.Kind) -> SonyLegacySoundEffect {
@@ -500,18 +605,24 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
     var isCheckingEarTipFit: Bool { earTipFitTransition?.blocksCommands == true }
     var isPracticingHeadGestures: Bool { headGesturePracticeTransition?.blocksCommands == true }
-    var isRunningHeadphoneTest: Bool { noiseTestMayBeActive || pendingChanges[.noiseTest] != nil || unconfirmedChanges[.noiseTest] != nil || isCheckingEarTipFit || isPracticingHeadGestures || legacyOptimizerTransition?.blocksCommands == true || earbudFinder?.blocksCommands == true }
+    var isRunningHeadphoneTest: Bool { noiseTestMayBeActive || pendingChanges[.noiseTest] != nil || unconfirmedChanges[.noiseTest] != nil || isCheckingEarTipFit || checkingWearingPosition || isPracticingHeadGestures || legacyOptimizerTransition?.blocksCommands == true || earbudFinder?.blocksCommands == true }
     var headphoneTestNeedsRecovery: Bool {
         earTipFitTransition?.phase == .interrupted || headGesturePracticeTransition?.phase == .interrupted || legacyOptimizerTransition?.phase == .interrupted
     }
     var isPoweringOff: Bool { powerOffState == .sending }
+    var supportsPowerOff: Bool { powerOffPayload != nil }
+    private var powerOffPayload: [UInt8]? {
+        let generation = protocolInformation?.generation
+        let functions = generation == .v1 ? legacyControls?.supportedFunctions ?? [] : supportedFunctions
+        return SonyPowerOffCommand.payload(generation: generation, supportedFunctions: functions)
+    }
     var canPowerOff: Bool { powerOffUnavailableReason == nil }
     var powerOffSession: UInt64? { canPowerOff ? controlSession : nil }
     var powerOffUnavailableReason: String? {
         guard !isRunningHeadphoneTest else { return String(localized: "Finish the current headphone test first.") }
         guard powerOffState == nil else { return String(localized: "Connect the headphones to send another command.") }
         guard isReady else { return String(localized: "Connect the headphones first.") }
-        guard supportedFunctions.contains(0x23) else { return String(localized: "These headphones do not report power-off support.") }
+        guard supportsPowerOff else { return String(localized: "These headphones do not report power-off support.") }
         guard connectionTransition?.isFinished != false, sourceTransition?.isFinished != false,
               deviceActionTransition?.isFinished != false, multipointTransition?.isFinished != false else {
             return String(localized: "Finish the current connection change first.")
@@ -535,6 +646,19 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             && playbackReads[query]?.timedOut != true
     }
     #if !ACOUPLET_PUBLIC_APIS_ONLY
+    var hasCurrentMusicVolumeRead: Bool {
+        canSendPlaybackChanges && playback.isSupported && playback.hasKnownStatus
+            && (!playback.supportsCallVolume || playback.musicCallStatus == 0) && playback.volume != nil
+            && [playback.capabilityQueryPayload, playback.statusQueryPayload, playback.musicVolumeQueryPayload]
+                .allSatisfy { playbackFreshQueries.contains($0) && playbackReads[$0]?.timedOut != true }
+    }
+    var hasFreshReadableMusicVolumeReadback: Bool {
+        hasCurrentMusicVolumeRead && musicVolumeReadbackID != nil && musicStatusReadbackID != nil
+            && pendingPlaybackRefresh.isEmpty
+            && [playback.capabilityQueryPayload, playback.statusQueryPayload, playback.musicVolumeQueryPayload]
+                .allSatisfy { playbackReads[$0] == nil && !queuedPlaybackQueries.contains($0)
+                    && playbackReadSequence?.queries.contains($0) != true }
+    }
     var hasCurrentMusicVolumeControl: Bool {
         playbackControlContextIsAvailable && playback.canControlMusicVolume
             && [playback.capabilityQueryPayload, playback.statusQueryPayload, playback.musicVolumeQueryPayload]
@@ -561,6 +685,40 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
               let localAddress = SonyBLEIdentity.normalizedAddress(localAddress) else { return false }
         return SonyBLEIdentity.normalizedAddress(selected.address) == localAddress
     }
+
+    enum LDACPreparationIssue: Equatable {
+        case readingMultipoint, readingSources, unknownLocalAddress, selectMac(SonyMultipointDevice?)
+
+        var message: String {
+            switch self {
+            case .readingMultipoint: String(localized: "Waiting for the headphone setting. Reconnect the headphones if it does not arrive.")
+            case .readingSources: String(localized: "Reading connected devices…")
+            case .unknownLocalAddress: String(localized: "Sync the headphone identity first.")
+            case .selectMac: String(localized: "Select this Mac as the headphones’ audio source before starting LDAC.")
+            }
+        }
+    }
+
+    func ldacPreparationIssue(for localAddress: @autoclosure () -> String?) -> LDACPreparationIssue? {
+        if (systemFeatures.multipointDisablesLDAC ?? deviceModel.offersLDACOnlyWithoutMultipoint),
+           systemFeatures.multipoint?.enabled == nil,
+           systemFeatures.multipointSlot != nil || !systemFeatures.generalSettingsAreIdentified {
+            return .readingMultipoint
+        }
+        guard hasCurrentTable2Capabilities else { return .readingSources }
+        guard multipoint.supportsInventory else { return nil }
+        guard let inventory = multipoint.inventory, !multipoint.inventoryIsStale else { return .readingSources }
+        guard inventory.playbackRightID != 0 else { return nil }
+        guard let selected = inventory.selectedSource, selected.isConnected else { return .readingSources }
+        guard let localAddress = localAddress().flatMap(SonyBLEIdentity.normalizedAddress) else { return .unknownLocalAddress }
+        guard selected.address != localAddress else { return nil }
+        guard multipoint.supportsSourceControl,
+              let mac = multipoint.devices.first(where: { $0.address == localAddress && $0.isConnected }) else {
+            return .selectMac(nil)
+        }
+        guard multipoint.keeping != nil, multipoint.pairingMode != nil, multipoint.available != nil else { return .readingSources }
+        return .selectMac(multipoint.keeping == false && multipoint.canControlSources ? mac : nil)
+    }
     #endif
 
     @discardableResult
@@ -585,14 +743,35 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
     var canRefreshSoundPressure: Bool {
         powerOffState == nil && !isRunningHeadphoneTest && isReady && soundPressure.isSupported && soundPressure.available == true
-            && !soundPressure.isStopped && soundPressureRead == nil && commandQueue.pending == nil
+            && !soundPressure.isStopped && soundPressureRead == nil && exposureRequest == nil && commandQueue.pending == nil
             && connectionTransition?.isFinished != false && multipointTransition?.isFinished != false
             && sourceTransition?.isFinished != false && deviceActionTransition?.isFinished != false
     }
     var isReadingSoundPressure: Bool { soundPressureRead != nil && soundPressureRead?.timedOut == false }
+    var canReadExposure: Bool {
+        systemControlContextIsAvailable && soundPressure.isSupported && !exposureRequiresReconnect && exposureRequest == nil
+            && soundPressureRead == nil && pendingChanges[.soundPressureMode] == nil && commandQueue.pending == nil
+    }
+    var isReadingExposure: Bool { exposureRequest != nil }
+    var canChangeSoundPressureMode: Bool {
+        systemControlContextIsAvailable && soundPressure.available == true && exposureRequest == nil
+            && soundPressureRead == nil && pendingChanges[.soundPressureMode] == nil && commandQueue.pending == nil
+    }
+    var canConfigureMaxVolume: Bool {
+        systemControlContextIsAvailable && hasCurrentTable2Capabilities && commandQueue.pending == nil
+            && pendingChanges[.maxVolumeEnabled] == nil && pendingChanges[.maxVolumePreset] == nil
+    }
     var isEqualizerUpdatePending: Bool { requestedEqualizerPayload != nil || pendingChanges[.equalizer] != nil }
+    var isULTEqualizerSelectionPending: Bool {
+        equalizer.supportsULT && ((isEqualizerUpdatePending && requestedEqualizerULTModeChange)
+            || pendingChanges[.equalizer]?.count == 2)
+    }
     var earTipFitUnavailableReason: String? {
         guard earTipFit.isSupported else { return String(localized: "These earbuds do not report fit-test support.") }
+        if let read = systemReads[SonyEarTipFit.selectionQueryPayload] {
+            return read.timedOut ? String(localized: "Fit information was not received. Reconnect the headphones to try again.")
+                : String(localized: "Checking headphones…")
+        }
         return headphoneTestUnavailableReason
     }
     var headGesturePracticeUnavailableReason: String? {
@@ -665,16 +844,21 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         guard connectionTransition?.isFinished != false else { return String(localized: "Finish the current connection change first.") }
         guard sourceTransition?.isFinished != false else { return String(localized: "Changing the audio source…") }
         guard multipointTransition?.isFinished != false else { return String(localized: "Finish changing device connections first.") }
-        if let inventoryRead {
+        if let inventoryRead, inventoryRead.timedOut || inventoryRead.requestID != nil {
             return inventoryRead.timedOut ? String(localized: "The device list was not received. Reconnect the headphones to try again.") : String(localized: "Reading connected devices…")
         }
         guard multipoint.canControlSources else { return String(localized: "Audio source controls are currently unavailable.") }
         return nil
     }
 
+    func leAudioUnavailableReason(_ feature: SonyLEAudioRestrictions.Feature) -> String? {
+        leAudioRestrictions.restricts(feature, codec: audioFeatures.codec)
+            ? String(localized: "Unavailable with LE Audio.") : nil
+    }
+
     var canRefreshDevices: Bool {
         powerOffState == nil && !isRunningHeadphoneTest && isReady && inventoryRead == nil && sourceTransition?.isFinished != false && connectionTransition?.isFinished != false
-            && multipointTransition?.isFinished != false && deviceActionTransition?.isFinished != false
+            && multipointTransition?.isFinished != false && deviceActionTransition?.isFinished != false && legacyPairingModeRequest == nil
     }
 
     func deviceActionUnavailableReason(_ action: SonyPeripheralAction, device: SonyMultipointDevice) -> String? {
@@ -682,7 +866,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         guard powerOffState == nil else { return String(localized: "Connect the headphones to change settings.") }
         guard isReady else { return String(localized: "Connect the headphones first.") }
         guard deviceActionTransition?.isFinished != false, sourceTransition?.isFinished != false,
-              connectionTransition?.isFinished != false, multipointTransition?.isFinished != false else {
+              connectionTransition?.isFinished != false, multipointTransition?.isFinished != false, legacyPairingModeRequest == nil else {
             return String(localized: "Finish the current connection change first.")
         }
         if inventoryRead?.timedOut == true {
@@ -690,7 +874,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         guard pendingChanges.isEmpty, pendingPlaybackCommand == nil, !isEqualizerUpdatePending, !isApplyingChange,
               ambientWorkItem == nil else { return String(localized: "Wait for the current headphone change to finish.") }
-        guard action != .unpair, multipoint.canManageDevices else { return String(localized: "Device connection controls are currently unavailable.") }
+        if let reason = leAudioUnavailableReason(.pairedDevices) { return reason }
+        guard action != .unpair || multipoint.supportsLegacyInventory, multipoint.canManageDevices else {
+            return String(localized: "Device connection controls are currently unavailable.")
+        }
         if action == .connect {
             guard let maximum = multipoint.maxConnectedDevices else { return String(localized: "Refresh the device list to read the connection limit.") }
             guard multipoint.devices.filter(\.isConnected).count < Int(maximum) else { return String(localized: "Disconnect a device before connecting another.") }
@@ -700,7 +887,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     var ldacRequiresMultipointOff: Bool {
-        deviceModel.offersLDACOnlyWithoutMultipoint && systemFeatures.multipoint?.enabled == true
+        systemFeatures.multipoint?.enabled == true
+            && (systemFeatures.multipointDisablesLDAC ?? deviceModel.offersLDACOnlyWithoutMultipoint)
     }
 
     var multipointUnavailableReason: String? {
@@ -732,6 +920,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         guard mode.sonyValue != nil, supportedConnectionModes?.contains(mode) == true else {
             return String(localized: "This mode is unavailable.")
         }
+        if let reason = leAudioUnavailableReason(.connectionPreference) { return reason }
         #if !DEBUG
         guard mode != .lowLatency else { return String(localized: "Bluetooth LE controls are unavailable in this version.") }
         #endif
@@ -826,6 +1015,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             "Connection preference issue: \(connectionModeError ?? "None")",
             "Supported connection modes: \(supportedConnectionModes.map { $0.map(\.title).joined(separator: ", ") } ?? "Unknown")",
             "Connection mode available: \((legacyControls.map { $0.connectionQuality.available } ?? audioFeatures.connectionModeAvailable).map { $0 ? "Yes" : "No" } ?? "Unknown")",
+            "Headphone LE Audio standby: \(leAudioStandby.enabled.map { $0 ? "On" : "Off" } ?? "Unknown"), setting available: \(leAudioStandby.available.map { $0 ? "Yes" : "No" } ?? "Unknown")",
             "Left connected: \(leftConnected.map { $0 ? "Yes" : "No" } ?? "Unknown")",
             "Right connected: \(rightConnected.map { $0 ? "Yes" : "No" } ?? "Unknown")",
             "Connection mode status: \(audioFeatures.connectionModeStatus.map(String.init) ?? "Unknown"), \(audioFeatures.connectionModeAdditionalStatus.map(String.init) ?? "Unknown")",
@@ -852,6 +1042,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             "Voice guidance: \(voiceGuidance.enabled.map { $0 ? "On" : "Off" } ?? "Unknown")",
             "Voice guidance volume: \(voiceGuidance.volume.map(String.init) ?? "Unknown")",
             "Playback state: \(playback.state.map { String(describing: $0) } ?? "Unknown")",
+            "Playback available: \(playback.available.map { $0 ? "Yes" : "No" } ?? "Unknown")",
             "Headphone music volume: \(playback.volume.map(String.init) ?? "Unknown")",
             "Headphone music volume range: \(playback.musicVolumeRange.map { "\($0.lowerBound)...\($0.upperBound)" } ?? "Unknown")",
             "Headphone music volume controllable: \(canControlMusicVolume ? "Yes" : "No")",
@@ -865,15 +1056,82 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             "Last sync: \(lastSyncDate?.formatted(date: .numeric, time: .standard) ?? "Never")",
             "Last error: \(lastIssue)",
         ]
+        if let status = systemFeatures.callSettings?.status {
+            lines.append("Call settings available: \(status.available ? "Yes" : "No"), setting mode active: \(status.inSettingMode ? "Yes" : "No"), test sound enabled: \(status.testSoundEnabled ? "Yes" : "No"), device in call: \(status.inCall ? "Yes" : "No")")
+        }
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         lines.insert("Native device appearance: \(nativeAppearanceRefresh?.diagnosticDescription ?? "Disabled")", at: 10)
         lines.insert("Native battery observations: \(nativeBatterySnapshot?.diagnosticDescription(at: Date()) ?? "Unavailable")", at: 21)
         #endif
         return lines.map { DiagnosticHistory.line($0, redacting: diagnosticPrivateNames) }.joined(separator: "\n")
+            + "\nHeadphone codec observed with selected source: \(diagnosticSelectedSourceCodec ?? "Unavailable")"
             + "\n\nHeadphone control history\n" + diagnosticHistory.report
     }
 
     var diagnosticPrivateNames: [String] { [deviceName == deviceModel.name ? "" : deviceName] + multipoint.devices.map(\.name) }
+
+    private var currentCodecSource: CodecSource? {
+        guard protocolInformation?.generation == .v2, audioFeatures.supportsCodecStatus, isDeviceConnected, systemControlContextIsAvailable,
+              hasCurrentTable2Capabilities, !multipoint.inventoryIsStale,
+              let source = multipoint.selectedSource, source.isConnected else { return nil }
+        return CodecSource(session: controlSession, generation: playbackSourceGeneration, connectionID: source.connectionID)
+    }
+
+    private var diagnosticSelectedSourceCodec: String? {
+        guard let observation = selectedSourceCodec, observation.source == currentCodecSource,
+              let source = multipoint.selectedSource else { return nil }
+        let label = (source.classOfDevice >> 8) & 0x1F == 2 ? "Phone connection" : "Source connection"
+        return "\(label) \(source.connectionID). Headphones report \(observation.codec.title)."
+    }
+
+    private func invalidateCodecSource() {
+        codecSource = nil
+        selectedSourceCodec = nil
+        attemptedCodecSourceRead = false
+        codecRead?.source = nil
+    }
+
+    private func requestCodecForCurrentSource() {
+        guard let codecSource, codecSource.source == currentCodecSource, ContinuousClock.now < codecSource.deadline,
+              !attemptedCodecSourceRead, !codecRepliesAreAmbiguous, codecRead == nil else { return }
+        send(SonyAudioFeatures.codecQueryPayload)
+    }
+
+    private func observeCodecInventory(fresh: Bool, readback: Bool) {
+        let current = currentCodecSource
+        if current == nil || codecSource?.source != current { invalidateCodecSource() }
+        guard fresh, let current else { return }
+        codecSource = (current, ContinuousClock.now.advanced(by: .seconds(8)))
+        if readback { requestCodecForCurrentSource() }
+    }
+
+    private func observeCodecReport(_ payload: [UInt8]) {
+        let codec = payload.count == 3 ? SonyAudioCodec(rawValue: payload[2]) : nil
+        if codec != selectedSourceCodec?.codec { selectedSourceCodec = nil }
+        guard let read = codecRead, receivedAfter(read.transmissionOrdinal) else { return }
+        if payload[0] == 0x15 {
+            if codec == nil || codec != audioFeatures.codec { codecRead?.source = nil }
+            return
+        }
+        guard let codec else { return }
+        codecRead = nil
+        if let sample = read.source, ContinuousClock.now < sample.deadline, sample.source == currentCodecSource {
+            switch codec {
+            case .sbc, .aac, .ldac, .aptX, .aptXHD, .lc3: selectedSourceCodec = (sample.source, codec)
+            default: break
+            }
+        }
+        requestCodecForCurrentSource()
+    }
+
+    private func beginCodecRead() {
+        codecRead?.transmissionOrdinal = completedTransmissionOrdinal
+        if !codecRepliesAreAmbiguous, let codecSource, ContinuousClock.now < codecSource.deadline, codecSource.source == currentCodecSource {
+            codecRead?.source = codecSource
+            attemptedCodecSourceRead = true
+        }
+    }
+
     private var diagnosticHistory = DiagnosticHistory()
 
     private func recordDiagnostic(_ message: String, failure: Bool = false) {
@@ -940,7 +1198,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     #endif
     private var expectedBLEIdentity: SonyBLEIdentity.ConnectionTarget?
     private var bluetoothLEIdentityReadOrdinal: UInt64?
-    private var controlSession: UInt64 = 0
+    private var controlSession: UInt64 = 0 {
+        didSet { invalidateCodecSource() }
+    }
     var preferencePaneSession: UInt64 { controlSession }
     @Published private var fixedAlertsEnabled = false
     private var transmittedFrame: SonyFrame?
@@ -966,6 +1226,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var refreshTimer: Timer?
     @Published private var bluetoothAuthorization: CBManagerAuthorization?
     private var isInitializingBluetooth = false
+    private var refreshAfterBluetoothInitialization = false
     private var bluetoothInitializationID: UUID?
     private var isBluetoothInitialized = false
     private var isSystemSleeping = false
@@ -985,6 +1246,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var inventoryReadTimeout: DispatchWorkItem?
     private var sourceTimeout: DispatchWorkItem?
     private var deviceActionTimeout: DispatchWorkItem?
+    private var deviceActionTransmissionOrdinal: UInt64?
+    private var legacyPairingModeTransmissionOrdinal: UInt64?
+    private var legacyPairingModeTimeout: DispatchWorkItem?
+    private var legacyPeripheralReads: [[UInt8]: SystemRead] = [:]
     private var multipointTimeout: DispatchWorkItem?
     private var multipointTimeoutID: UUID?
     private var multipointTimeoutPhase: SonyMultipointTransition.Phase?
@@ -993,12 +1258,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var multipointConnection: MultipointConnection?
     private var multipointTransmissionOrdinal: UInt64?
     private var multipointRecoveryAttempts = 0
+    private var musicHandoverReadOrdinal: UInt64?
     private var unconfirmedEqualizerRequestID: UUID?
     private var acknowledgmentTimeout: DispatchWorkItem?
     private var transmissionID: UUID?
     private var transmissionOrdinal: UInt64 = 0
     private var completedTransmissionOrdinal: UInt64 = 0
     private var receivedTransmissionOrdinal: UInt64?
+    private var connectionTimeSyncSession: UInt64?
+    private var connectionTimeAcknowledgment: (ordinal: UInt64, deadline: DispatchTime)?
     private var commandQueue = SonyCommandQueue() {
         willSet {
             if (commandQueue.pending == nil) != (newValue.pending == nil) {
@@ -1014,17 +1282,29 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var queuedSpeakToChatOptions: SonySpeakToChatOptions?
     private var queuedTouchChange: (key: UInt8, selection: [UInt8], sharedKeys: Set<UInt8>)?
     private var systemReads: [[UInt8]: SystemRead] = [:]
+    private var tvSoundBoosterWriteBaseline: [UInt8]?
+    private var backgroundMusicWriteBaseline: [UInt8]?
+    private var listeningModeAssignmentWrite: (item: SonyListeningModeAssignments.Item, baseline: [UInt8])?
+    private var microphoneOperationWriteBaseline: [UInt8]?
     private var voiceGuidanceReads: [[UInt8]: SystemRead] = [:]
     private var queuedPlaybackSource: String?
     private var queuedVolumeSource: String?
     private var queuedMusicVolumeIsCurrent: (() -> Bool)?
     private var soundPressureGeneration: UInt64 = 0
     private var soundPressureReadTimeout: DispatchWorkItem?
+    private var exposureRead: ExposureRead?
+    private var exposureReadTimeout: DispatchWorkItem?
+    private var exposureTimeoutDeadline = DispatchTime.distantFuture
     private var wearingStatusGeneration: UInt64 = 0
     private var wearingStatusRead: WearingStatusRead?
     private var wearingStatusReadTimeout: DispatchWorkItem?
     private var lastSoundPressureRequest: ContinuousClock.Instant?
-    private var playbackSourceGeneration: UInt64 = 0
+    private(set) var playbackSourceGeneration: UInt64 = 0
+    private var codecRead: CodecRead?
+    private var codecRepliesAreAmbiguous = false
+    private var codecSource: (source: CodecSource, deadline: ContinuousClock.Instant)?
+    private var attemptedCodecSourceRead = false
+    private var selectedSourceCodec: (source: CodecSource, codec: SonyAudioCodec)?
     private var announcedAudioSourceAddress: String?
     private var playbackFreshQueries: Set<[UInt8]> = []
     private var playbackReads: [[UInt8]: PlaybackRead] = [:]
@@ -1067,13 +1347,28 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private var headGesturePracticeTimeoutPhase: SonyHeadGesturePracticeTransition.Phase?
     private var earTipFitTimeout: DispatchWorkItem?
     private var earTipFitTimeoutPhase: SonyEarTipFitTransition.Phase?
+    private var wearingPositionOrdinal: UInt64?
+    private var wearingPositionTimeout: DispatchWorkItem?
     private var powerOffRequestSession: UInt64?
     private var batteryReads: [[UInt8]: BatteryRead] = [:]
     private var powerReads: [[UInt8]: PowerRead] = [:]
+    private var lightingReads: [[UInt8]: SystemRead] = [:]
+    private var karaokeControlsBeforeWrite: [UInt8]?
+    private var lightingModeAlertReply: (payload: [UInt8], requestID: UUID)?
+    private var adaptiveVolumeCautionReply: (payload: [UInt8], requestID: UUID)?
+    private var adaptiveVolumeCautionSeen = false
+    private var voiceAssistantSideReply: (payload: [UInt8], requestID: UUID)?
+    private var voiceAssistantSideAlertSeen = false
+    private var lightingModeAlertSeen = false
+    private var partyLightingDrag: PartyLightingDrag?
+    private var partyLightingClock: Task<Void, Never>?
+    private var lightingColorPreview: SonySpeakerLighting.RGB?
+    private var lightingColorPreviewClock: Task<Void, Never>?
+    private var isPreviewingLightingColor = false
+    private var lightingColorPreviewWasSent = false
     private var powerRequestIDs: [Setting: UUID] = [:]
     private var staminaChange: SonyStaminaChange?
     private var bluetoothStandbyChange: BluetoothStandbyChange?
-    private static let powerOffPayload: [UInt8] = [0x24, 0x03, 0x01]
     private var isSimulated = false
     private var lastReadyTransportWasBluetoothLE = false
     #if DEBUG
@@ -1114,6 +1409,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             || noiseControlRead?.timedOut == true
             || systemReads.values.contains(where: { $0.timedOut })
             || powerReads.values.contains(where: { $0.timedOut })
+            || lightingReads.values.contains(where: { $0.timedOut })
             || voiceGuidanceReads.values.contains(where: { $0.transmitted && $0.isObsolete && $0.timeout == nil })
             || playbackReads.values.contains(where: { $0.timedOut })
             || soundPressureRead?.timedOut == true
@@ -1194,6 +1490,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     func simulateSystemReadTimeout(_ query: [UInt8]) { systemReads[query]?.timeout?.perform() }
     func simulateVoiceGuidanceReadTimeout(_ query: [UInt8]) { voiceGuidanceReads[query]?.timeout?.perform() }
     func simulatePowerReadTimeout(_ query: [UInt8], type: UInt8 = 0x0C) { powerReads[[type] + query]?.timeout?.perform() }
+    func simulatePartyLightingTick() { flushPartyLightingMove() }
+    func simulateLightingColorPreviewTick() { _ = flushLightingColorPreview() }
     func simulateBatteryReadTimeout(_ query: [UInt8]) { batteryReads[query]?.timeout?.perform() }
     func simulateBatteryRefresh() { requestBattery() }
     func simulatePlaybackReadTimeout(_ query: [UInt8]) { playbackReadTimeouts[query]?.perform() }
@@ -1543,6 +1841,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         isDeviceConnected = name != nil
         linkState = name == nil ? .disconnected : controlBusy ? .controlBusy : .ready
         guard isReady else { return }
+        let includesBassBoost = CommandLine.arguments.contains("--bass-boost")
+        let includesCallVibration = CommandLine.arguments.contains("--call-vibration")
+        defer {
+            if let inquiry = equalizer.bassBoost.inquiryType {
+                equalizer.bassBoost.update([0x51, inquiry, 0xF8, 12])
+                equalizer.bassBoost.update([0x53, inquiry, 0])
+                equalizer.bassBoost.update([0x57, inquiry, 0])
+            }
+        }
         noiseControlMode = .ambient
         ambientLevel = 12
         if deviceModel.isEarbuds {
@@ -1596,12 +1903,14 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             supportsTable2 = false
             supportedFunctions = []
             supportedFunctions2 = []
-            let functions: [UInt8] = [0x51, 0x62, 0xE2] + (galleryModel.isEarbuds ? [0x15, 0x18] : [0x11, 0x81])
+            var functions: [UInt8] = [0x51, 0x62, 0xE2] + (galleryModel.isEarbuds ? [0x15, 0x18] : [0x11, 0x81])
+                + (includesBassBoost ? [0x52] : [])
                 + (galleryModel == .whXM3 ? [0x41, 0x42] : [])
                 + (CommandLine.arguments.contains("--legacy-wearing") ? [0xF3] : [])
                 + (CommandLine.arguments.contains("--legacy-power") ? [0xF4] : [])
                 + (CommandLine.arguments.contains("--legacy-assignments") ? [0xF6] : [])
                 + (CommandLine.arguments.contains("--legacy-connection-quality") ? [0xE1] : [])
+            if includesCallVibration { functions.append(0xF1) }
             var controls = SonyLegacyControls(supportPayload: [0x07, 0, UInt8(functions.count)] + functions)!
             let dsee: UInt8 = [.wfXM3, .whXM3].contains(galleryModel) ? 0 : 2
             for payload: [UInt8] in [
@@ -1638,6 +1947,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 touchAssignments.update([0xF7, 0x06, UInt8(selected.count)] + selected)
             }
             legacyControls = controls
+            if includesCallVibration {
+                systemFeatures = SonySystemFeatures(legacyGeneralSettings: controls.supportedFunctions)
+                for payload: [UInt8] in [[0xF1, 1, 0], [0xF3, 1, 0], [0xF7, 1, 0, 0]] { systemFeatures.update(payload) }
+            }
             legacyOptimizer = SonyLegacyOptimizer(supportedFunctions: controls.supportedFunctions)
             legacyIndicators = SonyLegacyIndicators(supportedFunctions: controls.supportedFunctions)
             legacySurround = SonyLegacySoundEffect(kind: .surround, supportedFunctions: controls.supportedFunctions)
@@ -1668,6 +1981,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         supportedFunctions = [0x11, 0x12, 0x14, 0x23, 0x25, 0x40, 0x44, 0x90, 0xA1, 0xD1, 0xD2, 0xE2, 0xE7, 0xF1, 0xF3, 0xFF, 0xFC]
         supportedFunctions.insert(0x50)
+        if includesBassBoost { supportedFunctions.insert(0x51) }
+        if CommandLine.arguments.contains("--adaptive-volume") { supportedFunctions.insert(SonySystemFeature.adaptiveVolume.function) }
+        if includesCallVibration { supportedFunctions.insert(SonySystemFeature.incomingCallVibration.function) }
+        let needsLRBalanceSetup = CommandLine.arguments.contains("--lr-balance-needs-setup")
+        if needsLRBalanceSetup || CommandLine.arguments.contains("--lr-balance-saved") {
+            supportedFunctions.insert(SonyLRBalanceCorrection.function)
+        }
         supportedFunctions.insert(modernNoiseSettings ? 0x6C : galleryModel == nil ? 0x6D : 0x6B)
         if modernNoiseSettings { supportedFunctions.insert(0x69) }
         supportedFunctions.formUnion(deviceModel.isEarbuds ? [0x29, 0x2A] : [0x20])
@@ -1679,8 +1999,21 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if galleryModel == .whXM5 { supportedFunctions.remove(0xD1) }
             if galleryModel == .wfXM6 { supportedFunctions.remove(0xD2) }
             if [.whULT900N, .wh1000XX].contains(galleryModel) { supportedFunctions.remove(0x50) }
+            if galleryModel == .whULT900N { supportedFunctions.insert(0x53) }
+        }
+        if let flag = CommandLine.arguments.firstIndex(of: "--modern-optimizer"),
+           let variant = CommandLine.arguments.dropFirst(flag + 1).first,
+           let function = ["combined": UInt8(0x80), "personal": 0x81, "barometric": 0x82][variant] {
+            supportedFunctions.insert(function)
         }
         equalizer = SonyEqualizer(supportedFunctions: supportedFunctions)
+        if equalizer.lrBalanceCorrection.isSupported {
+            equalizer.lrBalanceCorrection.update([0x51, 0x51, 7, 0, 32])
+            equalizer.lrBalanceCorrection.update([0x53, 0x50, 0])
+            equalizer.lrBalanceCorrection.update([0x53, 0x51, 0])
+            equalizer.lrBalanceCorrection.update([0x57, 0x50, needsLRBalanceSetup ? 2 : 1])
+        }
+        legacyOptimizer = SonyLegacyOptimizer(supportedFunctions: supportedFunctions, generation: .v2)
         let tenBandEqualizer = galleryModel.map { [.wfXM6, .whXM6].contains($0) }
             ?? CommandLine.arguments.contains("--ten-band-equalizer")
         if tenBandEqualizer, galleryModel == nil { deviceName = SonyDeviceModel.wfXM6.name }
@@ -1694,9 +2027,16 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             : [400, 1000, 2500, 6300, 16000]
         let bands: [UInt8] = (tenBandEqualizer ? [] : [0x10, 0, 1])
             + frequencies.flatMap { [UInt8(1), UInt8($0 >> 8), UInt8($0 & 0xFF)] }
-        equalizer.update([0x5B, 0x00, UInt8(bands.count / 3)] + bands)
-        equalizer.update([0x53, 0x00, 0])
-        equalizer.update(tenBandEqualizer ? [0x57, 0, 0x30, 10] + Array(repeating: 6, count: 10) : [0x57, 0, 0x16, 0])
+        if equalizer.supportsULT {
+            equalizer.update([0x51, 3, 6, 21, 4, UInt8(presets.count)] + presets.flatMap { [$0, 0] })
+            equalizer.update([0x5B, 3, UInt8(bands.count / 3)] + bands)
+            equalizer.update([0x53, 3, 0])
+            equalizer.update([0x57, 3, 0x16, 1, 6] + Array(repeating: 10, count: 6))
+        } else {
+            equalizer.update([0x5B, 0x00, UInt8(bands.count / 3)] + bands)
+            equalizer.update([0x53, 0x00, 0])
+            equalizer.update(tenBandEqualizer ? [0x57, 0, 0x30, 10] + Array(repeating: 6, count: 10) : [0x57, 0, 0x16, 0])
+        }
         if galleryModel == nil, CommandLine.arguments.contains("--wide-equalizer") || CommandLine.arguments.contains("--wrapped-equalizer") {
             let frequencies = CommandLine.arguments.contains("--wrapped-equalizer") ? (0..<32).map { 25 + $0 * 100 }
                 : [25, 40, 63, 100, 160, 250, 400, 630, 1_000, 1_600, 2_500, 4_000, 6_300, 10_000, 16_000, 20_000]
@@ -1741,6 +2081,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if CommandLine.arguments.contains("--assistant-selection") || CommandLine.arguments.contains("--assistant-selection-unknown") {
             supportedFunctions.insert(0xF4)
         }
+        let supportsCallSettings = CommandLine.arguments.contains("--call-settings")
+        if supportsCallSettings { supportedFunctions.insert(SonyCallSettings.function) }
         systemFeatures = SonySystemFeatures(supportedFunctions: supportedFunctions)
         for feature in SonySystemFeature.allCases {
             let suffix: [UInt8] = feature == .speakToChat ? [0x01] : []
@@ -1752,6 +2094,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             systemFeatures.update([0xF1, 0x04, 0x03, 4, 0x30, 0x31, 0x32, 0x33])
             systemFeatures.update([0xF3, 0x04, 0])
             systemFeatures.update([0xF7, 0x04, CommandLine.arguments.contains("--assistant-selection-unknown") ? 0xFE : 0x30])
+        }
+        if supportsCallSettings {
+            systemFeatures.update([0xF1, 8, 2, 2])
+            systemFeatures.update([0xF3, 8, 0, 0, 1, 1])
+            systemFeatures.update([0xF7, 8, 0, 0, 0])
         }
         systemFeatures.update([0xFB, 0x0C, 0x00, 0x01])
         for payload: [UInt8] in [[0x21, 0x05, 2, 0x10, 0x11], [0x23, 0x05, 0], [0x27, 0x05, 0x10, 0]] {
@@ -1796,6 +2143,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             touchAssignments.update([0xFB, 0x03, 0x01, 0x35, 0x01, 0x00, 0x02])
         }
         supportedFunctions2 = simulatedTable2Functions ?? [0x31, 0x32, 0x42, 0x53]
+        if CommandLine.arguments.contains("--wearing-position") { supportedFunctions2.insert(0xFF) }
+        if CommandLine.arguments.contains("--adaptive-volume-limited") { supportedFunctions2.insert(SonyAdaptiveVolumeWithLimitation.function) }
+        if CommandLine.arguments.contains("--microphone-operation") { supportedFunctions2.insert(SonyMicrophoneOperation.capability) }
         table2CapabilitiesSession = controlSession
         if galleryModel == .whCH720N || galleryModel == .wh1000XX { supportedFunctions2.remove(0x53) }
         supportsTable2 = true
@@ -1826,6 +2176,23 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         simulatedSourceID = 1
         simulatedDeviceConnections = [:]
         multipoint = SonyMultipoint(supportedFunctions: supportedFunctions2)
+        linkAutoSwitch = SonyLinkAutoSwitch(supportedFunctions2: supportedFunctions2)
+        microphoneOperation = SonyMicrophoneOperation(supportedFunctions2: supportedFunctions2)
+        wearingPosition = SonyWearingPosition(supportedFunctions2: supportedFunctions2)
+        if wearingPosition.isSupported {
+            wearingPosition.update([0xF1, 7, 0, 5])
+            wearingPosition.update([0xF3, 8, 0])
+        }
+        adaptiveVolumeWithLimitation = SonyAdaptiveVolumeWithLimitation(supportedFunctions2: supportedFunctions2)
+        if adaptiveVolumeWithLimitation.isSupported {
+            adaptiveVolumeWithLimitation.update([0xF3, 0x04, 0])
+            adaptiveVolumeWithLimitation.update([0xF7, 0x04, 1, 1, 0])
+        }
+        if microphoneOperation.isSupported {
+            microphoneOperation.update([0xF1, 0x0B, deviceModel.isEarbuds ? 0 : 1])
+            microphoneOperation.update([0xF3, 0x0B, 0])
+            microphoneOperation.update([0xF7, 0x0B, 1, 1])
+        }
         let maximumConnections: UInt8 = CommandLine.arguments.contains("-ui-testing") && CommandLine.arguments.contains("--four-source-devices") ? 4 : 2
         if let inquiryType = multipoint.inventoryInquiryType {
             multipoint.update([0x31, inquiryType, 8, maximumConnections, 0])
@@ -1834,9 +2201,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         multipoint.update([0x37, 0x01, 1])
         soundPressure = SonySoundPressure(supportedFunctions: supportedFunctions2)
+        volumeProtection = SonyVolumeProtection(supportedFunctions: supportedFunctions2)
+        usbProtection = SonyUSBProtection(supportedFunctions: supportedFunctions2)
         wearingStatus = SonyWearingStatus(supportedFunctions: supportedFunctions2)
-        soundPressure.update([0x51, 0x03, 1, 0, 0, 0, 0, 5, 16])
-        soundPressure.update([0x57, 0x03, 0])
+        if let inquiryType = soundPressure.inquiryType {
+            soundPressure.update([0x51, inquiryType, 1, 0, 0, 0, 0, 5, 16])
+            soundPressure.update([0x57, inquiryType, 0])
+        }
         voiceGuidance = SonyVoiceGuidance(supportedFunctions: supportedFunctions2)
         for payload: [UInt8] in [
             [0x41, 0x01, 0, 0, 0, 0, 1, 2, 1, 0x10],
@@ -1925,6 +2296,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         bluetoothInitializationID = nil
         isInitializingBluetooth = false
         isBluetoothInitialized = false
+        refreshAfterBluetoothInitialization = false
         refreshTimer?.invalidate()
         refreshTimer = nil
         systemWillSleep()
@@ -1943,11 +2315,14 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     private func finishBluetoothInitialization(authorization: CBManagerAuthorization) {
         isInitializingBluetooth = false
+        let manuallyRequested = refreshAfterBluetoothInitialization
+        refreshAfterBluetoothInitialization = false
         reportBluetoothAuthorization(authorization)
         guard bluetoothAuthorization == .allowedAlways else { return }
         isBluetoothInitialized = true
         Self.logger.info("Bluetooth coordinator initialized")
-        refresh(shouldOpenLink: reconnectAutomatically)
+        if manuallyRequested { refresh() }
+        else { refresh(shouldOpenLink: reconnectAutomatically) }
         guard !isSimulated else { return }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -2073,6 +2448,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     func systemWillSleep() {
         guard !isSystemSleeping else { return }
         isSystemSleeping = true
+        refreshAfterBluetoothInitialization = false
         pairedDeviceInventory = nil
         if connectionTransition?.isFinished == true, connectionTransition?.phase != .failed {
             clearFinishedConnectionChange()
@@ -2096,15 +2472,19 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     func refreshEqualizer(trackConfirmation: Bool = false) {
         guard powerOffState == nil, !isRunningHeadphoneTest, stage == .ready, deviceActionTransition?.isFinished != false else { return }
         guard let query = equalizer.parameterQueryPayload else { return }
-        for payload in equalizer.queryPayloads where payload != query {
-            if payload.first == 0x50, equalizer.capabilities != nil { continue }
-            if payload.first == 0x52, equalizer.status != nil { continue }
-            if payload.first == 0x5A, equalizer.bandInformation != nil { continue }
-            send(payload)
-        }
         if trackConfirmation {
             guard connectionTransition?.isFinished != false, !isEqualizerUpdatePending,
                   pendingChanges[.equalizerReadback] == nil else { return }
+        }
+        for payload in equalizer.queryPayloads where payload != query {
+            if payload.first == 0x50, equalizer.capabilities != nil { continue }
+            if !equalizer.supportsULT {
+                if payload.first == 0x52, equalizer.status != nil { continue }
+                if payload.first == 0x5A, equalizer.bandInformation != nil { continue }
+            }
+            send(payload)
+        }
+        if trackConfirmation {
             sendSetting(query, setting: .equalizerReadback)
         } else {
             send(query)
@@ -2189,6 +2569,95 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private func resetDiscoveryReads() {
         for read in discoveryReads.values { read.timeout?.cancel() }
         discoveryReads = [:]
+        voiceAssistantSetupOptions = nil
+        leAudioStandby = SonyLEAudioStandby()
+        leAudioCapabilities = SonyLEAudioCapabilities()
+    }
+
+    private var leAudioStandbyQueries: [[UInt8]] {
+        guard protocolInformation?.generation == .v2, !usesBluetoothLE else { return [] }
+        return SonyLEAudioStandby.queries(supportedFunctions: supportedFunctions)
+    }
+
+    var supportsLEAudioStandby: Bool { !leAudioStandbyQueries.isEmpty }
+
+    var canSetLEAudioStandby: Bool {
+        systemControlContextIsAvailable && supportsLEAudioStandby
+            && leAudioStandby.available == true && leAudioStandby.enabled != nil && pendingChanges[.leAudioStandby] == nil
+    }
+
+    func setLEAudioStandby(_ enabled: Bool) {
+        guard canSetLEAudioStandby, let payload = leAudioStandby.preferencePayload(enabled: enabled) else { return }
+        sendSetting(payload, setting: .leAudioStandby)
+    }
+
+    private func leAudioStandbyWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        systemControlContextIsAvailable && supportsLEAudioStandby && pendingChanges[.leAudioStandby] == [payload[2]]
+            && leAudioStandby.preferencePayload(enabled: payload[2] == 0) == payload
+    }
+
+    private func receiveLEAudioStandby(_ payload: [UInt8]) -> Bool {
+        guard isReady, supportsLEAudioStandby,
+              let report = SonyLEAudioStandby.parse(payload, supportedFunctions: supportedFunctions) else { return false }
+        let query = report.field.inquiry
+        let setting = Setting.leAudioStandby
+        let read = systemReads[query]
+        if report.notification {
+            if receivedAfter(read?.transmissionOrdinal) { systemReads[query]?.isObsolete = true }
+        } else {
+            guard let read, read.transmitted, receivedAfter(read.transmissionOrdinal) else { return true }
+            systemReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read.isObsolete || read.timedOut {
+                if report.field == .setting, pendingChanges[setting] != nil { send(query) }
+                return true
+            }
+        }
+        leAudioStandby.update(report)
+        if report.field == .setting,
+           report.notification || read?.requestID == settingRequests[setting] || read?.resolvesUnconfirmed == true {
+            confirmSetting(setting, value: [report.enabled ? 0 : 1])
+        }
+        return true
+    }
+
+    private func receiveLEAudioStandbyAlert(_ payload: [UInt8]) -> Bool {
+        let setting = Setting.leAudioStandby
+        guard let alert = SonyConnectionAlert(payload: payload),
+              let enabled = SonyLEAudioStandby.requestedPreference(for: alert),
+              (pendingChanges[setting] ?? unconfirmedChanges[setting]) == [enabled ? 0 : 1],
+              receivedAfter(settingTransmissionOrdinals[setting]) else { return false }
+        let error = String(localized: "The device requires a connection change to save this LE Audio preference.")
+        let requestID = settingRequests[setting]
+        pendingChanges[setting] = nil
+        unconfirmedChanges[setting] = nil
+        settingRequests[setting] = nil
+        settingTransmissionOrdinals[setting] = nil
+        settingErrors[setting] = error
+        settingTimeouts.removeValue(forKey: setting)?.cancel()
+        settingRefreshes.removeValue(forKey: setting)?.cancel()
+        finishSettingIntent(setting, requestID: requestID, error: HeadphoneControlError(message: error))
+        if alert.actionType == .positiveNegative { send([0x98, alert.format.rawValue, alert.messageID, 0]) }
+        return true
+    }
+
+    private func requestLEAudioCapabilities() {
+        guard !usesBluetoothLE else { return }
+        for query in leAudioCapabilities.queryPayloads { send(query, type: SonyLEAudioCapabilities.frameType) }
+    }
+
+    private func receiveLEAudioCapabilities(_ payload: [UInt8]) -> Bool {
+        guard !usesBluetoothLE, hasCurrentTable2Capabilities, let response = leAudioCapabilities.report(payload) else { return false }
+        let key = [SonyLEAudioCapabilities.frameType] + response.query
+        let read = systemReads[key]
+        if response.notification {
+            if receivedAfter(read?.transmissionOrdinal) { systemReads[key]?.isObsolete = true }
+        } else {
+            guard let read, read.transmitted, receivedAfter(read.transmissionOrdinal) else { return true }
+            systemReads.removeValue(forKey: key)?.timeout?.cancel()
+            if read.isObsolete || read.timedOut { return true }
+        }
+        leAudioCapabilities.update(response.report)
+        return true
     }
 
     private func requestNoiseControl(_ type: UInt8) {
@@ -2397,7 +2866,22 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
     }
 
-    private func systemReadSetting(_ query: [UInt8]) -> Setting? {
+    private func systemReadSetting(_ query: [UInt8], type: UInt8 = 0x0C) -> Setting? {
+        if type == 0x0E {
+            if query == SonyAdaptiveVolumeWithLimitation.parameterQuery, adaptiveVolumeWithLimitation.isSupported {
+                return .adaptiveVolumeWithLimitation
+            }
+            if query == SonyAuracast.receptionQuery, auracast.variant == .standard { return .auracastReception }
+            return query == SonyMicrophoneOperation.parameterQuery && microphoneOperation.isSupported ? .microphoneOperation : nil
+        }
+        if query == SonyLEAudioStandby.Field.setting.inquiry, supportsLEAudioStandby { return .leAudioStandby }
+        if equalizer.bassBoost.queryPayloads.contains(query) { return .bassBoost }
+        if equalizer.lrBalanceCorrection.queryPayloads.contains(query) { return .lrBalanceCorrection }
+        if equalizer.turnKey.queryPayloads.contains(query) { return .turnKeyEQ }
+        if equalizer.ultSoundEffectAssignment.queryPayloads.contains(query) { return .ultSoundEffectAssignment }
+        if equalizer.customSoundEffect.queryPayloads.contains(query) { return .customSoundEffect }
+        if equalizer.soundEffect.queryPayloads.contains(query) { return .soundEffect }
+        if equalizer.customEQ.queryPayloads.contains(query) { return .customEQ }
         guard query.count == 2 else { return nil }
         if query[0] == 0x66, standaloneNoiseControl(query[1]) != nil { return .noiseControl }
         if query == [0x66, 0x30], noiseToggle != nil { return .noiseToggle }
@@ -2405,33 +2889,50 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if query == automaticPowerOff?.parameterQueryPayload { return .automaticPowerOff }
         if query[0] == 0xD6, query[1] == systemFeatures.sidetoneSlot { return .sidetone }
         if query[0] == 0xF6, query[1] == touchAssignments.inquiryType { return .touchAssignments }
+        if query[1] == systemFeatures.speakToChatOptions?.variant.inquiry {
+            if query[0] == 0xF6 { return .system(.speakToChat) }
+            if query[0] == 0xFA { return .speakToChatOptions }
+        }
+        if query[0] == 0xF6, let feature = systemFeatures.legacyOnOffFeature(inquiry: query[1]) {
+            return .system(feature)
+        }
         if protocolInformation?.generation == .v1 {
             return query == [0xF6, 0x03] && legacyControls?.wearingControl.isSupported == true
                 ? .system(.pauseOnRemoval) : nil
         }
-        if query == [0xE6, 0x01], audioFeatures.supportsDSEE { return .dsee }
+        if query == audioFeatures.dseeParameterQuery { return .dsee }
+        if query == SonySoundLeakageReduction.parameterQuery, audioFeatures.soundLeakageReduction != nil { return .soundLeakageReduction }
+        if query == SonyVoiceContents.parameterQuery, audioFeatures.voiceContents != nil { return .voiceContents }
+        if query == SonyTVSoundBooster.parameterQuery, audioFeatures.tvSoundBooster != nil { return .tvSoundBooster }
+        if query == SonySoundFieldOptimization.parameterQuery, audioFeatures.soundFieldOptimization != nil { return .soundFieldOptimization }
+        if query == audioFeatures.backgroundMusic?.parameterQuery { return .backgroundMusic }
+        if query == SonyListeningModeAssignments.parameterQuery, audioFeatures.listeningModeAssignments != nil { return .listeningModeAssignments }
+        if query[0] == 0xE6, let variant = SonyUpmix.Variant(rawValue: query[1]), audioFeatures.upmix[variant] != nil {
+            return .upmix(variant)
+        }
         if query[0] == 0xF6 {
             if query[1] == 0x04, systemFeatures.voiceAssistant != nil { return .voiceAssistant }
             if let feature = SonySystemFeature(rawValue: query[1]), systemFeatures[feature] != nil { return .system(feature) }
         } else if query[0] == 0xFA {
             if query[1] == touchAssignments.inquiryType { return .touchCustomActions }
-            if query[1] == 0x0C, systemFeatures.speakToChatOptions != nil { return .speakToChatOptions }
         }
         return nil
     }
 
-    private func beginSystemRead(_ query: [UInt8]) {
-        guard var read = systemReads[query] else { return }
-        let setting = systemReadSetting(query)
+    private func beginSystemRead(_ query: [UInt8], type: UInt8 = 0x0C) {
+        let key = type == 0x0E ? [type] + query : query
+        guard var read = systemReads[key] else { return }
+        let setting = systemReadSetting(query, type: type)
         let parameterCommand: UInt8 = switch query[0] {
         case 0x20, 0x22: 0x26
         case 0x60, 0x62: 0x66
+        case 0x80, 0x82: 0x86
         case 0xD0, 0xD2: 0xD6
         case 0xE0, 0xE2: 0xE6
         case 0xF0, 0xF2: 0xF6
         default: query[0]
         }
-        read.errorSetting = setting ?? systemReadSetting([parameterCommand, query[1]])
+        read.errorSetting = setting ?? systemReadSetting([parameterCommand, query[1]], type: type)
         read.transmitted = true
         read.transmissionOrdinal = completedTransmissionOrdinal
         read.requestID = setting.flatMap { settingTimeouts[$0] != nil ? settingRequests[$0] : nil }
@@ -2439,26 +2940,27 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if protocolInformation?.generation == .v1, query == [0xE6, 0x01] {
             read.requestID = isReady && connectionTransition?.readbackTransmitted(session: controlSession) == true ? connectionRequestID : nil
         }
-        systemReads[query] = read
+        systemReads[key] = read
         if protocolInformation?.generation == .v1, query == [0xE6, 0x01], let transition = connectionTransition {
             switch transition.phase {
             case .awaitingUser, .replyQueued: return
             default: break
             }
         }
-        scheduleSystemReadTimeout(query)
+        scheduleSystemReadTimeout(query, type: type)
     }
 
-    private func scheduleSystemReadTimeout(_ query: [UInt8]) {
-        guard var read = systemReads[query], read.transmitted else { return }
+    private func scheduleSystemReadTimeout(_ query: [UInt8], type: UInt8 = 0x0C) {
+        let key = type == 0x0E ? [type] + query : query
+        guard var read = systemReads[key], read.transmitted else { return }
         read.timeout?.cancel()
         read.id = UUID()
         let id = read.id
         let session = controlSession
         let timeout = DispatchWorkItem { [weak self] in
             Task { @MainActor in
-                guard let self, self.controlSession == session, self.systemReads[query]?.id == id,
-                      self.systemReads[query]?.timeout != nil else { return }
+                guard let self, self.controlSession == session, self.systemReads[key]?.id == id,
+                      self.systemReads[key]?.timeout != nil else { return }
                 if self.legacyControls?.connectionQuality.isSupported == true,
                    self.connectionTransition?.isFinished == false,
                    [[0xE0, 1], [0xE2, 1], [0xE6, 1]].contains(query) {
@@ -2466,23 +2968,54 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     self.fail(String(localized: "\(name) settings were not received. Reconnect the headphones to try again."))
                     return
                 }
-                self.systemReads[query]?.timeout = nil
-                self.systemReads[query]?.timedOut = true
-                if self.systemReads[query]?.isObsolete == false, self.systemReads[query]?.isRetiredSidetoneRead == false {
-                    self.systemFeatures.invalidateRead(query)
-                    self.legacyControls?.invalidateSystemRead(query)
-                    self.legacyControls?.invalidateStandaloneNoiseRead(query)
-                    if self.noiseToggle?.queryPayloads.contains(query) == true {
-                        self.noiseToggle?.update([query[0] + 1, query[1]])
+                if query == SonyEarTipFit.selectionQueryPayload { self.objectWillChange.send() }
+                self.systemReads[key]?.timeout = nil
+                self.systemReads[key]?.timedOut = true
+                if self.systemReads[key]?.isObsolete == false, self.systemReads[key]?.isRetiredSidetoneRead == false {
+                    if type == 0x0E {
+                        if self.systemReads[key]?.errorSetting == .microphoneOperation { self.microphoneOperation.invalidateRead(query) }
+                        if self.systemReads[key]?.errorSetting == .adaptiveVolumeWithLimitation { self.adaptiveVolumeWithLimitation.invalidateRead(query) }
+                        if query == self.auracast.statusQuery { self.auracast.invalidateAvailability() }
+                    } else {
+                        self.systemFeatures.invalidateRead(query)
+                        if query == SonyAudioFeatures.upscalingQueryPayload { self.audioFeatures.invalidateUpscalingRead() }
+                        if query == [0xE2, SonyAudioFeatures.dseeWithDisableReasonsInquiry], self.audioFeatures.dseeInquiry == query[1] {
+                            self.audioFeatures.invalidateDSEEStatus()
+                        }
+                        if self.systemReads[key]?.errorSetting == .soundLeakageReduction { self.audioFeatures.invalidateSoundLeakageRead(query) }
+                        if self.systemReads[key]?.errorSetting == .voiceContents { self.audioFeatures.invalidateVoiceContentsRead(query) }
+                        if self.systemReads[key]?.errorSetting == .tvSoundBooster { self.audioFeatures.invalidateTVSoundBoosterRead(query) }
+                        if self.systemReads[key]?.errorSetting == .soundFieldOptimization { self.audioFeatures.invalidateSoundFieldOptimizationRead(query) }
+                        if self.systemReads[key]?.errorSetting == .backgroundMusic { self.audioFeatures.invalidateBackgroundMusicRead(query) }
+                        if self.systemReads[key]?.errorSetting == .listeningModeAssignments { self.audioFeatures.invalidateListeningModeAssignmentsRead(query) }
+                        if case .upmix(let variant) = self.systemReads[key]?.errorSetting {
+                            self.audioFeatures.invalidateUpmixRead(query, variant: variant)
+                        }
+                        self.legacyControls?.invalidateSystemRead(query)
+                        self.legacyControls?.invalidateStandaloneNoiseRead(query)
+                        if self.systemReads[key]?.errorSetting == .bassBoost { self.equalizer.bassBoost.invalidateRead(query) }
+                        if self.systemReads[key]?.errorSetting == .lrBalanceCorrection { self.equalizer.lrBalanceCorrection.invalidateRead(query) }
+                        if self.systemReads[key]?.errorSetting == .turnKeyEQ { self.equalizer.turnKey.invalidate(query) }
+                        if self.systemReads[key]?.errorSetting == .ultSoundEffectAssignment {
+                            self.equalizer.ultSoundEffectAssignment.invalidateRead(query)
+                        }
+                        if self.systemReads[key]?.errorSetting == .customSoundEffect {
+                            self.equalizer.customSoundEffect.invalidateRead(query)
+                        }
+                        if self.systemReads[key]?.errorSetting == .soundEffect { self.equalizer.soundEffect.invalidateRead(query) }
+                        if self.systemReads[key]?.errorSetting == .customEQ { self.equalizer.customEQ.invalidateRead(query) }
+                        if self.noiseToggle?.queryPayloads.contains(query) == true {
+                            self.noiseToggle?.update([query[0] + 1, query[1]])
+                        }
+                        if query == self.noiseTest?.queryPayload { self.noiseTest?.update([0x63, 0x40]) }
+                        self.touchAssignments.invalidateRead(query)
                     }
-                    if query == self.noiseTest?.queryPayload { self.noiseTest?.update([0x63, 0x40]) }
-                    self.touchAssignments.invalidateRead(query)
-                    if let setting = self.systemReads[query]?.errorSetting, setting != .dsee,
+                    if let setting = self.systemReads[key]?.errorSetting, setting != .dsee,
                        self.pendingChanges[setting] == nil, self.settingErrors[setting] == nil {
                         self.settingErrors[setting] = String(localized: "Headphone settings were not received. Refresh to try again.")
                     }
                 }
-                if query == [0xE6, 0x01] { self.invalidateExpiredDSEERead() }
+                if query == self.audioFeatures.dseeParameterQuery { self.invalidateExpiredDSEERead() }
                 let bytes = query.map { String(format: "%02X", $0) }.joined(separator: " ")
                 self.recordDiagnostic("System read timeout; opcode=\(query.first.map { String(format: "%02X", $0) } ?? "none")", failure: true)
                 Self.logger.error("System read timeout; session=\(session) query=\(bytes, privacy: .private)")
@@ -2490,7 +3023,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             }
         }
         read.timeout = timeout
-        systemReads[query] = read
+        systemReads[key] = read
         DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
     }
 
@@ -2500,10 +3033,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             systemReads.removeValue(forKey: query)?.timeout?.cancel()
         }
         queuedTouchChange = nil
+        tvSoundBoosterWriteBaseline = nil
+        backgroundMusicWriteBaseline = nil
+        listeningModeAssignmentWrite = nil
+        microphoneOperationWriteBaseline = nil
     }
 
     private func invalidateExpiredDSEERead() {
-        guard protocolInformation?.generation == .v2, let read = systemReads[[0xE6, 0x01]], read.timedOut,
+        guard protocolInformation?.generation == .v2, let query = audioFeatures.dseeParameterQuery,
+              let read = systemReads[query], read.timedOut,
               pendingChanges[.dsee] == nil, !read.isObsolete || unconfirmedChanges[.dsee] != nil else { return }
         audioFeatures.invalidateDSEERead()
         unconfirmedChanges[.dsee] = nil
@@ -2520,8 +3058,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         guard var read = voiceGuidanceReads[query], !read.transmitted else { return }
         read.transmitted = true
         read.transmissionOrdinal = completedTransmissionOrdinal
-        if query[0] == 0x46 {
-            let setting: Setting = query[1] == 1 ? .voiceGuidance : .voiceGuidanceVolume
+        if query[0] == 0x46, let setting = voiceGuidanceSetting(for: query[1]) {
             read.requestID = settingTimeouts[setting] != nil ? settingRequests[setting] : nil
             read.resolvesUnconfirmed = unconfirmedChanges[setting] != nil
         }
@@ -2592,6 +3129,33 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if preservingTimedOutReads, read.transmitted, read.timedOut { continue }
             powerReads.removeValue(forKey: key)?.timeout?.cancel()
         }
+    }
+
+    private func beginLightingRead(_ query: [UInt8]) {
+        guard var read = lightingReads[query] else { return }
+        read.transmitted = true
+        read.transmissionOrdinal = completedTransmissionOrdinal
+        let setting: Setting? = query == djControl.parameterQuery ? .speakerDJ
+            : karaoke.setting(forQuery: query).map(Setting.speakerKaraoke)
+                ?? SonySpeakerLighting.Parameter(rawValue: query[1]).flatMap { $0.query == query ? .speakerLighting($0) : nil }
+        if let setting {
+            read.requestID = settingTimeouts[setting] == nil ? nil : settingRequests[setting]
+            read.resolvesUnconfirmed = unconfirmedChanges[setting] != nil
+        }
+        let session = controlSession
+        let id = read.id
+        let timeout = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self, self.controlSession == session,
+                      self.lightingReads[query]?.id == id, self.lightingReads[query]?.timeout != nil else { return }
+                self.lightingReads[query]?.timeout = nil
+                self.lightingReads[query]?.timedOut = true
+                self.verifyConnectionPreferenceIfNeeded()
+            }
+        }
+        read.timeout = timeout
+        lightingReads[query] = read
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
     }
 
     private func beginLegacyCapabilities() {
@@ -2720,25 +3284,63 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func requestAudioFeatures(initial: Bool = false) {
+        for query in equalizer.bassBoost.queryPayloads where query[0] != 0x50 || equalizer.bassBoost.range == nil {
+            send(query)
+        }
         if let legacyControls {
             requestFeatureQueries(legacyControls.dsee.queryPayloads + legacyControls.connectionQuality.queryPayloads + legacyControls.wearingControl.queryPayloads
                 + (legacyControls.standaloneNoiseCancel?.queryPayloads ?? []) + (legacyControls.standaloneAmbient?.queryPayloads ?? [])
                 + (legacyControls.automaticPowerOff?.queryPayloads ?? []) + touchAssignments.queryPayloads + systemFeatures.queryPayloads, initial: initial)
             requestPlayback(.all)
+            if initial { requestPlayback(.legacyMetadata) }
             for payload in legacyIndicators.queryPayloads + legacySurround.queryPayloads + legacySoundPosition.queryPayloads { send(payload) }
             for payload in voiceGuidance.queryPayloads + multipoint.queryPayloads { send(payload, type: 0x0E) }
             return
         }
         guard protocolInformation?.generation != .v1 else { return }
+        requestLEAudioRestrictions()
+        for query in leAudioStandbyQueries { send(query) }
+        requestLEAudioCapabilities()
         let queries = (audioFeatures.queryPayloads + systemFeatures.queryPayloads + powerFeatures.queryPayloads(frameType: 0x0C) + touchAssignments.queryPayloads + (noiseToggle?.queryPayloads ?? []) + (noiseTest.map { [$0.queryPayload] } ?? [])).filter { payload in
-            if payload == [0xE0, 0x01], audioFeatures.dseeType != nil { return false }
+            if payload[0] == 0xE0, payload[1] == audioFeatures.dseeInquiry, audioFeatures.dseeType != nil { return false }
+            if payload == [0xE0, SonySoundLeakageReduction.inquiry],
+               audioFeatures.soundLeakageReduction?.exclusions != nil { return false }
+            if payload == SonyVoiceContents.capabilityQuery, audioFeatures.voiceContents?.exclusions != nil { return false }
             if let inquiry = audioFeatures.connectionModeInquiryType,
                payload == [0xE0, inquiry], audioFeatures.supportedConnectionModes != nil { return false }
             return true
         }
         requestFeatureQueries(queries, initial: initial)
+        for query in equalizer.lrBalanceCorrection.queryPayloads
+            where query != SonyLRBalanceCorrection.capabilityQuery || equalizer.lrBalanceCorrection.adjustmentCapability == nil {
+            send(query)
+        }
+        for query in equalizer.turnKey.queryPayloads { send(query) }
+        for query in equalizer.ultSoundEffectAssignment.queryPayloads { send(query) }
+        for query in equalizer.customSoundEffect.queryPayloads { send(query) }
+        for query in equalizer.soundEffect.queryPayloads + equalizer.customEQ.queryPayloads { send(query) }
         requestPlayback(.all)
-        for payload in voiceGuidance.queryPayloads + multipoint.queryPayloads + soundPressure.queryPayloads + powerFeatures.queryPayloads(frameType: 0x0E) { send(payload, type: 0x0E) }
+        requestSpeakerLighting()
+        requestDJControl()
+        requestKaraoke()
+        requestAuracast()
+        requestEarpieceSelection()
+        for payload in voiceGuidance.queryPayloads + multipoint.queryPayloads + soundPressure.queryPayloads
+            + volumeProtection.queryPayloads + powerFeatures.queryPayloads(frameType: 0x0E) { send(payload, type: 0x0E) }
+        for payload in usbProtection.queryPayloads { send(payload, type: 0x0E) }
+        for payload in linkAutoSwitch.queryPayloads { send(payload, type: 0x0E) }
+        for payload in microphoneOperation.queryPayloads + adaptiveVolumeWithLimitation.queryPayloads { send(payload, type: 0x0E) }
+    }
+
+    private func requestLEAudioRestrictions(frameType: UInt8? = nil) {
+        for type: UInt8 in [0x0C, 0x0E] where frameType == nil || frameType == type {
+            for query in leAudioRestrictions.queryPayloads(frameType: type) { send(query, type: type) }
+        }
+    }
+
+    private func requestEarpieceSelection() {
+        guard earTipFit.supportsEarpieceSelection, systemReads[SonyEarTipFit.selectionQueryPayload] == nil else { return }
+        send(SonyEarTipFit.selectionStatusQueryPayload)
     }
 
     private func requestFeatureQueries(_ queries: [[UInt8]], initial: Bool) {
@@ -2804,11 +3406,22 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     @discardableResult
     private func requestPlayback(_ refresh: PlaybackRefresh) -> Bool {
-        let queries = refresh == .musicVolume ? [playback.statusQueryPayload, playback.musicVolumeQueryPayload]
-            : playback.queryPayloads.filter { $0 != playback.capabilityQueryPayload || (!playback.hasReceivedCapabilities && !legacyCapabilityQueries.contains($0)) }
+        let queries: [[UInt8]]
+        switch refresh {
+        case .musicVolume:
+            queries = [playback.statusQueryPayload, playback.musicVolumeQueryPayload]
+        case .legacyMetadata:
+            guard playback.canReadLegacyMetadata else { return false }
+            queries = playback.legacyMetadataQueryPayloads.filter { playbackReads[$0]?.timedOut != true }
+        case .all:
+            queries = playback.queryPayloads.filter {
+                !playback.legacyMetadataQueryPayloads.contains($0)
+                    && ($0 != playback.capabilityQueryPayload || (!playback.hasReceivedCapabilities && !legacyCapabilityQueries.contains($0)))
+            }
+        }
         guard !queries.isEmpty, queries.allSatisfy({ playbackReads[$0]?.timedOut != true }) else { return false }
         if let sequence = playbackReadSequence {
-            if !queries.allSatisfy({ sequence.queries.contains($0) }) { pendingPlaybackRefresh.insert(refresh) }
+            if !queries.allSatisfy({ sequence.queriesAwaitingReplies.contains($0) }) { pendingPlaybackRefresh.insert(refresh) }
             for query in queries where playbackReads[query] != nil { playbackReads[query]?.refreshRequested = true }
             return true
         }
@@ -2834,9 +3447,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         let refreshes = pendingPlaybackRefresh
         pendingPlaybackRefresh = []
         if refreshes.contains(.musicVolume), requestPlayback(.musicVolume) {
-            if refreshes.contains(.all) { pendingPlaybackRefresh.insert(.all) }
-        } else if refreshes.contains(.all) {
-            requestPlayback(.all)
+            pendingPlaybackRefresh.formUnion(refreshes.subtracting([.musicVolume]))
+        } else if refreshes.contains(.all), requestPlayback(.all) {
+            if refreshes.contains(.legacyMetadata) { pendingPlaybackRefresh.insert(.legacyMetadata) }
+        } else if refreshes.contains(.legacyMetadata) {
+            requestPlayback(.legacyMetadata)
         }
     }
 
@@ -2927,6 +3542,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         #endif
         if connectionTransition?.phase == .recovering || recoveryUsesBLE != nil { return }
         guard isBluetoothInitialized else {
+            if !automatically { refreshAfterBluetoothInitialization = true }
             start()
             return
         }
@@ -2986,10 +3602,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     @discardableResult
     func beginLegacyOptimizer() -> Bool {
         if legacyOptimizerTransition != nil { return true }
-        guard legacyOptimizerUnavailableReason == nil else { return false }
+        guard legacyOptimizerUnavailableReason == nil, let inquiry = legacyOptimizer.inquiry else { return false }
         cancelScheduledRetry(resetAttempts: true)
-        legacyOptimizer = SonyLegacyOptimizer(supportedFunctions: legacyControls?.supportedFunctions ?? [])
-        legacyOptimizerTransition = SonyLegacyOptimizerTransition(session: controlSession)
+        legacyOptimizer = SonyLegacyOptimizer(inquiry: inquiry)
+        legacyOptimizerTransition = SonyLegacyOptimizerTransition(session: controlSession, inquiry: inquiry)
         advanceLegacyOptimizer()
         return true
     }
@@ -3057,7 +3673,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func receiveLegacyOptimizer(_ payload: [UInt8]) -> Bool {
-        guard payload.count >= 2, payload[1] == 1, [0x81, 0x83, 0x85, 0x87, 0x89].contains(payload[0]) else { return false }
+        guard let inquiry = legacyOptimizer.inquiry, inquiry.generation == protocolInformation?.generation,
+              payload.count >= 2, payload[1] == inquiry.type, [0x81, 0x83, 0x85, 0x87, 0x89].contains(payload[0]) else { return false }
         guard legacyOptimizerTransition?.accepts(payload, session: controlSession, transmissionOrdinal: receivedTransmissionOrdinal ?? .max) == true else { return true }
         var updated = legacyOptimizer
         guard updated.update(payload) else { return true }
@@ -3077,7 +3694,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 guard let self, self.controlSession == transition.session,
                       self.legacyOptimizerTransition?.id == transition.id,
                       self.legacyOptimizerTransition?.phase == .running else { return }
-                self.dispatch([0x85, 1, 0, 0x11], type: 0x0C)
+                self.dispatch([0x85, transition.inquiry.type, 0, 0x11], type: 0x0C)
             }
         }
     }
@@ -3194,7 +3811,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if earTipFitTransition != nil { return true }
         guard earTipFitUnavailableReason == nil else { return false }
         cancelScheduledRetry(resetAttempts: true)
-        earTipFit = SonyEarTipFit(supportedFunctions: supportedFunctions)
+        earTipFit.resetMeasurement()
         earTipFitTransition = SonyEarTipFitTransition(session: controlSession, supportsEarpieceSelection: earTipFit.supportsEarpieceSelection)
         advanceEarTipFit()
         return true
@@ -3204,6 +3821,71 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         guard earTipFitTransition?.id == id, canStartEarTipFit,
               earTipFitTransition?.start(model: earTipFit) == true else { return }
         advanceEarTipFit()
+    }
+
+    var canStartWearingPositionCheck: Bool {
+        systemControlContextIsAvailable && hasCurrentTable2Capabilities
+            && wearingPosition.duration != nil && wearingPosition.available == true && !wearingPositionTimedOut
+    }
+
+    func startWearingPositionCheck() {
+        guard canStartWearingPositionCheck else { return }
+        wearingPositionResult = nil
+        checkingWearingPosition = true
+        send(SonyWearingPosition.startPayload, type: SonyWearingPosition.frameType)
+    }
+
+    private func beginWearingPositionCheck() {
+        guard checkingWearingPosition, let duration = wearingPosition.duration else { return }
+        let ordinal = completedTransmissionOrdinal
+        wearingPositionOrdinal = ordinal
+        let session = controlSession
+        let timeout = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self, self.controlSession == session, self.wearingPositionOrdinal == ordinal else { return }
+                self.wearingPositionTimedOut = true
+                self.finishWearingPositionCheck()
+            }
+        }
+        wearingPositionTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(8, Double(duration) + 5), execute: timeout)
+    }
+
+    private func finishWearingPositionCheck() {
+        wearingPositionTimeout?.cancel()
+        wearingPositionTimeout = nil
+        wearingPositionOrdinal = nil
+        checkingWearingPosition = false
+    }
+
+    private func resetWearingPosition(supportedFunctions: Set<UInt8> = []) {
+        finishWearingPositionCheck()
+        wearingPositionResult = nil
+        wearingPositionTimedOut = false
+        wearingPosition = SonyWearingPosition(supportedFunctions2: supportedFunctions)
+    }
+
+    private func receiveWearingPosition(_ payload: [UInt8]) -> Bool {
+        guard payload.count >= 2 else { return false }
+        let header = Array(payload.prefix(2))
+        guard [[0xF1, 7], [0xF3, 8], [0xF5, 8], [0xF9, 8]].contains(header) else { return false }
+        guard hasCurrentTable2Capabilities, wearingPosition.isSupported else { return true }
+        if header == [0xF9, 8] {
+            guard checkingWearingPosition, receivedAfter(wearingPositionOrdinal),
+                  let result = SonyWearingPosition.decodeResult(payload) else { return true }
+            wearingPositionResult = result
+            finishWearingPositionCheck()
+        } else {
+            var updated = wearingPosition
+            guard updated.update(payload) else { return true }
+            if payload[0] == 0xF5 {
+                _ = consumeDiscoveryRead(SonyWearingPosition.statusQuery, type: SonyWearingPosition.frameType)
+            } else {
+                guard consumeDiscoveryRead([payload[0] - 1, payload[1]], type: SonyWearingPosition.frameType) else { return true }
+            }
+            wearingPosition = updated
+        }
+        return true
     }
 
     func cancelEarTipFit(id: UUID, dismissWhenFinished: Bool = false) {
@@ -3305,6 +3987,37 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         return true
     }
 
+    private func receiveEarpieceSelection(_ payload: [UInt8]) -> Bool {
+        guard payload.count >= 2, payload[1] == 0x07, earTipFit.supportsEarpieceSelection,
+              [0xF3, 0xF5, 0xF7, 0xF9].contains(payload[0]) else { return false }
+        let statusReport = payload[0] == 0xF3 || payload[0] == 0xF5
+        if !statusReport, earTipFitTransition?.blocksCommands == true { return receiveEarTipFit(payload) }
+        guard stage == .ready else { return true }
+        let query = statusReport ? SonyEarTipFit.selectionStatusQueryPayload : SonyEarTipFit.selectionQueryPayload
+        let notification = payload[0] == 0xF5 || payload[0] == 0xF9
+        let read = systemReads[query]
+        if !notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        var updated = earTipFit
+        guard updated.update(payload) else { return true }
+        lastSyncDate = Date()
+        if notification {
+            if read?.transmitted == true, receivedAfter(read?.transmissionOrdinal) {
+                systemReads[query]?.isObsolete = true
+            }
+        } else {
+            systemReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true {
+                if !isRunningHeadphoneTest { requestEarpieceSelection() }
+                return true
+            }
+        }
+        if notification || read?.isObsolete == false {
+            earTipFit = updated
+        }
+        if statusReport, !notification, !isRunningHeadphoneTest { send(SonyEarTipFit.selectionQueryPayload) }
+        return true
+    }
+
     #if DEBUG
     private func simulateEarTipFitResult() {
         guard isSimulated, simulatesSettingReplies, let transition = earTipFitTransition else { return }
@@ -3327,7 +4040,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     #endif
 
     func powerOff(expectedSession: UInt64) {
-        guard expectedSession == controlSession, canPowerOff else { return }
+        guard expectedSession == controlSession, canPowerOff, let payload = powerOffPayload else { return }
         cancelScheduledRetry(resetAttempts: true)
         resetPlaybackReads()
         resetSoundPressureRead()
@@ -3342,7 +4055,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         acknowledgmentTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: timeout)
-        send(Self.powerOffPayload)
+        send(payload, type: SonyPowerOffCommand.frameType)
     }
 
     private func clearPowerOffForExplicitConnection() {
@@ -3620,6 +4333,145 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         sourceTransition = nil
         deviceActionTransition = nil
         for payload in multipoint.queryPayloads { send(payload, type: 0x0E) }
+        for payload in linkAutoSwitch.queryPayloads { send(payload, type: 0x0E) }
+    }
+
+    var canSetMusicHandover: Bool {
+        musicHandoverWriteContextIsAvailable
+            && pendingChanges[.musicHandover] == nil && unconfirmedChanges[.musicHandover] == nil
+    }
+
+    private var musicHandoverWriteContextIsAvailable: Bool {
+        systemControlContextIsAvailable && hasCurrentTable2Capabilities && multipoint.musicHandoverEnabled != nil
+    }
+
+    func setMusicHandover(_ enabled: Bool) {
+        guard canSetMusicHandover, multipoint.musicHandoverEnabled != enabled,
+              let payload = multipoint.musicHandoverSetPayload(enabled) else { return }
+        sendSetting(payload, setting: .musicHandover, type: 0x0E)
+    }
+
+    private func receiveMusicHandover(_ payload: [UInt8]) -> Bool {
+        guard payload.prefix(2) == [0x37, 0x03] || payload.prefix(2) == [0x39, 0x03] else { return false }
+        guard hasCurrentTable2Capabilities else { return true }
+        var updated = multipoint
+        guard updated.update(payload) else { return true }
+        let isReadback = payload[0] == 0x37
+        if isReadback {
+            guard receivedAfter(musicHandoverReadOrdinal) else { return true }
+            musicHandoverReadOrdinal = nil
+        }
+        if let writeOrdinal = settingTransmissionOrdinals[.musicHandover], !receivedAfter(writeOrdinal) { return true }
+        musicHandoverReadOrdinal = nil
+        multipoint = updated
+        lastSyncDate = Date()
+        confirmSetting(.musicHandover, value: [payload[2]])
+        if isReadback, pendingChanges[.musicHandover] == nil, unconfirmedChanges[.musicHandover] != nil {
+            unconfirmedChanges[.musicHandover] = nil
+            settingTransmissionOrdinals[.musicHandover] = nil
+        }
+        return true
+    }
+
+    private func receiveLEAudioRestriction(_ payload: [UInt8], type: UInt8) -> Bool {
+        guard let response = leAudioRestrictions.readQuery(for: payload, frameType: type) else { return false }
+        var updated = leAudioRestrictions
+        guard updated.update(payload, frameType: type) else { return true }
+        let ownsRead = consumeDiscoveryRead(response.query, type: type)
+        guard response.notification || ownsRead else { return true }
+        if updated != leAudioRestrictions { leAudioRestrictions = updated }
+        lastSyncDate = Date()
+        return true
+    }
+
+    private func receiveLinkAutoSwitch(_ payload: [UInt8]) -> Bool {
+        guard table2CapabilitiesSession == controlSession, let query = linkAutoSwitch.readQuery(for: payload) else { return false }
+        var updated = linkAutoSwitch
+        guard updated.update(payload) else { return true }
+        let ownsRead = consumeDiscoveryRead(query, type: 0x0E)
+        guard payload[0] == 0xF5 || payload[0] == 0xF9 || ownsRead else { return true }
+        if linkAutoSwitch != updated { linkAutoSwitch = updated }
+        lastSyncDate = Date()
+        return true
+    }
+
+    var canSetMicrophoneOperation: Bool {
+        systemControlContextIsAvailable && hasCurrentTable2Capabilities && microphoneOperation.available == true
+            && microphoneOperation.parameterValue != nil
+            && pendingChanges[.microphoneOperation] == nil && unconfirmedChanges[.microphoneOperation] == nil
+    }
+
+    func setMicrophoneOperation(gesture: Bool? = nil, tone: Bool? = nil) {
+        guard canSetMicrophoneOperation, let current = microphoneOperation.parameterValue,
+              let payload = microphoneOperation.setPayload(gesture: gesture, tone: tone),
+              Array(payload.dropFirst(2)) != current else { return }
+        microphoneOperationWriteBaseline = current
+        sendSetting(payload, setting: .microphoneOperation, type: 0x0E)
+    }
+
+    private func microphoneOperationWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        systemControlContextIsAvailable && hasCurrentTable2Capabilities && microphoneOperation.available == true
+            && microphoneOperation.parameterValue == microphoneOperationWriteBaseline
+            && pendingChanges[.microphoneOperation] == settingValue(payload, setting: .microphoneOperation)
+    }
+
+    private func receiveMicrophoneOperation(_ payload: [UInt8]) -> Bool {
+        guard let response = SonyMicrophoneOperation.readQuery(for: payload) else { return false }
+        guard hasCurrentTable2Capabilities, microphoneOperation.isSupported else { return true }
+        let query = response.query
+        let key: [UInt8] = [0x0E] + query
+        let read = response.notification ? nil : systemReads[key]
+        if !response.notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        var updated = microphoneOperation
+        guard updated.update(payload) else { return true }
+        let setting = Setting.microphoneOperation
+        if response.notification {
+            if systemReads[key]?.transmitted == true, receivedAfter(systemReads[key]?.transmissionOrdinal) {
+                systemReads[key]?.isObsolete = true
+            }
+        } else {
+            systemReads.removeValue(forKey: key)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query, type: 0x0E)
+                return true
+            }
+        }
+        microphoneOperation = updated
+        lastSyncDate = Date()
+        clearSystemReadError(setting)
+        guard query == SonyMicrophoneOperation.parameterQuery, let value = updated.parameterValue else { return true }
+        if response.notification || (read?.requestID != nil && read?.requestID == settingRequests[setting]) {
+            confirmSetting(setting, value: value)
+        }
+        if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil,
+           response.notification || read?.requestID != nil || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[setting] = nil
+            settingErrors[setting] = nil
+        }
+        if let read, pendingChanges[setting] != nil, read.requestID != settingRequests[setting] { send(query, type: 0x0E) }
+        return true
+    }
+
+    var canSetLegacyPairingMode: Bool {
+        guard let pairingMode = multipoint.pairingMode else { return false }
+        return canRefreshDevices && leAudioUnavailableReason(.pairedDevices) == nil
+            && pendingChanges.isEmpty && pendingPlaybackCommand == nil && !isEqualizerUpdatePending
+            && !isApplyingChange && ambientWorkItem == nil && multipoint.legacyPairingModePayload(!pairingMode) != nil
+    }
+
+    func setLegacyPairingMode(_ enabled: Bool) {
+        guard canSetLegacyPairingMode, let payload = multipoint.legacyPairingModePayload(enabled) else { return }
+        legacyPairingModeError = nil
+        legacyPairingModeRequest = enabled
+        send(payload, type: 0x0E)
+    }
+
+    private func finishLegacyPairingMode(error: String? = nil) {
+        legacyPairingModeTimeout?.cancel()
+        legacyPairingModeTimeout = nil
+        legacyPairingModeTransmissionOrdinal = nil
+        legacyPairingModeRequest = nil
+        legacyPairingModeError = error
     }
 
     func changeDeviceConnection(_ action: SonyPeripheralAction, device: SonyMultipointDevice) {
@@ -3629,6 +4481,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         sourceTransition = nil
         invalidateSoundPressureReading()
         deviceActionRecoveryAttempts = 0
+        deviceActionTransmissionOrdinal = nil
         deviceActionTransition = transition
         advanceDeviceActionTransition()
     }
@@ -3647,6 +4500,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         guard frame.type == 0x0E,
               deviceActionTransition?.commandTransmitted(frame.payload, model: multipoint, session: controlSession) == true,
               deviceActionTransition?.phase == .awaitingResult, let request = deviceActionTransition?.requestID else { return }
+        deviceActionTransmissionOrdinal = completedTransmissionOrdinal
         let session = controlSession
         let timeout = DispatchWorkItem { [weak self] in
             Task { @MainActor in
@@ -3904,13 +4758,30 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if !isReady { linkState = .failed(message) }
     }
 
-    func selectAudioSource(_ device: SonyMultipointDevice) {
+    func selectAudioSource(_ device: SonyMultipointDevice, isCurrent: (() -> Bool)? = nil) {
         guard sourceControlUnavailableReason == nil,
               let transition = SonySourceTransition(targetAddress: device.address, model: multipoint, session: controlSession) else { return }
         clearFinishedConnectionChange()
         invalidateSoundPressureReading()
+        if let isCurrent, let payload = multipoint.sourceSwitchPayload(address: device.address) {
+            sourceSelectionAuthorization = (transition.requestID, payload, isCurrent)
+        } else {
+            sourceSelectionAuthorization = nil
+        }
         sourceTransition = transition
         advanceSourceTransition()
+    }
+
+    static let sourceSelectionTimeout: TimeInterval = 10
+
+    func isQueuedAudioSourceSelection(_ request: UUID) -> Bool {
+        sourceSelectionAuthorization?.requestID == request && sourceTransition?.requestID == request
+            && sourceTransition?.session == controlSession && sourceTransition?.expectedPayload?.first == 0x3C
+    }
+
+    func cancelQueuedAudioSourceSelection(_ request: UUID, expired: Bool) {
+        guard isQueuedAudioSourceSelection(request) else { return }
+        sourceTransition?.cancelUnsentSelection(expired: expired)
     }
 
     func setSourceKeeping(_ enabled: Bool) {
@@ -3941,12 +4812,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private func advanceSourceTransition() {
         sourceTimeout?.cancel()
         sourceTimeout = nil
+        if sourceTransition?.phase == .queued, inventoryRead != nil { return }
         if let payload = sourceTransition?.expectedPayload { send(payload, type: 0x0E) }
     }
 
     private func beginSourceConfirmation(_ frame: SonyFrame) {
         guard frame.type == 0x0E else { return }
-        if frame.payload.count == 2, frame.payload[0] == 0x36, frame.payload[1] == multipoint.inventoryInquiryType, let read = inventoryRead {
+        if frame.payload.count == 2, frame.payload[0] == 0x36, frame.payload[1] == multipoint.deviceInventoryInquiryType, let read = inventoryRead {
             inventoryRead?.transmitted = true
             inventoryRead?.transmissionOrdinal = completedTransmissionOrdinal
             let session = controlSession
@@ -3955,6 +4827,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     guard let self, self.controlSession == session, self.inventoryRead?.id == read.id else { return }
                     self.inventoryRead?.timedOut = true
                     self.inventoryReadTimeout = nil
+                    self.invalidateCodecSource()
+                    self.sourceTransition?.inventoryReadFailed()
                     if self.deviceActionTransition?.phase == .queued {
                         self.deviceActionTransition?.inventoryReadFailed()
                         self.advanceDeviceActionTransition()
@@ -3977,7 +4851,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
             }
             sourceTimeout = timeout
-            DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeout)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.sourceSelectionTimeout, execute: timeout)
         }
         #if DEBUG
         if isSimulated, simulatesSettingReplies {
@@ -3989,6 +4863,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             case let prefix where prefix.count == 2 && prefix[0] == 0x32 && prefix[1] == multipoint.inventoryInquiryType:
                 reply = [0x33, frame.payload[1], 0, 0]
             case [0x36, 0x01]: reply = [0x37, 0x01, multipoint.keeping == true ? 0 : 1]
+            case [0x36, 0x03]: reply = [0x37, 0x03, multipoint.musicHandoverEnabled == true ? 1 : 0]
             case let prefix where prefix.count == 2 && prefix[0] == 0x36 && prefix[1] == multipoint.inventoryInquiryType:
                 reply = simulatedMultipointInventory(selected: simulatedSourceID)
             case [0x38, 0x01]: reply = [0x39, 0x01, frame.payload[2], 0]
@@ -4021,13 +4896,19 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private func receiveMultipoint(_ payload: [UInt8]) {
         var ownedReadback = false
         var ownedDeviceReadback = false
-        if payload.count >= 2, payload[0] == 0x37, payload[1] == multipoint.inventoryInquiryType,
+        if payload.count >= 2, payload[0] == 0x37, payload[1] == multipoint.deviceInventoryInquiryType,
            let read = inventoryRead, read.transmitted, receivedAfter(read.transmissionOrdinal) {
             ownedReadback = read.requestID != nil && read.requestID == sourceTransition?.requestID
             ownedDeviceReadback = read.requestID != nil && read.requestID == deviceActionTransition?.requestID
             inventoryRead = nil
             inventoryReadTimeout?.cancel()
             inventoryReadTimeout = nil
+            if read.isObsolete {
+                if ownedDeviceReadback { deviceActionTransition?.repeatReadback() }
+                advanceDeviceActionTransition()
+                return
+            }
+            if sourceTransition?.phase == .queued { advanceSourceTransition() }
             if deviceActionTransition?.phase == .queued { advanceDeviceActionTransition() }
         }
         if sourceTransition?.receive(payload, model: multipoint, session: controlSession, readbackOwned: ownedReadback) == true {
@@ -4314,9 +5195,169 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         setEqualizerPreset(preset.rawValue)
     }
 
+    var canSetBassBoost: Bool {
+        systemControlContextIsAvailable && pendingChanges[.bassBoost] == nil && unconfirmedChanges[.bassBoost] == nil
+            && equalizer.bassBoost.available == true && equalizer.bassBoost.level != nil
+    }
+
+    func setBassBoost(_ level: Int) {
+        guard canSetBassBoost, equalizer.bassBoost.level != level,
+              let payload = equalizer.bassBoost.setPayload(level) else { return }
+        sendSetting(payload, setting: .bassBoost)
+    }
+
+    var canSetLRBalanceCorrection: Bool {
+        systemControlContextIsAvailable && equalizer.lrBalanceCorrection.canSet
+            && pendingChanges[.lrBalanceCorrection] == nil && unconfirmedChanges[.lrBalanceCorrection] == nil
+    }
+
+    func setLRBalanceCorrection(_ enabled: Bool) {
+        guard canSetLRBalanceCorrection, (equalizer.lrBalanceCorrection.mode == .on) != enabled,
+              let payload = equalizer.lrBalanceCorrection.setPayload(enabled: enabled) else { return }
+        sendSetting(payload, setting: .lrBalanceCorrection)
+    }
+
+    var canChangeTurnKeyEqualizer: Bool {
+        systemControlContextIsAvailable && !soundLeakageReductionExcludes(.equalizer)
+            && pendingChanges[.turnKeyEQ] == nil && unconfirmedChanges[.turnKeyEQ] == nil
+    }
+
+    func importTurnKeyEqualizer(_ code: String) {
+        guard canChangeTurnKeyEqualizer, let payload = equalizer.turnKey.importPayload(code) else { return }
+        equalizer.turnKey.lastCompletedOperation = nil
+        sendSetting(payload, setting: .turnKeyEQ)
+    }
+
+    var turnKeyImportActions: [SonyConnectionAlertAction] {
+        guard systemControlContextIsAvailable, turnKeyImportJudged,
+              pendingChanges[.turnKeyEQ] == [0x32], turnKeyImportReply == nil else { return [] }
+        return turnKeyImportAlert?.availableActions ?? []
+    }
+
+    func respondToTurnKeyEqualizerImport(_ action: SonyConnectionAlertAction) {
+        guard turnKeyImportActions.contains(action), let reply = turnKeyImportAlert?.replyPayload(action) else { return }
+        turnKeyImportReply = reply
+        turnKeyImportAlert = nil
+        send(reply)
+    }
+
+    func deleteTurnKeyEqualizerPreset(_ preset: UInt8) {
+        guard canChangeTurnKeyEqualizer, let payload = equalizer.turnKey.deletePayload(preset) else { return }
+        equalizer.turnKey.lastCompletedOperation = nil
+        sendSetting(payload, setting: .turnKeyEQ)
+    }
+
+    private func turnKeyWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        systemControlContextIsAvailable && !soundLeakageReductionExcludes(.equalizer)
+            && equalizer.turnKey.acceptsWrite(payload) && pendingChanges[.turnKeyEQ] == settingValue(payload, setting: .turnKeyEQ)
+    }
+
+    var canChangeULTSoundEffectAssignment: Bool {
+        systemControlContextIsAvailable && pendingChanges[.ultSoundEffectAssignment] == nil
+            && unconfirmedChanges[.ultSoundEffectAssignment] == nil
+    }
+
+    func setULTSoundEffectAssignment(_ effect: SonyULTSoundEffectAssignment.Effect, enabled: Bool) {
+        let assignment = equalizer.ultSoundEffectAssignment
+        guard canChangeULTSoundEffectAssignment, let payload = assignment.setPayload(effect, enabled: enabled) else { return }
+        ultAssignmentBaseline = assignment
+        sendSetting(payload, setting: .ultSoundEffectAssignment)
+    }
+
+    private func ultAssignmentWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        systemControlContextIsAvailable && ultAssignmentBaseline == equalizer.ultSoundEffectAssignment
+            && pendingChanges[.ultSoundEffectAssignment] == settingValue(payload, setting: .ultSoundEffectAssignment)
+    }
+
+    private var customSoundEffectContextIsAvailable: Bool {
+        systemControlContextIsAvailable && !equalizer.customSoundEffect.isExcludedByStamina
+    }
+
+    var canChangeCustomSoundEffect: Bool {
+        customSoundEffectContextIsAvailable && pendingChanges[.customSoundEffect] == nil
+            && unconfirmedChanges[.customSoundEffect] == nil
+    }
+
+    func selectCustomSoundEffect(_ effect: SonyCustomSoundEffect.Effect) {
+        sendCustomSoundEffect(equalizer.customSoundEffect.selectPayload(effect))
+    }
+
+    func resetCustomSoundEffect(_ effect: SonyCustomSoundEffect.Effect) {
+        sendCustomSoundEffect(equalizer.customSoundEffect.resetPayload(effect))
+    }
+
+    func editCustomSoundEffect(_ effect: SonyCustomSoundEffect.Effect, values: [UInt8], basedOn baseline: [UInt8]) {
+        guard equalizer.customSoundEffect.values == baseline else { return }
+        sendCustomSoundEffect(equalizer.customSoundEffect.editPayload(effect, values: values))
+    }
+
+    private func sendCustomSoundEffect(_ payload: [UInt8]?) {
+        guard canChangeCustomSoundEffect, let payload else { return }
+        customSoundEffectBaseline = equalizer.customSoundEffect
+        sendSetting(payload, setting: .customSoundEffect)
+    }
+
+    private func customSoundEffectWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        customSoundEffectContextIsAvailable && customSoundEffectBaseline == equalizer.customSoundEffect
+            && pendingChanges[.customSoundEffect] == settingValue(payload, setting: .customSoundEffect)
+    }
+
+    var canChangeSoundEffect: Bool {
+        systemControlContextIsAvailable && pendingChanges[.soundEffect] == nil && unconfirmedChanges[.soundEffect] == nil
+    }
+
+    var canChangeCustomEQ: Bool {
+        customEQContextIsAvailable && equalizer.customEQ.available == true
+            && pendingChanges[.customEQ] == nil && unconfirmedChanges[.customEQ] == nil
+    }
+
+    private var customEQContextIsAvailable: Bool {
+        systemControlContextIsAvailable && audioFeatures.tvSoundBooster?.enabled != true
+    }
+
+    func setSoundEffect(_ effect: SonySoundEffect.Effect) {
+        guard canChangeSoundEffect, let selected = equalizer.soundEffect.selectedCode,
+              let payload = equalizer.soundEffect.setPayload(effect) else { return }
+        soundEffectSelectionBeforeWrite = selected
+        sendSetting(payload, setting: .soundEffect)
+    }
+
+    func setCustomEQLevels(_ values: [UInt8], basedOn baseline: SonyCustomEQ) {
+        guard canChangeCustomEQ, equalizer.customEQ == baseline,
+              let payload = equalizer.customEQ.setPayload(values) else { return }
+        customEQBeforeWrite = baseline
+        sendSetting(payload, setting: .customEQ)
+    }
+
+    private func standaloneEQSetting(for payload: [UInt8]) -> Setting? {
+        switch payload.prefix(2) {
+        case [0x58, 0x30]: .soundEffect
+        case [0x58, 0x31]: .customEQ
+        default: nil
+        }
+    }
+
+    private func standaloneEQWriteIsCurrent(_ payload: [UInt8], setting: Setting) -> Bool {
+        guard pendingChanges[setting] == settingValue(payload, setting: setting) else { return false }
+        if setting == .soundEffect {
+            guard systemControlContextIsAvailable, soundEffectSelectionBeforeWrite == equalizer.soundEffect.selectedCode,
+                  let effect = SonySoundEffect.Effect(rawValue: payload[2]) else { return false }
+            return equalizer.soundEffect.setPayload(effect) == payload
+        }
+        return customEQContextIsAvailable && customEQBeforeWrite == equalizer.customEQ
+            && equalizer.customEQ.setPayload(Array(payload.dropFirst(3))) == payload
+    }
+
     func setEqualizerPreset(_ preset: UInt8) {
+        if equalizer.supportsULT, isEqualizerUpdatePending || pendingChanges[.equalizerReadback] != nil { return }
         guard let payload = equalizer.presetPayload(preset) else { return }
         queueEqualizer(payload, debounce: false)
+    }
+
+    func setEqualizerULTMode(_ mode: SonyEqualizerULTMode) {
+        guard !isEqualizerUpdatePending, pendingChanges[.equalizerReadback] == nil,
+              mode != equalizer.ultMode, let payload = equalizer.ultModePayload(mode) else { return }
+        queueEqualizer(payload, debounce: false, changingULTMode: true)
     }
 
     func setDSEE(_ mode: SonyDSEEMode) {
@@ -4324,6 +5365,77 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         let payload = legacyControls == nil ? audioFeatures.dseeSetPayload(mode) : legacyControls?.dsee.setPayload(mode)
         guard let payload else { return }
         sendSetting(payload, setting: .dsee)
+    }
+
+    func soundLeakageReductionExcludes(_ feature: SonySoundLeakageReduction.Exclusion) -> Bool {
+        guard let state = audioFeatures.soundLeakageReduction, state.exclusions?.contains(feature.rawValue) == true else { return false }
+        return state.enabled == true || pendingChanges[.soundLeakageReduction] == [0]
+            || unconfirmedChanges[.soundLeakageReduction] == [0]
+    }
+
+    private func soundLeakageReductionPayload(enabled: Bool) -> [UInt8]? {
+        guard systemControlContextIsAvailable, let state = audioFeatures.soundLeakageReduction,
+              state.enabled != enabled else { return nil }
+        if enabled, let exclusions = state.exclusions,
+           (exclusions.contains(SonySoundLeakageReduction.Exclusion.equalizer.rawValue) && isEqualizerUpdatePending
+            || exclusions.contains(SonySoundLeakageReduction.Exclusion.dsee.rawValue) && pendingChanges[.dsee] != nil) { return nil }
+        return state.setPayload(enabled: enabled)
+    }
+
+    var canSetSoundLeakageReduction: Bool {
+        guard let enabled = audioFeatures.soundLeakageReduction?.enabled else { return false }
+        return pendingChanges[.soundLeakageReduction] == nil && unconfirmedChanges[.soundLeakageReduction] == nil
+            && soundLeakageReductionPayload(enabled: !enabled) != nil
+    }
+
+    func setSoundLeakageReduction(_ enabled: Bool) {
+        guard canSetSoundLeakageReduction, let payload = soundLeakageReductionPayload(enabled: enabled) else { return }
+        sendSetting(payload, setting: .soundLeakageReduction)
+    }
+
+    private func voiceContentsExcludes(_ feature: SonyVoiceContents.Exclusion) -> Bool {
+        guard let state = audioFeatures.voiceContents, state.exclusions?.contains(feature.rawValue) == true else { return false }
+        return state.enabled == true || pendingChanges[.voiceContents] == [0] || unconfirmedChanges[.voiceContents] == [0]
+    }
+
+    var listeningModeExcludesEqualizer: Bool {
+        soundLeakageReductionExcludes(.equalizer) || voiceContentsExcludes(.equalizer)
+    }
+
+    var listeningModeExcludesDSEE: Bool {
+        soundLeakageReductionExcludes(.dsee) || voiceContentsExcludes(.dsee)
+    }
+
+    var voiceContentsConnectionRestriction: String? {
+        audioFeatures.codec == .lc3 && audioFeatures.voiceContents?.exclusions?.contains(SonyVoiceContents.Exclusion.leAudio.rawValue) == true
+            ? String(localized: "Unavailable with LE Audio.") : nil
+    }
+
+    private func voiceContentsPayload(enabled: Bool) -> [UInt8]? {
+        guard systemControlContextIsAvailable, let state = audioFeatures.voiceContents else { return nil }
+        if enabled {
+            guard voiceContentsConnectionRestriction == nil,
+                  !(state.exclusions?.contains(SonyVoiceContents.Exclusion.equalizer.rawValue) == true && isEqualizerUpdatePending),
+                  !(state.exclusions?.contains(SonyVoiceContents.Exclusion.dsee.rawValue) == true
+                    && (pendingChanges[.dsee] != nil || unconfirmedChanges[.dsee] != nil)) else { return nil }
+        }
+        return state.setPayload(enabled: enabled)
+    }
+
+    var canSetVoiceContents: Bool {
+        guard let enabled = audioFeatures.voiceContents?.enabled else { return false }
+        return pendingChanges[.voiceContents] == nil && unconfirmedChanges[.voiceContents] == nil
+            && voiceContentsPayload(enabled: !enabled) != nil
+    }
+
+    func setVoiceContents(_ enabled: Bool) {
+        guard canSetVoiceContents, let payload = voiceContentsPayload(enabled: enabled) else { return }
+        sendSetting(payload, setting: .voiceContents)
+    }
+
+    private func voiceContentsWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        unconfirmedChanges[.voiceContents] == nil && voiceContentsPayload(enabled: payload[2] == 0) == payload
+            && pendingChanges[.voiceContents] == Array(payload.dropFirst(2))
     }
 
     func setLegacySoundEffect(_ kind: SonyLegacySoundEffect.Kind, preset: UInt8) {
@@ -4334,23 +5446,27 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     func systemFeatureState(_ feature: SonySystemFeature) -> SonySystemFeatureState? {
-        if protocolInformation?.generation == .v1 {
-            return feature == .pauseOnRemoval ? legacyControls?.wearingControl.state : nil
+        if feature == .adaptiveVolume, adaptiveVolumeWithLimitation.isSupported { return nil }
+        if protocolInformation?.generation == .v1, feature == .pauseOnRemoval {
+            return legacyControls?.wearingControl.state
         }
         return systemFeatures[feature]
     }
 
     private func systemFeature(inquiry: UInt8) -> SonySystemFeature? {
+        if inquiry == systemFeatures.speakToChatOptions?.variant.inquiry { return .speakToChat }
         if protocolInformation?.generation == .v1 {
+            if let feature = systemFeatures.legacyOnOffFeature(inquiry: inquiry) { return feature }
             return inquiry == 0x03 && legacyControls?.wearingControl.isSupported == true ? .pauseOnRemoval : nil
         }
-        guard let feature = SonySystemFeature(rawValue: inquiry), systemFeatures[feature] != nil else { return nil }
+        guard let feature = SonySystemFeature(rawValue: inquiry), feature != .speakToChat,
+              systemFeatures[feature] != nil else { return nil }
         return feature
     }
 
     private func systemFeaturePayload(_ feature: SonySystemFeature, enabled: Bool) -> [UInt8]? {
-        if protocolInformation?.generation == .v1 {
-            return feature == .pauseOnRemoval ? legacyControls?.wearingControl.setPayload(enabled: enabled) : nil
+        if protocolInformation?.generation == .v1, feature == .pauseOnRemoval {
+            return legacyControls?.wearingControl.setPayload(enabled: enabled)
         }
         return systemFeatures.setPayload(feature, enabled: enabled)
     }
@@ -4358,8 +5474,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private func systemFeatureIsAvailable(_ feature: SonySystemFeature) -> Bool {
         systemControlContextIsAvailable && systemFeatureState(feature)?.available == true
             && systemFeatureState(feature)?.isVisible == true && systemFeatureState(feature)?.enabled != nil
-            && (protocolInformation?.generation != .v1 || legacyControls?.wearingControl.canSet == true)
-            && (feature != .voiceAssistantWakeWord || audioFeatures.codec != .lc3)
+            && (feature != .pauseOnRemoval || protocolInformation?.generation != .v1 || legacyControls?.wearingControl.canSet == true)
+            && (![.incomingCallVibration, .legacyPowerSavingMode].contains(feature) || protocolInformation?.generation != .v1
+                || systemFeatures.hasLegacyOnOffCapability(feature))
+            && (feature != .speakToChat || systemFeatures.speakToChatOptions?.hasKnownCapability == true)
+            && (feature != .voiceAssistantWakeWord || leAudioUnavailableReason(.voiceAssistantWakeWord) == nil)
+            && (feature != .adaptiveVolume || hasCurrentTable2Capabilities)
     }
 
     func canSetSystemFeature(_ feature: SonySystemFeature) -> Bool {
@@ -4375,7 +5495,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private var voiceAssistantIsAvailable: Bool {
-        guard protocolInformation?.generation == .v2, systemControlContextIsAvailable, audioFeatures.codec != .lc3,
+        guard protocolInformation?.generation == .v2, systemControlContextIsAvailable,
+              leAudioUnavailableReason(.voiceAssistant) == nil,
               let state = systemFeatures.voiceAssistant else { return false }
         return state.knownOptions.contains { state.setPayload($0) != nil }
     }
@@ -4390,6 +5511,42 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         sendSetting(payload, setting: .voiceAssistant)
     }
 
+    var canReadVoiceAssistantSetup: Bool {
+        protocolInformation?.generation == .v2 && systemControlContextIsAvailable
+            && supportedFunctions.contains(SonyVoiceAssistantSetup.capability)
+    }
+
+    func requestVoiceAssistantSetup() {
+        guard canReadVoiceAssistantSetup, voiceAssistantSetupOptions == nil else { return }
+        send(SonyVoiceAssistantSetup.query)
+    }
+
+    var voiceAssistantSideAlertRequestID: UUID? {
+        voiceAssistantSideAlert == nil ? nil : settingRequests[.voiceAssistant]
+    }
+
+    func respondToVoiceAssistantSideAlert(_ alert: SonyVoiceAssistantSideAlert, action: SonyVoiceAssistantSideAlert.Action,
+                                         requestID: UUID) {
+        guard voiceAssistantSideAlert == alert, requestID == voiceAssistantSideAlertRequestID,
+              systemControlContextIsAvailable else { return }
+        voiceAssistantSideAlert = nil
+        let payload = alert.replyPayload(action)
+        voiceAssistantSideReply = (payload, requestID)
+        send(payload)
+    }
+
+    private func receiveVoiceAssistantSideAlert(_ alert: SonyVoiceAssistantSideAlert) {
+        let setting = Setting.voiceAssistant
+        guard supportedFunctions.contains(SonyVoiceAssistantSideAlert.capability), !voiceAssistantSideAlertSeen,
+              settingTimeouts[setting] != nil, receivedAfter(settingTransmissionOrdinals[setting]) else { return }
+        voiceAssistantSideAlertSeen = true
+        settingTimeouts.removeValue(forKey: setting)?.cancel()
+        settingRefreshes.removeValue(forKey: setting)?.cancel()
+        let query: [UInt8] = [0xF6, 0x04]
+        if systemReads[query]?.transmitted == true { systemReads[query]?.isObsolete = true }
+        voiceAssistantSideAlert = alert
+    }
+
     func setSystemFeature(_ feature: SonySystemFeature, enabled: Bool) {
         guard canSetSystemFeature(feature),
               let payload = systemFeaturePayload(feature, enabled: enabled),
@@ -4397,11 +5554,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         sendSetting(payload, setting: .system(feature))
     }
 
-    func setSpeakToChatOptions(sensitivity: SonySpeechSensitivity, delay: SonySpeakToChatDelay) {
+    func setSpeakToChatOptions(sensitivity: SonySpeechSensitivity, delay: SonySpeakToChatDelay, voiceFocus: Bool? = nil) {
         guard canSetSpeakToChatOptions,
               let options = systemFeatures.speakToChatOptions,
-              options.sensitivity != sensitivity || options.delay != delay,
-              let payload = options.setPayload(sensitivity: sensitivity, delay: delay) else { return }
+              options.sensitivity != sensitivity || options.delay != delay || (voiceFocus != nil && voiceFocus != options.voiceFocus),
+              let payload = options.setPayload(sensitivity: sensitivity, delay: delay, voiceFocus: voiceFocus) else { return }
         queuedSpeakToChatOptions = options
         sendSetting(payload, setting: .speakToChatOptions)
     }
@@ -4479,6 +5636,566 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private func resetBluetoothStandbyChange() {
         bluetoothStandbyAlert = nil
         bluetoothStandbyChange = nil
+    }
+
+    private func requestSpeakerLighting() {
+        for query in speakerLighting.queryPayloads where !isPreviewingLightingColor
+            || query != SonySpeakerLighting.Parameter.customColor.query {
+            send(query, type: SonySpeakerLighting.frameType)
+        }
+    }
+
+    private func requestDJControl() {
+        for query in djControl.queryPayloads { send(query, type: SonyDJControl.frameType) }
+    }
+
+    private func requestKaraoke() {
+        for query in karaoke.queryPayloads { send(query, type: SonyKaraoke.frameType) }
+    }
+
+    private var tvSoundBoosterWriteContextIsAvailable: Bool {
+        systemControlContextIsAvailable && protocolInformation?.generation == .v2
+    }
+
+    private var canRequestTVSoundBooster: Bool {
+        tvSoundBoosterWriteContextIsAvailable && pendingChanges[.tvSoundBooster] == nil
+            && unconfirmedChanges[.tvSoundBooster] == nil
+    }
+
+    var canSetTVSoundBooster: Bool {
+        guard let booster = audioFeatures.tvSoundBooster, let enabled = booster.enabled else { return false }
+        return canRequestTVSoundBooster && booster.setPayload(enabled: !enabled) != nil
+    }
+
+    var canSetTVSoundBoosterDelay: Bool {
+        canRequestTVSoundBooster && audioFeatures.tvSoundBooster?.canAdjustDelay == true
+    }
+
+    func setTVSoundBooster(_ enabled: Bool) {
+        guard canRequestTVSoundBooster, let booster = audioFeatures.tvSoundBooster,
+              let payload = booster.setPayload(enabled: enabled) else { return }
+        tvSoundBoosterWriteBaseline = booster.parameterValue
+        sendSetting(payload, setting: .tvSoundBooster)
+    }
+
+    func setTVSoundBoosterDelay(_ delay: Int) {
+        guard canRequestTVSoundBooster, let booster = audioFeatures.tvSoundBooster,
+              let payload = booster.setPayload(delay: delay) else { return }
+        tvSoundBoosterWriteBaseline = booster.parameterValue
+        sendSetting(payload, setting: .tvSoundBooster)
+    }
+
+    private func tvSoundBoosterWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        guard tvSoundBoosterWriteContextIsAvailable, let booster = audioFeatures.tvSoundBooster,
+              booster.parameterValue == tvSoundBoosterWriteBaseline,
+              pendingChanges[.tvSoundBooster] == settingValue(payload, setting: .tvSoundBooster) else { return false }
+        return booster.setPayload(enabled: payload[2] == 0) == payload || booster.setPayload(delay: Int(payload[3])) == payload
+    }
+
+    var canSetSoundFieldOptimization: Bool {
+        systemControlContextIsAvailable && pendingChanges[.soundFieldOptimization] == nil
+            && unconfirmedChanges[.soundFieldOptimization] == nil
+            && audioFeatures.soundFieldOptimization?.available == true
+            && audioFeatures.soundFieldOptimization?.enabled != nil
+    }
+
+    func setSoundFieldOptimization(_ enabled: Bool) {
+        guard canSetSoundFieldOptimization, let payload = audioFeatures.soundFieldOptimization?.setPayload(enabled: enabled) else { return }
+        sendSetting(payload, setting: .soundFieldOptimization)
+    }
+
+    private func soundFieldOptimizationWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        systemControlContextIsAvailable && pendingChanges[.soundFieldOptimization] == Array(payload.dropFirst(2))
+            && audioFeatures.soundFieldOptimization?.setPayload(enabled: payload[2] == 0) == payload
+    }
+
+    func canSetUpmix(_ variant: SonyUpmix.Variant, mode: SonyUpmix.Mode) -> Bool {
+        let setting = Setting.upmix(variant)
+        return systemControlContextIsAvailable && pendingChanges[setting] == nil && unconfirmedChanges[setting] == nil
+            && audioFeatures.upmix[variant]?.setPayload(mode) != nil
+    }
+
+    func setUpmix(_ variant: SonyUpmix.Variant, mode: SonyUpmix.Mode) {
+        guard canSetUpmix(variant, mode: mode), let payload = audioFeatures.upmix[variant]?.setPayload(mode) else { return }
+        sendSetting(payload, setting: .upmix(variant))
+    }
+
+    private func upmixWriteIsCurrent(_ payload: [UInt8], variant: SonyUpmix.Variant) -> Bool {
+        guard systemControlContextIsAvailable, let mode = variant.mode(payload[2]),
+              let upmix = audioFeatures.upmix[variant] else { return false }
+        return upmix.setPayload(mode) == payload && pendingChanges[.upmix(variant)] == Array(payload.dropFirst(2))
+    }
+
+    var backgroundMusicConnectionRestriction: String? { leAudioUnavailableReason(.backgroundMusic) }
+
+    var canSetBackgroundMusic: Bool {
+        systemControlContextIsAvailable && backgroundMusicConnectionRestriction == nil
+            && audioFeatures.backgroundMusic?.canEdit == true
+            && pendingChanges[.backgroundMusic] == nil && unconfirmedChanges[.backgroundMusic] == nil
+    }
+
+    func setBackgroundMusic(_ enabled: Bool) {
+        guard canSetBackgroundMusic, let music = audioFeatures.backgroundMusic,
+              let payload = music.setPayload(enabled: enabled) else { return }
+        backgroundMusicWriteBaseline = music.parameterValue
+        sendSetting(payload, setting: .backgroundMusic)
+    }
+
+    func setBackgroundMusicRoom(_ room: SonyBackgroundMusic.Room) {
+        guard canSetBackgroundMusic, let music = audioFeatures.backgroundMusic,
+              let payload = music.setPayload(room: room) else { return }
+        backgroundMusicWriteBaseline = music.parameterValue
+        sendSetting(payload, setting: .backgroundMusic)
+    }
+
+    private func backgroundMusicWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        guard systemControlContextIsAvailable, backgroundMusicConnectionRestriction == nil,
+              let music = audioFeatures.backgroundMusic, music.inquiry == payload[1],
+              music.parameterValue == backgroundMusicWriteBaseline,
+              pendingChanges[.backgroundMusic] == Array(payload.dropFirst(2)) else { return false }
+        return music.setPayload(enabled: payload[2] == 0) == payload
+            || SonyBackgroundMusic.Room(rawValue: payload[3]).flatMap(music.setPayload(room:)) == payload
+    }
+
+    private var listeningModeSettings: [Setting] {
+        [.backgroundMusic, .upmix(.cinema), .upmix(.series), .voiceContents, .soundLeakageReduction]
+    }
+
+    var isChangingListeningMode: Bool {
+        listeningModeSettings.contains { pendingChanges[$0] != nil }
+    }
+
+    var listeningModeErrors: [String] {
+        listeningModeSettings.compactMap { settingErrors[$0] }
+    }
+
+    func canSetListeningMode(_ mode: SonyListeningMode) -> Bool {
+        guard !isChangingListeningMode, !listeningModeSettings.contains(where: { unconfirmedChanges[$0] != nil }) else { return false }
+        let changes = audioFeatures.listeningModeChanges(to: mode)
+        return !changes.isEmpty && changes.allSatisfy { change in
+            switch change {
+            case .backgroundMusic: canSetBackgroundMusic
+            case .voiceContents(let enabled): voiceContentsPayload(enabled: enabled) != nil && canSetVoiceContents
+            case .soundLeakageReduction(let enabled): soundLeakageReductionPayload(enabled: enabled) != nil && canSetSoundLeakageReduction
+            case .upmix(let variant, let mode): canSetUpmix(variant, mode: mode)
+            }
+        }
+    }
+
+    func setListeningMode(_ mode: SonyListeningMode) {
+        guard canSetListeningMode(mode) else { return }
+        for change in audioFeatures.listeningModeChanges(to: mode) {
+            switch change {
+            case .backgroundMusic(let enabled): setBackgroundMusic(enabled)
+            case .voiceContents(let enabled): setVoiceContents(enabled)
+            case .soundLeakageReduction(let enabled): setSoundLeakageReduction(enabled)
+            case .upmix(let variant, let mode): setUpmix(variant, mode: mode)
+            }
+        }
+    }
+
+    func canToggleListeningModeAssignment(_ item: SonyListeningModeAssignments.Item) -> Bool {
+        systemControlContextIsAvailable && pendingChanges[.listeningModeAssignments] == nil
+            && unconfirmedChanges[.listeningModeAssignments] == nil
+            && audioFeatures.listeningModeAssignments?.togglePayload(item) != nil
+    }
+
+    func toggleListeningModeAssignment(_ item: SonyListeningModeAssignments.Item) {
+        guard canToggleListeningModeAssignment(item), let assignments = audioFeatures.listeningModeAssignments,
+              let baseline = assignments.parameterValue, let payload = assignments.togglePayload(item) else { return }
+        listeningModeAssignmentWrite = (item, baseline)
+        sendSetting(payload, setting: .listeningModeAssignments)
+    }
+
+    private func listeningModeAssignmentWriteIsCurrent(_ payload: [UInt8]) -> Bool {
+        guard systemControlContextIsAvailable, let write = listeningModeAssignmentWrite,
+              let assignments = audioFeatures.listeningModeAssignments,
+              assignments.parameterValue == write.baseline else { return false }
+        return assignments.togglePayload(write.item) == payload
+            && pendingChanges[.listeningModeAssignments] == settingValue(payload, setting: .listeningModeAssignments)
+    }
+
+    private func requestAuracast() {
+        for query in auracast.queryPayloads { send(query, type: SonyAuracast.frameType) }
+    }
+
+    private var auracastContextIsAvailable: Bool {
+        systemControlContextIsAvailable && hasCurrentTable2Capabilities
+            && auracast.canOperate(leAudioEnabled: leAudioStandby.enabled)
+    }
+
+    var canSetAuracast: Bool {
+        auracastContextIsAvailable && pendingChanges[.auracastScan] == nil && pendingChanges[.auracastReception] == nil
+    }
+
+    func setAuracastScan(start: Bool) {
+        guard canSetAuracast, start != (auracast.scan == .scanning) else { return }
+        sendSetting(auracast.scanPayload(start: start), setting: .auracastScan, type: SonyAuracast.frameType)
+    }
+
+    func setAuracastReception(_ operation: SonyAuracast.Reception, broadcastID: [UInt8], password: String = "") {
+        guard canSetAuracast, auracastCanSendReception(operation, id: broadcastID, hasPassword: !password.isEmpty),
+              let payload = auracast.receptionPayload(operation, broadcastID: broadcastID, password: password) else { return }
+        sendSetting(payload, setting: .auracastReception, type: SonyAuracast.frameType)
+    }
+
+    private func auracastCanSendReception(_ operation: SonyAuracast.Reception, id: [UInt8], hasPassword: Bool) -> Bool {
+        if operation == .stop { return auracast.current?.id == id }
+        return auracast.current?.id != id && auracast.broadcasts.contains {
+            $0.id == id && ($0.protection != .password || hasPassword)
+        }
+    }
+
+    private func auracastSetting(type: UInt8, payload: [UInt8]) -> Setting? {
+        guard type == SonyAuracast.frameType else { return nil }
+        if payload.starts(with: SonyAuracast.scanPrefix), payload.count == 3 { return .auracastScan }
+        if payload.starts(with: SonyAuracast.receptionPrefix), payload.count >= 19 { return .auracastReception }
+        return nil
+    }
+
+    private func auracastWriteIsCurrent(_ payload: [UInt8], setting: Setting) -> Bool {
+        guard auracastContextIsAvailable, pendingChanges[setting] == settingValue(payload, setting: setting) else { return false }
+        if setting == .auracastScan { return (payload[2] == 0) != (auracast.scan == .scanning) }
+        guard let operation = SonyAuracast.Reception(rawValue: payload[2]) else { return false }
+        return auracastCanSendReception(operation, id: Array(payload[3..<18]), hasPassword: payload[18] != 0)
+    }
+
+    private func receiveAuracast(_ payload: [UInt8], type: UInt8) -> Bool {
+        guard type == SonyAuracast.frameType, hasCurrentTable2Capabilities, let report = auracast.report(payload) else { return false }
+        let query: [UInt8]? = switch report {
+        case .availability: auracast.statusQuery
+        case .reception: auracast.variant == .standard ? SonyAuracast.receptionQuery : nil
+        default: nil
+        }
+        var read: SystemRead?
+        if payload[0] == 0x73 || payload[0] == 0x77 {
+            guard let query else { return true }
+            let key = [type] + query
+            guard let currentRead = systemReads[key], currentRead.transmitted,
+                  receivedAfter(currentRead.transmissionOrdinal) else { return true }
+            systemReads.removeValue(forKey: key)?.timeout?.cancel()
+            if currentRead.isObsolete || currentRead.timedOut {
+                send(query, type: type)
+                return true
+            }
+            read = currentRead
+        } else if let query {
+            let key = [type] + query
+            if receivedAfter(systemReads[key]?.transmissionOrdinal) { systemReads[key]?.isObsolete = true }
+        }
+        let setting = Setting.auracastReception
+        let receptionRequest = pendingChanges[setting] ?? unconfirmedChanges[setting]
+        if case .result(let result, let id) = report {
+            guard receivedAfter(settingTransmissionOrdinals[setting]), receptionRequest == [0] + id else { return true }
+            let error: String
+            switch result {
+            case .passwordRequired: error = String(localized: "This broadcast requires a password.")
+            case .incorrectPassword: error = String(localized: "The broadcast password is incorrect.")
+            case .notFound: error = String(localized: "The speaker could not find the broadcast.")
+            default: return true
+            }
+            unconfirmedChanges[setting] = nil
+            settingTimeouts.removeValue(forKey: setting)?.cancel()
+            settingRefreshes.removeValue(forKey: setting)?.cancel()
+            let requestID = settingRequests[setting]
+            pendingChanges[setting] = nil
+            settingRequests[setting] = nil
+            settingTransmissionOrdinals[setting] = nil
+            settingErrors[setting] = error
+            finishSettingIntent(setting, requestID: requestID, error: HeadphoneControlError(message: error))
+        }
+        var updated = auracast
+        updated.update(report)
+        if updated != auracast { auracast = updated }
+        lastSyncDate = Date()
+        switch report {
+        case .scan(let status):
+            if status == .scanning { confirmSetting(.auracastScan, value: [0]) }
+            if status == .stopped || status == .timedOut || status == .receptionRequested {
+                confirmSetting(.auracastScan, value: [1])
+            }
+        case .reception(let receiving, let broadcast):
+            if read == nil || read?.requestID == settingRequests[setting] || read?.resolvesUnconfirmed == true {
+                if let receiving, let receptionRequest {
+                    let id = receiving ? broadcast.id : Array(receptionRequest.dropFirst())
+                    confirmSetting(setting, value: [receiving ? 0 : 1] + id)
+                }
+            }
+        default: break
+        }
+        return true
+    }
+
+    private var karaokeContextIsReady: Bool {
+        systemControlContextIsAvailable && table2CapabilitiesSession == controlSession
+            && karaoke.query(.scoring).map { lightingReads[$0]?.timedOut != true } == true
+    }
+
+    func canSetKaraoke(_ setting: SonyKaraoke.Setting) -> Bool {
+        let pending = Setting.speakerKaraoke(setting)
+        return karaokeContextIsReady && pendingChanges[pending] == nil && unconfirmedChanges[pending] == nil
+            && karaoke.query(setting).map { lightingReads[$0]?.timedOut != true } == true
+    }
+
+    func setKaraokeControls(_ changes: [SonyKaraoke.Item: Int]) {
+        guard canSetKaraoke(.controls), let payload = karaoke.controlsPayload(changes) else { return }
+        karaokeControlsBeforeWrite = karaoke.current(.controls)
+        sendSetting(payload, setting: .speakerKaraoke(.controls), type: SonyKaraoke.frameType)
+    }
+
+    func setKaraokeScoring(_ next: SonyKaraoke.Scoring) {
+        guard canSetKaraoke(.scoring), let payload = karaoke.scoringPayload(next) else { return }
+        sendSetting(payload, setting: .speakerKaraoke(.scoring), type: SonyKaraoke.frameType)
+    }
+
+    func setLiveKaraoke(_ enabled: Bool) {
+        guard canSetKaraoke(.live), let payload = karaoke.livePayload(enabled) else { return }
+        sendSetting(payload, setting: .speakerKaraoke(.live), type: SonyKaraoke.frameType)
+    }
+
+    func canPlayKaraokeSample(_ sample: SonyKaraoke.Sample) -> Bool {
+        karaokeContextIsReady && karaoke.samplePayload(sample) != nil
+    }
+
+    func playKaraokeSample(_ sample: SonyKaraoke.Sample) {
+        guard karaokeContextIsReady, let payload = karaoke.samplePayload(sample) else { return }
+        send(payload, type: SonyKaraoke.frameType)
+    }
+
+    private func karaokeSampleIsCurrent(_ payload: [UInt8]) -> Bool {
+        guard karaokeContextIsReady, let sample = SonyKaraoke.Sample(rawValue: payload[2]) else { return false }
+        return karaoke.samplePayload(sample) == payload
+    }
+
+    var canSetDJControl: Bool {
+        systemControlContextIsAvailable && table2CapabilitiesSession == controlSession
+            && pendingChanges[.speakerDJ] == nil && unconfirmedChanges[.speakerDJ] == nil
+            && djControl.parameterQuery.map { lightingReads[$0]?.timedOut != true } == true
+    }
+
+    func setDJEffect(_ effect: SonyDJControl.Effect, bands: [UInt8]? = nil) {
+        guard canSetDJControl, let payload = djControl.setPayload(effect: effect, bands: bands),
+              settingValue(payload, setting: .speakerDJ) != djControl.parameterValue else { return }
+        finishDJControlDrag()
+        sendSetting(payload, setting: .speakerDJ, type: SonyDJControl.frameType)
+    }
+
+    func updateDJControlDrag(x: Int, y: Int) {
+        guard canSetDJControl, let effect = djControl.effect, effect.usesTouchPad,
+              let move = djControl.touchPayload(operation: 2, x: x, y: y) else { return }
+        updatePartyTouch(.dj(effect), move: move)
+    }
+
+    func playDJControlSample(_ index: Int) {
+        guard partyLightingDrag == nil, canSetDJControl, let effect = djControl.effect,
+              effect.samplePositions.indices.contains(index) else { return }
+        let point = effect.samplePositions[index]
+        guard let move = djControl.touchPayload(operation: 2, x: point[0], y: point[1]) else { return }
+        updatePartyTouch(.dj(effect), move: move, sample: true)
+    }
+
+    func finishDJControlDrag() {
+        if case .dj = partyLightingDrag?.target { finishPartyTouch() }
+    }
+
+    func canSetSpeakerLighting(_ parameter: SonySpeakerLighting.Parameter) -> Bool {
+        let setting = Setting.speakerLighting(parameter)
+        return systemControlContextIsAvailable && table2CapabilitiesSession == controlSession
+            && pendingChanges[setting] == nil && unconfirmedChanges[setting] == nil
+            && lightingReads[parameter.query]?.timedOut != true
+    }
+
+    func setSpeakerLighting(_ parameter: SonySpeakerLighting.Parameter, value: [UInt8]) {
+        let colorWasPreviewed = parameter == .customColor && (lightingColorPreviewWasSent
+            || commandQueue.pending.map(isLightingColorPreview) == true)
+        if parameter == .customColor || parameter == .colorType { cancelSpeakerLightingColorPreview() }
+        if parameter == .party { finishPartyLightingDrag() }
+        guard canSetSpeakerLighting(parameter), colorWasPreviewed || speakerLighting.value(parameter) != value,
+              let payload = speakerLighting.setPayload(parameter, value: value) else { return }
+        if payload == [0x78, 1, 0] {
+            send(payload, type: SonySpeakerLighting.frameType)
+        } else {
+            sendSetting(payload, setting: .speakerLighting(parameter), type: SonySpeakerLighting.frameType)
+        }
+    }
+
+    func setPartyLightingColor(_ color: SonySpeakerLighting.RGB, x: Int, y: Int) {
+        guard canSetSpeakerLighting(.party),
+              speakerLighting.partyColorPayload(operation: 2, x: x, y: y, color: color) != nil else { return }
+        updatePartyLightingDrag(color, x: x, y: y)
+        if let drag = partyLightingDrag, case .lighting = drag.target, !drag.ending {
+            send(drag.move, type: SonySpeakerLighting.frameType)
+            finishPartyLightingDrag()
+        }
+    }
+
+    func updatePartyLightingDrag(_ color: SonySpeakerLighting.RGB, x: Int, y: Int) {
+        guard canSetSpeakerLighting(.party), let item = speakerLighting.partyItem,
+              let move = speakerLighting.partyColorPayload(operation: 2, x: x, y: y, color: color) else { return }
+        updatePartyTouch(.lighting(item), move: move)
+    }
+
+    private func updatePartyTouch(_ target: PartyLightingDrag.Target, move: [UInt8], sample: Bool = false) {
+        if let drag = partyLightingDrag {
+            guard drag.target == target, !drag.ending else { return }
+            partyLightingDrag?.move = move
+            return
+        }
+        let drag = PartyLightingDrag(target: target, move: move)
+        partyLightingDrag = drag
+        send(drag.payload(operation: 0), type: SonySpeakerLighting.frameType)
+        if sample {
+            partyLightingClock = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                self?.finishDJControlDrag()
+            }
+            return
+        }
+        partyLightingClock = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                guard let self else { return }
+                self.flushPartyLightingMove()
+            }
+        }
+    }
+
+    private func flushPartyLightingMove() {
+        guard let drag = partyLightingDrag, !drag.ending else { return }
+        guard partyTouchIsAvailable(drag.target) else {
+            finishPartyTouch()
+            return
+        }
+        if drag.started, commandQueue.pending == nil { send(drag.move, type: SonySpeakerLighting.frameType) }
+    }
+
+    func finishPartyLightingDrag() {
+        if case .lighting = partyLightingDrag?.target { finishPartyTouch() }
+    }
+
+    private func finishPartyTouch() {
+        partyLightingClock?.cancel()
+        partyLightingClock = nil
+        guard let drag = partyLightingDrag, !drag.ending else { return }
+        partyLightingDrag?.ending = true
+        send(drag.payload(operation: 1), type: SonySpeakerLighting.frameType)
+    }
+
+    private func clearPartyLightingDrag() {
+        partyLightingClock?.cancel()
+        partyLightingClock = nil
+        partyLightingDrag = nil
+    }
+
+    private func partyLightingWriteIsCurrent(_ frame: SonyFrame) -> Bool {
+        guard let drag = partyLightingDrag, table2CapabilitiesSession == controlSession,
+              frame.payload[1] == drag.move[1] else { return false }
+        if frame.payload[2] == 1 { return drag.started }
+        return (frame.payload[2] == 0 || drag.started) && partyTouchIsAvailable(drag.target)
+    }
+
+    private func partyTouchIsAvailable(_ target: PartyLightingDrag.Target) -> Bool {
+        switch target {
+        case .lighting(let item):
+            canSetSpeakerLighting(.party) && speakerLighting.currentPartyPalette != nil && speakerLighting.partyItem == item
+        case .dj(let effect):
+            canSetDJControl && djControl.available == true && djControl.effect == effect
+        }
+    }
+
+    private func discardPartyLightingWrite(_ frame: SonyFrame) {
+        if frame.payload[2] != 2 { clearPartyLightingDrag() }
+        if let next = commandQueue.discardUnsentPending() { transmit(next) }
+    }
+
+    func previewSpeakerLightingColor(_ color: SonySpeakerLighting.RGB) {
+        guard canSetSpeakerLighting(.customColor),
+              speakerLighting.setPayload(.customColor, value: color.bytes, notify: false) != nil else { return }
+        isPreviewingLightingColor = true
+        lightingColorPreview = color
+        guard lightingColorPreviewClock == nil else { return }
+        lightingColorPreviewClock = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                guard let self, !self.flushLightingColorPreview() else { return }
+            }
+        }
+    }
+
+    private func flushLightingColorPreview() -> Bool {
+        guard canSetSpeakerLighting(.customColor), let color = lightingColorPreview,
+              let payload = speakerLighting.setPayload(.customColor, value: color.bytes, notify: false) else {
+            cancelSpeakerLightingColorPreview()
+            return true
+        }
+        guard commandQueue.pending == nil, lightingReads[SonySpeakerLighting.Parameter.customColor.query] == nil else { return false }
+        send(payload, type: SonySpeakerLighting.frameType)
+        lightingColorPreview = nil
+        lightingColorPreviewClock?.cancel()
+        lightingColorPreviewClock = nil
+        return true
+    }
+
+    func cancelSpeakerLightingColorPreview() {
+        lightingColorPreviewClock?.cancel()
+        lightingColorPreviewClock = nil
+        lightingColorPreview = nil
+        isPreviewingLightingColor = false
+    }
+
+    private func isLightingColorPreview(_ frame: SonyFrame) -> Bool {
+        frame.type == SonySpeakerLighting.frameType && frame.payload.prefix(3) == [0xF8, 0x11, 1]
+    }
+
+    var lightingModeAlertRequestID: UUID? {
+        lightingModeAlert == nil ? nil : settingRequests[.speakerLighting(.mode)]
+    }
+
+    func respondToLightingModeAlert(_ alert: SonyConnectionAlert, action: SonyConnectionAlertAction, requestID: UUID?) {
+        guard lightingModeAlert == alert, let requestID, requestID == lightingModeAlertRequestID,
+              systemControlContextIsAvailable, let payload = alert.replyPayload(action) else { return }
+        lightingModeAlert = nil
+        lightingModeAlertReply = (payload, requestID)
+        send(payload)
+    }
+
+    private func lightingWriteIsCurrent(_ frame: SonyFrame, setting: Setting) -> Bool {
+        guard systemControlContextIsAvailable, table2CapabilitiesSession == controlSession else { return false }
+        if setting == .speakerDJ {
+            return pendingChanges[setting] == settingValue(frame.payload, setting: setting)
+                && djControl.acceptsSetPayload(frame.payload)
+        }
+        if case .speakerKaraoke(let karaokeSetting) = setting {
+            return karaokeContextIsReady && pendingChanges[setting] == settingValue(frame.payload, setting: setting)
+                && (karaokeSetting != .controls || karaokeControlsBeforeWrite == karaoke.current(.controls))
+                && karaoke.acceptsSetPayload(frame.payload, setting: karaokeSetting)
+        }
+        guard case .speakerLighting(let parameter) = setting else { return false }
+        if frame.type == 0x0C {
+            return lightingModeAlertReply?.payload == frame.payload
+                && lightingModeAlertReply?.requestID == settingRequests[setting]
+        }
+        let value = settingValue(frame.payload, setting: setting)
+        if isLightingColorPreview(frame) {
+            return isPreviewingLightingColor && canSetSpeakerLighting(.customColor)
+                && speakerLighting.setPayload(parameter, value: value, notify: false) == frame.payload
+        }
+        return speakerLighting.setPayload(parameter, value: value) == frame.payload
+            && (frame.payload == [0x78, 1, 0] || pendingChanges[setting] == value)
+    }
+
+    private func discardLightingWrite(_ frame: SonyFrame, setting: Setting) {
+        if frame.payload == [0x78, 1, 0] || isLightingColorPreview(frame) {
+            if let next = commandQueue.discardUnsentPending() { transmit(next) }
+            return
+        }
+        if frame.type == 0x0C { lightingModeAlertReply = nil }
+        let error = switch setting {
+        case .speakerDJ: String(localized: "DJ Control became unavailable before the change could be sent.")
+        case .speakerKaraoke: String(localized: "Karaoke became unavailable before the change could be sent.")
+        default: String(localized: "Lighting settings became unavailable before the change could be sent.")
+        }
+        discardUnsentSetting(setting, error: error)
     }
 
     var canSetAutoStandby: Bool {
@@ -4607,25 +6324,248 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     func setVoiceGuidance(_ enabled: Bool) {
         guard systemControlContextIsAvailable, pendingChanges[.voiceGuidance] == nil, unconfirmedChanges[.voiceGuidance] == nil,
+              pendingChanges[.voiceGuidanceLanguage] == nil, unconfirmedChanges[.voiceGuidanceLanguage] == nil,
               voiceGuidance.enabled != enabled, let payload = voiceGuidance.setEnabledPayload(enabled) else { return }
         sendSetting(payload, setting: .voiceGuidance, type: 0x0E)
     }
 
-    func setVoiceGuidanceVolume(_ volume: Int) {
+    func setVoiceGuidanceLanguage(_ language: UInt8) {
+        guard systemControlContextIsAvailable, pendingChanges[.voiceGuidance] == nil, unconfirmedChanges[.voiceGuidance] == nil,
+              pendingChanges[.voiceGuidanceLanguage] == nil, unconfirmedChanges[.voiceGuidanceLanguage] == nil,
+              voiceGuidance.currentLanguage != language, let payload = voiceGuidance.setLanguagePayload(language) else { return }
+        sendSetting(payload, setting: .voiceGuidanceLanguage, type: 0x0E)
+    }
+
+    func setVoiceGuidanceVolume(_ volume: Int, playTestAudio: Bool = false) {
         guard systemControlContextIsAvailable, pendingChanges[.voiceGuidanceVolume] == nil, unconfirmedChanges[.voiceGuidanceVolume] == nil,
-              voiceGuidance.volume != volume, let payload = voiceGuidance.setVolumePayload(volume) else { return }
+              voiceGuidance.volume != volume || playTestAudio,
+              let payload = voiceGuidance.setVolumePayload(volume, playTestAudio: playTestAudio) else { return }
         sendSetting(payload, setting: .voiceGuidanceVolume, type: 0x0E)
     }
 
+    func setVoiceGuidanceTone(_ tone: SonyVoiceGuidance.Tone, enabled: Bool) {
+        let setting = Setting.voiceGuidanceTone(tone)
+        guard systemControlContextIsAvailable, pendingChanges[setting] == nil, unconfirmedChanges[setting] == nil,
+              voiceGuidance.toneEnabled[tone] != enabled, let payload = voiceGuidance.setTonePayload(tone, enabled: enabled) else { return }
+        sendSetting(payload, setting: setting, type: 0x0E)
+    }
+
+    private func voiceGuidanceSetting(for inquiry: UInt8) -> Setting? {
+        switch inquiry {
+        case 2 where pendingChanges[.voiceGuidanceLanguage] != nil || unconfirmedChanges[.voiceGuidanceLanguage] != nil:
+            .voiceGuidanceLanguage
+        case 0...3: .voiceGuidance
+        case 0x20, 0x21: .voiceGuidanceVolume
+        default: SonyVoiceGuidance.Tone(rawValue: inquiry).map(Setting.voiceGuidanceTone)
+        }
+    }
+
     func refreshSoundPressure(automatically: Bool = false) {
-        guard canRefreshSoundPressure, !automatically || (!soundPressureAutomaticRefreshSuspended
+        guard canRefreshSoundPressure, let payload = soundPressure.levelQueryPayload,
+              !automatically || (!soundPressureAutomaticRefreshSuspended
             && soundPressureReadError == nil && soundPressure.intervalSeconds != nil) else { return }
         if let interval = soundPressure.intervalSeconds, let lastSoundPressureRequest,
            lastSoundPressureRequest.duration(to: .now) < .seconds(interval) { return }
         if !automatically { soundPressureAutomaticRefreshSuspended = false }
         soundPressureReadError = nil
         soundPressureRead = SoundPressureRead(generation: soundPressureGeneration)
-        send(SonySoundPressure.levelQueryPayload, type: 0x0E)
+        send(payload, type: 0x0E)
+    }
+
+    func setSoundPressureMode(_ mode: SonySoundPressureMode) {
+        guard canChangeSoundPressureMode, soundPressure.mode != mode,
+              let payload = soundPressure.modePayload(mode) else { return }
+        sendSetting(payload, setting: .soundPressureMode, type: 0x0E)
+    }
+
+    func enableMaxVolume() {
+        guard canConfigureMaxVolume, let payload = volumeProtection.enablePayload else { return }
+        sendSetting(payload, setting: .maxVolumeEnabled, type: 0x0E)
+    }
+
+    var canSetAdaptiveVolumeWithLimitation: Bool {
+        adaptiveVolumeWithLimitationWriteIsAvailable && adaptiveVolumeWithLimitation.enabled != nil
+            && pendingChanges[.adaptiveVolumeWithLimitation] == nil && unconfirmedChanges[.adaptiveVolumeWithLimitation] == nil
+    }
+
+    private var adaptiveVolumeWithLimitationWriteIsAvailable: Bool {
+        systemControlContextIsAvailable && hasCurrentTable2Capabilities && fixedAlertsEnabled
+            && adaptiveVolumeWithLimitation.available == true
+    }
+
+    func setAdaptiveVolumeWithLimitation(_ enabled: Bool) {
+        guard canSetAdaptiveVolumeWithLimitation, adaptiveVolumeWithLimitation.enabled != enabled,
+              let payload = adaptiveVolumeWithLimitation.setPayload(enabled: enabled) else { return }
+        sendSetting(payload, setting: .adaptiveVolumeWithLimitation, type: 0x0E)
+    }
+
+    private func adaptiveVolumeWriteIsCurrent(_ frame: SonyFrame) -> Bool {
+        let setting = Setting.adaptiveVolumeWithLimitation
+        if frame.type == 0x0C {
+            guard let reply = adaptiveVolumeCautionReply else { return false }
+            return systemControlContextIsAvailable && hasCurrentTable2Capabilities && adaptiveVolumeWithLimitation.isSupported
+                && reply.requestID == settingRequests[setting] && reply.payload == frame.payload && pendingChanges[setting] == [0]
+        }
+        guard adaptiveVolumeWithLimitationWriteIsAvailable, frame.payload.count == 3 else { return false }
+        return adaptiveVolumeWithLimitation.setPayload(enabled: frame.payload[2] == 0) == frame.payload
+            && pendingChanges[setting] == [frame.payload[2]]
+    }
+
+    var adaptiveVolumeCautionRequestID: UUID? {
+        adaptiveVolumeCaution == nil ? nil : settingRequests[.adaptiveVolumeWithLimitation]
+    }
+
+    func acknowledgeAdaptiveVolumeCaution(_ caution: SonyConnectionAlert, requestID: UUID?) {
+        let setting = Setting.adaptiveVolumeWithLimitation
+        guard adaptiveVolumeCaution == caution, let requestID, requestID == adaptiveVolumeCautionRequestID,
+              systemControlContextIsAvailable, hasCurrentTable2Capabilities else { return }
+        adaptiveVolumeCaution = nil
+        if let payload = caution.replyPayload(.positive) {
+            adaptiveVolumeCautionReply = (payload, requestID)
+            send(payload)
+        } else {
+            unconfirmedChanges[setting] = pendingChanges[setting]
+            pendingChanges[setting] = nil
+            settingRequests[setting] = nil
+            send(SonyAdaptiveVolumeWithLimitation.parameterQuery, type: 0x0E)
+        }
+    }
+
+    private func receiveAdaptiveVolumeWithLimitation(_ payload: [UInt8]) -> Bool {
+        guard payload.count >= 2, payload[1] == 0x04, [0xF3, 0xF5, 0xF7, 0xF9].contains(payload[0]) else { return false }
+        guard hasCurrentTable2Capabilities, adaptiveVolumeWithLimitation.isSupported else { return true }
+        let notification = payload[0] == 0xF5 || payload[0] == 0xF9
+        let query: [UInt8] = [payload[0] - (notification ? 3 : 1), 0x04]
+        let key: [UInt8] = [0x0E] + query
+        let read = notification ? nil : systemReads[key]
+        if !notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        var updated = adaptiveVolumeWithLimitation
+        guard updated.update(payload) else { return true }
+        if notification {
+            if systemReads[key]?.transmitted == true, receivedAfter(systemReads[key]?.transmissionOrdinal) {
+                systemReads[key]?.isObsolete = true
+            }
+        } else {
+            systemReads.removeValue(forKey: key)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query, type: 0x0E)
+                return true
+            }
+        }
+        let setting = Setting.adaptiveVolumeWithLimitation
+        let isParameter = query == SonyAdaptiveVolumeWithLimitation.parameterQuery
+        if isParameter, adaptiveVolumeCaution != nil || adaptiveVolumeCautionReply != nil { return true }
+        adaptiveVolumeWithLimitation = updated
+        lastSyncDate = Date()
+        clearSystemReadError(setting)
+        guard isParameter else { return true }
+        if notification || (read?.requestID != nil && read?.requestID == settingRequests[setting]) {
+            confirmSetting(setting, value: [payload[2]])
+        }
+        if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil,
+           notification || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[setting] = nil
+            settingErrors[setting] = nil
+        }
+        if let read, pendingChanges[setting] != nil, read.requestID != settingRequests[setting] { send(query, type: 0x0E) }
+        return true
+    }
+
+    func setMaxVolumePreset(_ preset: SonyVolumeProtection.LimitPreset) {
+        guard canConfigureMaxVolume, let payload = volumeProtection.limitPayload(preset) else { return }
+        sendSetting(payload, setting: .maxVolumePreset, type: 0x0E)
+    }
+
+    private func receiveVolumeProtection(_ payload: [UInt8]) -> Bool {
+        var updated = volumeProtection
+        guard updated.update(payload) else { return false }
+        if payload[1] == 0x05 {
+            switch payload[0] {
+            case 0x53 where pendingChanges[.maxVolumeEnabled] != nil || unconfirmedChanges[.maxVolumeEnabled] != nil:
+                return true
+            case 0x57 where pendingChanges[.maxVolumePreset] != nil || unconfirmedChanges[.maxVolumePreset] != nil:
+                return true
+            case 0x55: confirmSetting(.maxVolumeEnabled, value: [payload[2]])
+            case 0x59: confirmSetting(.maxVolumePreset, value: [payload[2]])
+            default: break
+            }
+        }
+        volumeProtection = updated
+        return true
+    }
+
+    func canAcknowledgeUSBCaution(_ kind: SonyUSBProtection.Kind) -> Bool {
+        systemControlContextIsAvailable && hasCurrentTable2Capabilities && commandQueue.pending == nil
+            && usbProtection.acknowledgement(kind) != nil
+    }
+
+    func acknowledgeUSBCaution(_ kind: SonyUSBProtection.Kind, expectedSession: UInt64) {
+        guard expectedSession == controlSession, canAcknowledgeUSBCaution(kind),
+              let payload = usbProtection.acknowledgement(kind) else { return }
+        send(payload)
+    }
+
+    func readExposure(current: Bool) {
+        guard canReadExposure, let inquiry = soundPressure.inquiryType,
+              let payload = current ? soundPressure.exposureQueryPayload : soundPressure.historyPayload(start: true) else { return }
+        let read = ExposureRead(current: current, history: SonyExposureHistory(channelCount: inquiry.isMultiple(of: 2) ? 1 : 2))
+        exposureReadError = nil
+        exposureRead = read
+        exposureRequest = read.id
+        send(payload, type: 0x0E)
+    }
+
+    private func beginExposureRead() {
+        exposureRead?.transmissionOrdinal = completedTransmissionOrdinal
+        scheduleExposureTimeout()
+    }
+
+    private func scheduleExposureTimeout() {
+        guard let id = exposureRequest, let deadline = exposureRead?.deadline else { return }
+        exposureReadTimeout?.cancel()
+        exposureTimeoutDeadline = min(deadline, .now() + 8)
+        let timeout = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self, self.exposureRequest == id, self.exposureTimeoutDeadline <= .now() else { return }
+                self.finishExposureRead(error: String(localized: "Listening exposure did not finish loading. Reconnect to try again."))
+            }
+        }
+        exposureReadTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: exposureTimeoutDeadline, execute: timeout)
+    }
+
+    private func finishExposureRead(error: String? = nil) {
+        guard let read = exposureRead else { return }
+        exposureReadTimeout?.cancel()
+        exposureReadTimeout = nil
+        exposureRead = nil
+        exposureRequest = nil
+        exposureReadError = error
+        if error == nil {
+            if read.current { currentExposure = read.history }
+            else { exposureHistory = read.history }
+        } else {
+            exposureRequiresReconnect = true
+            if !read.current, let payload = soundPressure.historyPayload(start: false) { send(payload, type: 0x0E) }
+        }
+    }
+
+    private func receiveExposure(_ payload: [UInt8]) -> Bool {
+        guard let batch = soundPressure.exposureBatch(payload) else { return false }
+        let current = payload[0] == 0x53
+        guard exposureRead?.current == current, receivedAfter(exposureRead?.transmissionOrdinal) else { return true }
+        guard !batch.statuses.contains(.error), !batch.statuses.allSatisfy({ $0 == .disconnected }),
+              current || !batch.statuses.contains(.notSending) else {
+            finishExposureRead(error: String(localized: "The headphones could not return listening exposure. Reconnect to try again."))
+            return true
+        }
+        guard exposureRead?.history.append(batch) == true else {
+            finishExposureRead(error: String(localized: "The headphones returned too much listening history."))
+            return true
+        }
+        if current || !batch.statuses.contains(.sending) { finishExposureRead() }
+        else { scheduleExposureTimeout() }
+        return true
     }
 
     var supportsEarbudFinding: Bool {
@@ -4783,6 +6723,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             soundPressureGeneration += 1
         }
         soundPressure = updated
+        if payload[0] == 0x59, updated.mode != nil {
+            confirmSetting(.soundPressureMode, value: Array(payload.dropFirst(2)))
+        }
         return true
     }
 
@@ -4814,10 +6757,14 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     private func settingValue(_ payload: [UInt8], setting: Setting) -> [UInt8] {
         switch setting {
-        case .system(.pauseOnRemoval) where protocolInformation?.generation == .v1: [payload[3] == 1 ? 0 : 1]
+        case .system(let feature) where protocolInformation?.generation == .v1
+            && [.pauseOnRemoval, .speakToChat, .incomingCallVibration, .legacyPowerSavingMode].contains(feature):
+            [payload[3] == 1 ? 0 : 1]
         case .voiceGuidance where voiceGuidance.generation == .v1: [payload[3] == 1 ? 0 : 1]
+        case .voiceGuidance where payload[1] == 2: Array(payload.dropFirst(2))
+        case .voiceGuidanceLanguage: Array(payload.dropFirst(2))
         case .playbackVolume: [payload[playback.generation == .v1 ? 3 : 2]]
-        case .system, .voiceGuidance, .voiceGuidanceVolume, .callVolume, .batteryCare, .autoPowerSave, .touchPanelBacklight, .stamina,
+        case .system, .voiceGuidance, .voiceGuidanceVolume, .voiceGuidanceTone, .callVolume, .batteryCare, .autoPowerSave, .touchPanelBacklight, .stamina,
              .powerSavingMode, .bluetoothStandby, .autoStandby: [payload[2]]
         case .dsee: protocolInformation?.generation == .v1 ? Array(payload.dropFirst()) : [payload[2]]
         case .automaticPowerOff, .voiceAssistant, .sidetone, .touchAssignments, .speakToChatOptions, .legacySoundEffect, .noiseToggle, .noiseTest: Array(payload.dropFirst())
@@ -4832,7 +6779,18 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             }
         case .equalizer: equalizer.confirmationValue(payload)
         case .equalizerReadback: []
-        case .powerSaveEffect: Array(payload.dropFirst(2))
+        case .turnKeyEQ: Array(payload[1..<(payload[1] == 0x32 ? 2 : 3)])
+        case .ultSoundEffectAssignment: Array(payload.dropFirst(2))
+        case .customSoundEffect: Array(payload.dropFirst())
+        case .soundEffect, .customEQ: Array(payload.dropFirst(2))
+        case .powerSaveEffect, .soundPressureMode, .maxVolumeEnabled, .maxVolumePreset, .musicHandover, .bassBoost, .soundLeakageReduction, .voiceContents,
+             .lrBalanceCorrection, .microphoneOperation, .adaptiveVolumeWithLimitation:
+            Array(payload.dropFirst(2))
+        case .speakerLighting(let parameter): Array(payload.dropFirst(parameter == .customColor && payload[0] == 0xF8 ? 3 : 2))
+        case .leAudioStandby, .auracastScan: [payload[2]]
+        case .auracastReception: Array(payload[2..<18])
+        case .speakerDJ, .speakerKaraoke, .tvSoundBooster, .soundFieldOptimization, .upmix, .backgroundMusic, .listeningModeAssignments:
+            Array(payload.dropFirst(2))
         }
     }
 
@@ -4858,6 +6816,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         pendingChanges[setting] = settingValue(payload, setting: setting)
         let requestID = UUID()
         settingRequests[setting] = requestID
+        if setting == .speakerLighting(.mode) { lightingModeAlertSeen = false }
+        if setting == .adaptiveVolumeWithLimitation { adaptiveVolumeCautionSeen = false }
+        if setting == .voiceAssistant { voiceAssistantSideAlertSeen = false }
         if setting == .stamina {
             staminaChange = SonyStaminaChange(requestID: requestID, session: controlSession, enabled: payload[2] == 0)
         }
@@ -4873,8 +6834,39 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func beginSettingConfirmation(_ frame: SonyFrame) {
+        if isLightingColorPreview(frame) { return }
         let payload: [UInt8]
-        if frame.type == 0x0C, let change = staminaChange, frame.payload == change.replyPayload,
+        var type = frame.type
+        if frame.type == 0x0C, let reply = voiceAssistantSideReply, frame.payload == reply.payload,
+           reply.requestID == settingRequests[.voiceAssistant], let value = pendingChanges[.voiceAssistant] {
+            voiceAssistantSideReply = nil
+            if frame.payload.last == SonyVoiceAssistantSideAlert.Action.cancel.rawValue {
+                pendingChanges[.voiceAssistant] = nil
+                settingRequests[.voiceAssistant] = nil
+                settingTransmissionOrdinals[.voiceAssistant] = nil
+                send([0xF6, 0x04])
+                return
+            }
+            payload = [0xF8] + value
+        } else if frame.type == 0x0C, let reply = lightingModeAlertReply, frame.payload == reply.payload,
+           reply.requestID == settingRequests[.speakerLighting(.mode)], let value = pendingChanges[.speakerLighting(.mode)] {
+            lightingModeAlertReply = nil
+            if frame.payload.last == SonyConnectionAlertAction.negative.rawValue {
+                pendingChanges[.speakerLighting(.mode)] = nil
+                settingRequests[.speakerLighting(.mode)] = nil
+                settingTransmissionOrdinals[.speakerLighting(.mode)] = nil
+                send(SonySpeakerLighting.Parameter.mode.query, type: SonySpeakerLighting.frameType)
+                return
+            }
+            payload = [0xF8, SonySpeakerLighting.Parameter.mode.rawValue] + value
+            type = SonySpeakerLighting.frameType
+        } else if frame.type == 0x0C, let reply = adaptiveVolumeCautionReply, frame.payload == reply.payload,
+                  reply.requestID == settingRequests[.adaptiveVolumeWithLimitation],
+                  let value = pendingChanges[.adaptiveVolumeWithLimitation] {
+            adaptiveVolumeCautionReply = nil
+            payload = SonyAdaptiveVolumeWithLimitation.writePrefix + value
+            type = 0x0E
+        } else if frame.type == 0x0C, let change = staminaChange, frame.payload == change.replyPayload,
            change.requestID == settingRequests[.stamina], change.session == controlSession {
             payload = [0x28, 0x0E, change.enabled ? 0 : 1]
         } else if frame.type == 0x0C, let change = bluetoothStandbyChange, frame.payload == change.replyPayload,
@@ -4894,6 +6886,21 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             query = nil
         } else if payload.count < 3 {
             return
+        } else if type == SonySpeakerLighting.frameType, let parameter = SonySpeakerLighting.Parameter.setting(payload) {
+            setting = .speakerLighting(parameter)
+            query = parameter.query
+        } else if type == SonyDJControl.frameType, payload[0] == 0x78, payload[1] == djControl.inquiry {
+            setting = .speakerDJ
+            query = djControl.parameterQuery
+        } else if type == 0x0C, payload.starts(with: SonyLEAudioStandby.writePrefix) {
+            setting = .leAudioStandby
+            query = SonyLEAudioStandby.Field.setting.inquiry
+        } else if let auracastSetting = auracastSetting(type: type, payload: payload) {
+            setting = auracastSetting
+            query = setting == .auracastReception && auracast.variant == .standard ? SonyAuracast.receptionQuery : nil
+        } else if type == SonyKaraoke.frameType, let karaokeSetting = karaoke.setting(forWrite: payload) {
+            setting = .speakerKaraoke(karaokeSetting)
+            query = karaoke.query(karaokeSetting)
         } else if payload[0] == 0x28, payload.count == 3,
                   frame.type == powerFeatures.batteryCare?.frameType, payload[1] == powerFeatures.batteryCare?.inquiryType {
             setting = .batteryCare
@@ -4912,16 +6919,26 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         } else if frame.type == 0x0C, payload.count == 4, payload.prefix(2) == [0x28, 0x0B] {
             setting = payload[3] == 1 ? .powerSaveEffect : .autoPowerSave
             query = [0x26, 0x0B]
+        } else if frame.type == 0x0E, payload.count == 4, payload[0] == 0x58, payload[1] == soundPressure.inquiryType {
+            setting = .soundPressureMode
+            query = nil
+        } else if frame.type == 0x0E, payload.prefix(2) == [0x38, 0x03] {
+            setting = .musicHandover
+            query = SonyMultipoint.musicHandoverQuery
+        } else if frame.type == 0x0E, payload.starts(with: SonyMicrophoneOperation.writePrefix) {
+            setting = .microphoneOperation
+            query = SonyMicrophoneOperation.parameterQuery
+        } else if type == 0x0E, payload.starts(with: SonyAdaptiveVolumeWithLimitation.writePrefix) {
+            setting = .adaptiveVolumeWithLimitation
+            query = SonyAdaptiveVolumeWithLimitation.parameterQuery
+        } else if frame.type == 0x0E, payload.count == 3, payload[1] == 0x05, volumeProtection.supportsMaxVolume,
+                  payload[0] == 0x54 || payload[0] == 0x58 {
+            setting = payload[0] == 0x54 ? .maxVolumeEnabled : .maxVolumePreset
+            query = nil
         } else if frame.type == 0x0E {
-            guard payload[0] == 0x48 else { return }
-            if payload[1] == 0x01, payload.count == (voiceGuidance.generation == .v1 ? 4 : 3) {
-                setting = .voiceGuidance
-            } else if payload[1] == 0x20, payload.count == 4 {
-                setting = .voiceGuidanceVolume
-            } else {
-                return
-            }
-            query = setting == .voiceGuidance ? voiceGuidance.parameterQueryPayload : [0x46, payload[1]]
+            guard payload[0] == 0x48, let voiceSetting = voiceGuidanceSetting(for: payload[1]) else { return }
+            setting = voiceSetting
+            query = voiceGuidance.parameterQuery(for: payload[1])
         } else if frame.type != 0x0C {
             return
         } else if protocolInformation?.generation == .v1, payload[0] == 0x48, payload.count == 3,
@@ -4937,21 +6954,60 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         } else if payload[0] == 0x68, decodedNoiseControlMode(payload) != nil || noiseControl?.validatedState(payload) != nil {
             setting = .noiseControl
             query = [0x66, payload[1]]
+        } else if payload[0] == 0x58, payload.count == 3, payload[1] == equalizer.bassBoost.inquiryType {
+            setting = .bassBoost
+            query = [0x56, payload[1]]
+        } else if payload.prefix(2) == [0x58, 0x50] {
+            setting = .lrBalanceCorrection
+            query = SonyLRBalanceCorrection.parameterQuery
+        } else if payload[0] == 0x58, [0x32, 0x37].contains(payload[1]) {
+            setting = .turnKeyEQ
+            query = nil
+        } else if payload.prefix(2) == [0x58, 0x40] {
+            setting = .ultSoundEffectAssignment
+            query = SonyULTSoundEffectAssignment.parameterQuery
+        } else if payload[0] == 0x58, (0x33...0x35).contains(payload[1]) {
+            setting = .customSoundEffect
+            query = SonyCustomSoundEffect.parameterQuery
+        } else if let standalone = standaloneEQSetting(for: payload) {
+            setting = standalone
+            query = standalone == .soundEffect ? SonySoundEffect.parameterQuery : SonyCustomEQ.parameterQuery
         } else if payload[0] == 0x58, payload[1] == equalizer.inquiryType {
             setting = .equalizer
             query = equalizer.parameterQueryPayload
         } else if protocolInformation?.generation == .v1, legacyControls?.dsee.acceptsSetPayload(payload) == true {
             setting = .dsee
             query = [0xE6, 0x02]
-        } else if protocolInformation?.generation == .v2, payload[0] == 0xE8, payload[1] == 0x01 {
+        } else if protocolInformation?.generation == .v2, payload[0] == 0xE8, payload[1] == audioFeatures.dseeInquiry {
             setting = .dsee
-            query = [0xE6, 0x01]
+            query = audioFeatures.dseeParameterQuery
+        } else if payload.prefix(2) == [0xE8, SonySoundLeakageReduction.inquiry] {
+            setting = .soundLeakageReduction
+            query = SonySoundLeakageReduction.parameterQuery
+        } else if payload.starts(with: SonyVoiceContents.writePrefix) {
+            setting = .voiceContents
+            query = SonyVoiceContents.parameterQuery
+        } else if payload.starts(with: SonyTVSoundBooster.writePrefix) {
+            setting = .tvSoundBooster
+            query = SonyTVSoundBooster.parameterQuery
+        } else if frame.type == 0x0C, payload.starts(with: SonySoundFieldOptimization.writePrefix) {
+            setting = .soundFieldOptimization
+            query = SonySoundFieldOptimization.parameterQuery
+        } else if payload[0] == 0xE8, payload[1] == audioFeatures.backgroundMusic?.inquiry {
+            setting = .backgroundMusic
+            query = audioFeatures.backgroundMusic?.parameterQuery
+        } else if frame.type == 0x0C, payload.starts(with: SonyListeningModeAssignments.writePrefix) {
+            setting = .listeningModeAssignments
+            query = SonyListeningModeAssignments.parameterQuery
+        } else if payload[0] == 0xE8, let variant = SonyUpmix.Variant(rawValue: payload[1]), audioFeatures.upmix[variant] != nil {
+            setting = .upmix(variant)
+            query = variant.parameterQuery
         } else if payload[0] == 0xA8, let volumeSetting = playbackVolumeSetting(payload) {
             setting = volumeSetting
             query = playback.queryPayload(for: payload)
-        } else if payload[0] == 0xFC, payload.count == 4, payload[1] == 0x0C {
+        } else if payload[0] == 0xFC, payload[1] == systemFeatures.speakToChatOptions?.variant.inquiry {
             setting = .speakToChatOptions
-            query = [0xFA, 0x0C]
+            query = [0xFA, payload[1]]
         } else if protocolInformation?.generation == .v1, payload.count == 4, payload.prefix(3) == [0xF8, 0x03, 0], payload[3] <= 1 {
             setting = .system(.pauseOnRemoval)
             query = [0xF6, 0x03]
@@ -4971,9 +7027,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                   touchAssignments.inquiryType == 0x03 {
             setting = .touchCustomActions
             query = [0xFA, 0x03]
-        } else if payload[0] == 0xF8, let feature = SonySystemFeature(rawValue: payload[1]) {
+        } else if payload[0] == 0xF8, let feature = systemFeature(inquiry: payload[1]) {
             setting = .system(feature)
-            query = [0xF6, feature.rawValue]
+            query = [0xF6, payload[1]]
         } else if payload[0] == 0xD8, payload.count == 4, payload[1] == systemFeatures.sidetoneSlot,
                   payload[2] == (systemFeatures.generation == .v1 ? 1 : 0) {
             setting = .sidetone
@@ -4982,19 +7038,35 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             return
         }
         guard let requestID = settingRequests[setting], pendingChanges[setting] == settingValue(payload, setting: setting) else { return }
-        settingTransmissionOrdinals[setting] = completedTransmissionOrdinal
+        let confirmationOrdinal = completedTransmissionOrdinal
+        settingTransmissionOrdinals[setting] = confirmationOrdinal
         let confirmationID = setting == .bluetoothStandby ? UUID() : nil
         if setting == .bluetoothStandby { bluetoothStandbyChange?.confirmationID = confirmationID }
         let session = controlSession
         let refresh = DispatchWorkItem { [weak self] in
             Task { @MainActor in
                 guard let self, self.controlSession == session, self.settingRequests[setting] == requestID,
-                      setting != .bluetoothStandby || self.bluetoothStandbyChange?.confirmationID == confirmationID else { return }
+                      setting != .bluetoothStandby || self.bluetoothStandbyChange?.confirmationID == confirmationID,
+                      setting != .voiceAssistant || (self.voiceAssistantSideAlert == nil && self.voiceAssistantSideReply == nil
+                            && self.settingTransmissionOrdinals[setting] == confirmationOrdinal),
+                      setting != .adaptiveVolumeWithLimitation
+                        || (self.adaptiveVolumeCaution == nil && self.adaptiveVolumeCautionReply == nil
+                            && self.settingTransmissionOrdinals[setting] == confirmationOrdinal),
+                      setting != .speakerLighting(.mode)
+                        || (self.lightingModeAlert == nil && self.lightingModeAlertReply == nil
+                            && self.settingTransmissionOrdinals[setting] == confirmationOrdinal) else { return }
+                if setting == .leAudioStandby, let query {
+                    self.send(query, type: type)
+                    return
+                }
                 #if DEBUG
                 if self.isSimulated {
                     if self.simulatesSettingReplies {
                         if setting == .equalizerReadback {
                             return
+                        } else if setting == .equalizer, self.equalizer.supportsULT, payload[4] == 0,
+                                  let values = self.equalizer.rawValues {
+                            self.dispatch([0x59, payload[1], payload[2], payload[3], UInt8(values.count)] + values, type: frame.type)
                         } else if setting == .equalizer, self.equalizer.generation == .v1, payload[2] == 0xFF {
                             self.dispatch([0x59, payload[1], EqualizerPreset.manual.rawValue] + payload.dropFirst(3), type: frame.type)
                         } else if setting == .batteryCare || setting == .autoStandby {
@@ -5012,8 +7084,28 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                             let effect: UInt8 = setting == .powerSaveEffect ? 1
                                 : self.powerFeatures.autoPowerSave?.effectActive == true ? 0 : 1
                             self.dispatch([0x29, 0x0B, payload[2], effect], type: frame.type)
-                        } else if frame.type == 0x0E, let query {
-                            self.send(query, type: frame.type)
+                        } else if setting == .maxVolumeEnabled {
+                            self.dispatch([0x55] + payload.dropFirst(), type: frame.type)
+                        } else if setting == .maxVolumePreset {
+                            self.dispatch([0x59] + payload.dropFirst(), type: frame.type)
+                        } else if setting == .musicHandover || setting == .microphoneOperation {
+                            self.dispatch([payload[0] + 1] + payload.dropFirst(), type: frame.type)
+                        } else if setting == .customSoundEffect {
+                            switch payload[1] {
+                            case 0x33: self.dispatch([0x59, 0x33, payload[2], 0], type: frame.type)
+                            case 0x35: self.dispatch([0x59, 0x35] + payload.dropFirst(3), type: frame.type)
+                            default: break
+                            }
+                        } else if setting == .adaptiveVolumeWithLimitation {
+                            if payload[2] == 0, self.adaptiveVolumeWithLimitation.limitationActive == true, !self.adaptiveVolumeCautionSeen {
+                                self.dispatch([0x99, 0, 0x5B, 2], type: 0x0C)
+                            } else {
+                                self.dispatch([0xF9, 0x04, payload[2]] + (self.adaptiveVolumeWithLimitation.limitationActive == true ? [1, 0] : [0]), type: type)
+                            }
+                        } else if setting == .auracastReception {
+                            if let query { self.send(query, type: type) }
+                        } else if type == 0x0E, let query {
+                            self.send(query, type: type)
                         } else {
                             self.dispatch([payload[0] + 1] + payload.dropFirst(), type: frame.type)
                         }
@@ -5022,7 +7114,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
                 #endif
                 if let query {
-                    self.send(query, type: frame.type)
+                    self.send(query, type: type)
                 }
             }
         }
@@ -5033,7 +7125,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         let timeout = DispatchWorkItem { [weak self] in
             Task { @MainActor in
                 guard let self, self.controlSession == session, self.settingRequests[setting] == requestID,
-                      setting != .bluetoothStandby || self.bluetoothStandbyChange?.confirmationID == confirmationID else { return }
+                      setting != .bluetoothStandby || self.bluetoothStandbyChange?.confirmationID == confirmationID,
+                      setting != .voiceAssistant || (self.voiceAssistantSideAlert == nil && self.voiceAssistantSideReply == nil
+                            && self.settingTransmissionOrdinals[setting] == confirmationOrdinal),
+                      setting != .adaptiveVolumeWithLimitation
+                        || (self.adaptiveVolumeCaution == nil && self.adaptiveVolumeCautionReply == nil
+                            && self.settingTransmissionOrdinals[setting] == confirmationOrdinal),
+                      setting != .speakerLighting(.mode)
+                        || (self.lightingModeAlert == nil && self.lightingModeAlertReply == nil
+                            && self.settingTransmissionOrdinals[setting] == confirmationOrdinal) else { return }
                 if setting == .stamina { self.staminaChange = nil }
                 if setting == .bluetoothStandby { self.resetBluetoothStandbyChange() }
                 self.unconfirmedChanges[setting] = self.pendingChanges[setting]
@@ -5052,7 +7152,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     self.sendRequestedNoiseControl()
                 }
                 if let query {
-                    if frame.type == 0x0E, query.first == 0x46 { self.send(query, type: frame.type) }
+                    if case .speakerLighting = setting { self.send(query, type: type) }
+                    else if case .speakerKaraoke = setting { self.send(query, type: type) }
+                    else if setting == .speakerDJ || setting == .auracastReception { self.send(query, type: type) }
+                    else if setting == .adaptiveVolumeWithLimitation { self.send(query, type: type) }
+                    else if frame.type == 0x0E, query.first == 0x46 || setting == .musicHandover || setting == .microphoneOperation { self.send(query, type: frame.type) }
                     else if self.powerQuerySetting(query, type: frame.type) != nil { self.send(query, type: frame.type) }
                     else if self.systemReadSetting(query) != nil { self.send(query) }
                 }
@@ -5072,7 +7176,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         guard receivedAfter(settingTransmissionOrdinals[setting]) else { return }
         let sentValue = settingTimeouts[setting] == nil ? nil : pendingChanges[setting]
         guard let expected = sentValue ?? unconfirmedChanges[setting],
-              value == expected || (setting == .equalizer && expected.count == 1 && value?.first == expected.first) else { return }
+              setting == .equalizer ? equalizer.confirms(expected, value: value) : value == expected else { return }
         if setting == .noiseToggle || setting == .noiseTest || (setting == .noiseControl && noiseControl != nil),
            !acknowledgedNoiseSettings.contains(setting) {
             noiseSettingConfirmations[setting] = value
@@ -5112,6 +7216,25 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func resetSettingRequests(preservingTimedOutReads: Bool = false) {
+        ultAssignmentBaseline = nil
+        customSoundEffectBaseline = nil
+        soundEffectSelectionBeforeWrite = nil
+        customEQBeforeWrite = nil
+        turnKeyImportAlert = nil
+        turnKeyImportJudged = false
+        turnKeyImportReply = nil
+        lightingModeAlert = nil
+        lightingModeAlertReply = nil
+        lightingModeAlertSeen = false
+        adaptiveVolumeCaution = nil
+        adaptiveVolumeCautionReply = nil
+        adaptiveVolumeCautionSeen = false
+        voiceAssistantSideAlert = nil
+        voiceAssistantSideReply = nil
+        voiceAssistantSideAlertSeen = false
+        clearPartyLightingDrag()
+        cancelSpeakerLightingColorPreview()
+        lightingColorPreviewWasSent = false
         settingTransmissionOrdinals = [:]
         acknowledgedNoiseSettings = []
         noiseSettingConfirmations = [:]
@@ -5123,6 +7246,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         equalizerWorkItem = nil
         equalizerDebounceID = nil
         requestedEqualizerPayload = nil
+        requestedEqualizerULTModeChange = false
         equalizerReadTimeout?.cancel()
         equalizerReadTimeout = nil
         equalizerRead = nil
@@ -5138,7 +7262,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             var retained = Set(systemReads.values.filter { $0.transmitted && $0.timedOut }.compactMap(\.errorSetting))
             for read in powerReads.values where read.transmitted && read.timedOut { retained.insert(read.setting) }
             for (query, read) in voiceGuidanceReads where read.transmitted && read.isObsolete && read.timeout == nil {
-                retained.insert(query[1] == 1 ? .voiceGuidance : .voiceGuidanceVolume)
+                if let setting = voiceGuidanceSetting(for: query[1]) { retained.insert(setting) }
+                if query[1] == 2 { retained.insert(.voiceGuidanceLanguage) }
             }
             if legacyDSEEReadTimeouts.values.contains(where: { $0.work == nil }) { retained.insert(.dsee) }
             for (query, timeout) in legacySoundEffectReadTimeouts where timeout.work == nil {
@@ -5161,6 +7286,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     func setCustomEqualizer(_ settings: EqualizerSettings) {
+        guard !isULTEqualizerSelectionPending else { return }
         guard let payload = equalizer.settingsPayload(settings) else {
             if isReady { settingErrors[.equalizer] = String(localized: "This equalizer layout is not available on the headphones.") }
             return
@@ -5168,13 +7294,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         queueEqualizer(payload, debounce: true)
     }
 
-    private func queueEqualizer(_ payload: [UInt8], debounce: Bool) {
-        guard powerOffState == nil, !isRunningHeadphoneTest, multipointTransition?.isFinished != false, deviceActionTransition?.isFinished != false else { return }
+    private func queueEqualizer(_ payload: [UInt8], debounce: Bool, changingULTMode: Bool = false) {
+        guard powerOffState == nil, !isRunningHeadphoneTest, !listeningModeExcludesEqualizer,
+              multipointTransition?.isFinished != false, deviceActionTransition?.isFinished != false else { return }
         guard stage == .ready, connectionTransition?.isFinished != false else { return }
         equalizerWorkItem?.cancel()
         equalizerWorkItem = nil
         equalizerDebounceID = nil
         requestedEqualizerPayload = payload
+        requestedEqualizerULTModeChange = changingULTMode
         settingErrors[.equalizer] = nil
         guard debounce else {
             sendRequestedEqualizer()
@@ -5200,7 +7328,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
               equalizerWorkItem == nil, pendingChanges[.equalizer] == nil,
               pendingChanges[.equalizerReadback] == nil, let payload = requestedEqualizerPayload else { return }
         requestedEqualizerPayload = nil
-        guard equalizer.acceptsSetPayload(payload) else {
+        guard !listeningModeExcludesEqualizer,
+              equalizer.acceptsSetPayload(payload, changingULTMode: requestedEqualizerULTModeChange) else {
             settingErrors[.equalizer] = String(localized: "Equalizer settings changed before the request could be sent.")
             return
         }
@@ -5230,7 +7359,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if isSimulated, simulatesSettingReplies {
             guard let type = equalizer.inquiryType else { return }
             let reply: [UInt8]
-            if equalizerPreset == .manual, let payload = equalizer.settingsPayload(customEqualizer) {
+            if equalizer.supportsULT, let preset = equalizer.presetID, let mode = equalizer.ultMode {
+                let rawValues = equalizer.rawValues ?? []
+                reply = [0x57, type, preset, mode.rawValue, UInt8(rawValues.count)] + rawValues
+            } else if equalizerPreset == .manual, let payload = equalizer.settingsPayload(customEqualizer) {
                 reply = [0x57, type, EqualizerPreset.manual.rawValue] + payload.dropFirst(3)
             } else {
                 reply = [0x57, type, equalizer.presetID ?? 0x00, 0x00]
@@ -5611,6 +7743,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func closeSonyLink() {
+        musicHandoverReadOrdinal = nil
         #if DEBUG
         let preparingTransport = preparingBLETransport
         preparingBLETransport = nil
@@ -5725,6 +7858,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         isApplyingChange = false
         equalizer = SonyEqualizer()
         firmwareVersion = nil
+        displayFirmwareVersion = nil
         protocolVersion = nil
         protocolInformation = nil
         legacyControls = nil
@@ -5741,14 +7875,28 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         audioFeatures = SonyAudioFeatures()
         systemFeatures = SonySystemFeatures()
         powerFeatures = SonyPowerFeatures()
+        speakerLighting = SonySpeakerLighting()
+        djControl = SonyDJControl()
+        karaoke = SonyKaraoke()
+        auracast = SonyAuracast()
+        karaokeControlsBeforeWrite = nil
+        for read in lightingReads.values { read.timeout?.cancel() }
+        lightingReads = [:]
         playback = SonyPlayback()
         touchAssignments = SonyTouchAssignments()
         voiceGuidance = SonyVoiceGuidance()
         soundPressure = SonySoundPressure()
+        volumeProtection = SonyVolumeProtection()
+        usbProtection = SonyUSBProtection()
         wearingStatus = SonyWearingStatus()
+        resetWearingPosition()
         earTipFit = SonyEarTipFit()
         headGesturePractice = SonyHeadGesturePractice()
         multipoint = SonyMultipoint()
+        linkAutoSwitch = SonyLinkAutoSwitch()
+        microphoneOperation = SonyMicrophoneOperation()
+        adaptiveVolumeWithLimitation = SonyAdaptiveVolumeWithLimitation()
+        leAudioRestrictions = SonyLEAudioRestrictions()
         lastConnectionAlert = nil
         supportedFunctions = []
         supportedFunctions2 = []
@@ -5761,8 +7909,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     private func beginHandshake(reusingConnection: Bool = false) {
         guard powerOffState == nil, !isRunningHeadphoneTest else { return }
         if reusingConnection, !expiredLegacyCapabilities.isEmpty || legacyCapabilityReads != nil
-            || equalizerRead != nil || !batteryReads.isEmpty || !playbackReads.isEmpty
-            || soundPressureRead != nil || inventoryRead != nil || noiseControlRead != nil
+            || equalizerRead != nil || !batteryReads.isEmpty || !playbackReads.isEmpty || !lightingReads.isEmpty
+            || soundPressureRead != nil || exposureRequest != nil || inventoryRead != nil || noiseControlRead != nil
             || queuedNoiseControlRead || !noiseReadTimeouts.isEmpty || noiseControlRefresh != nil
             || discoveryReads.values.contains(where: { $0.retryTransmitted || ($0.transmitted && !$0.resolved) }) {
             closeSonyLink()
@@ -5808,11 +7956,23 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         resetFirmwareUpdateReads()
         multipointQueuedReadSlot = nil
         supportedFunctions2 = []
+        speakerLighting = SonySpeakerLighting()
+        djControl = SonyDJControl()
+        karaoke = SonyKaraoke()
+        auracast = SonyAuracast()
+        karaokeControlsBeforeWrite = nil
         multipoint = SonyMultipoint()
+        linkAutoSwitch = SonyLinkAutoSwitch()
+        microphoneOperation = SonyMicrophoneOperation()
+        adaptiveVolumeWithLimitation = SonyAdaptiveVolumeWithLimitation()
+        leAudioRestrictions.updateTable2([])
         table2CapabilitiesSession = nil
         voiceGuidance = SonyVoiceGuidance()
         soundPressure = SonySoundPressure()
+        volumeProtection = SonyVolumeProtection()
+        usbProtection = SonyUSBProtection()
         wearingStatus = SonyWearingStatus()
+        resetWearingPosition()
         sourceTransition?.controlLost(session: controlSession)
         deviceActionTransition?.controlLost(session: controlSession)
         deviceActionTimeout?.cancel()
@@ -5823,6 +7983,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         inventoryReadTimeout = nil
         inventoryRead = nil
         announcedAudioSourceAddress = nil
+        resetLegacyPeripheralReads()
         controlSession += 1
         classicIncomingData.removeAll(keepingCapacity: false)
         classicIncomingDataLength = 0
@@ -5917,6 +8078,18 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         soundPressureReadError = nil
         lastSoundPressureRequest = nil
         invalidateSoundPressureReading()
+        resetExposureRead()
+    }
+
+    private func resetExposureRead() {
+        exposureReadTimeout?.cancel()
+        exposureReadTimeout = nil
+        exposureRead = nil
+        exposureRequest = nil
+        exposureHistory = nil
+        currentExposure = nil
+        exposureReadError = nil
+        exposureRequiresReconnect = false
     }
 
     private func resetWearingStatusRead(preservingPendingRead: Bool = false) {
@@ -5932,6 +8105,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func resetCommandQueue() {
+        connectionTimeAcknowledgment = nil
+        codecRead = nil
+        codecRepliesAreAmbiguous = false
         resetLegacyCapabilities()
         initialFeatureReadTimeout?.cancel()
         initialFeatureReadTimeout = nil
@@ -5974,6 +8150,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         inventoryReadTimeout = nil
         inventoryRead = nil
         commandQueue = SonyCommandQueue()
+        resetLegacyPeripheralReads()
         modeReadbacks = []
         fixedAlertsEnabled = false
         transmittedFrame = nil
@@ -5982,9 +8159,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         transmissionID = nil
     }
 
-    private func send(_ payload: [UInt8], type: UInt8 = 0x0C, retryingDiscovery: Bool = false) {
-        guard powerOffState == nil || (powerOffState == .sending && type == 0x0C && payload == Self.powerOffPayload) else { return }
-        guard !isRunningHeadphoneTest || (type == 0x0C
+    private func send(_ payload: [UInt8], type: UInt8 = 0x0C, retryingDiscovery: Bool = false, prioritizing: Bool = false) {
+        let isPowerOff = powerOffState == .sending && type == SonyPowerOffCommand.frameType && payload == powerOffPayload
+        guard powerOffState == nil || isPowerOff else { return }
+        if type == 0x0C, payload == SonyVoiceAssistantSetup.query, !canReadVoiceAssistantSetup { return }
+        guard !isRunningHeadphoneTest
+            || (checkingWearingPosition && type == SonyWearingPosition.frameType && payload == SonyWearingPosition.startPayload)
+            || (type == 0x0C
             && (earTipFitTransition?.initialQueries.contains(payload) == true
                 || payload == earTipFitTransition?.expectedPayload
                 || headGesturePracticeTransition?.initialQueries.contains(payload) == true
@@ -6030,15 +8211,26 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 && (voiceGuidance.queryPayloads.contains(payload)
                     || (payload.count == 4 && payload.prefix(3) == [0x48, 1, 1]
                         && voiceGuidance.setEnabledPayload(payload[3] == 1) == payload))
-            let isLegacyDeviceList = type == 0x0E && payload == [0x36, 0x01] && multipoint.queryPayloads.contains(payload)
+            let isLegacyDeviceList = type == 0x0E && multipoint.supportsLegacyInventory
+                && (multipoint.queryPayloads.contains(payload) || payload == deviceActionTransition?.expectedPayload
+                    || payload == legacyPairingModeRequest.flatMap { multipoint.legacyPairingModePayload($0) })
             let isSidetone = payload.count == 4 && payload[0] == 0xD8 && payload[1] == systemFeatures.sidetoneSlot
                 && systemFeatures.sidetoneSetPayload(enabled: payload[3] == 1) == payload
-            guard isVoiceGuidance || isLegacyDeviceList || (type == 0x0C && (
+            let isSpeakToChat = payload.count >= 4 && payload[1] == systemFeatures.speakToChatOptions?.variant.inquiry
+                && (payload[0] == 0xF8 && pendingChanges[.system(.speakToChat)] == settingValue(payload, setting: .system(.speakToChat))
+                    || payload[0] == 0xFC && pendingChanges[.speakToChatOptions] == settingValue(payload, setting: .speakToChatOptions))
+            let isLegacyOnOff = payload.count == 4 && payload[0] == 0xF8
+                && systemFeatures.legacyOnOffFeature(inquiry: payload[1]).flatMap { systemFeatures.setPayload($0, enabled: payload[3] == 1) } == payload
+            guard isPowerOff || isVoiceGuidance || isLegacyDeviceList || (type == 0x0C && (
                   (legacyControls?.allows(payload) ?? [[0x04, 0x01], [0x04, 0x03], [0x06, 0x00]].contains(payload))
                     || isEqualizerQuery || equalizer.acceptsSetPayload(payload) || isTouchAssignment || isConnectionAlert
+                    || equalizer.bassBoost.queryPayloads.contains(payload)
+                    || (payload.count == 3 && payload[0] == 0x58 && payload[1] == equalizer.bassBoost.inquiryType)
                     || isIndicatorQuery || isSoundEffectQuery || legacySurround.acceptsSetPayload(payload) || legacySoundPosition.acceptsSetPayload(payload)
-                    || systemFeatures.queryPayloads.contains(payload) || isSidetone || payload == multipointTransition?.expectedPayload
+                    || systemFeatures.queryPayloads.contains(payload) || isSidetone || isSpeakToChat || isLegacyOnOff
+                    || payload == multipointTransition?.expectedPayload
                     || playback.queryPayloads.contains(payload)
+                    || (payload.first == 0xA4 && pendingPlaybackCommand.flatMap { playback.commandPayload($0) } == payload)
                     || (payload.first == 0xA8 && payload.last.flatMap { playback.volumePayload(Int($0)) } == payload)
                     || firmwareUpdateQueries[payload] != nil
                     || (legacyOptimizer.isSupported && (legacyOptimizerTransition?.pendingQueries.contains(payload) == true
@@ -6050,8 +8242,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 guard legacyReads[payload] == nil, queuedLegacyReads.insert(payload).inserted else { return }
             }
         }
-        if (type == 0x0C && [[0x04, 0x01], [0x04, 0x03]].contains(payload))
+        if (type == 0x0C && ([[0x04, 0x01], [0x04, 0x03]].contains(payload) || payload == displayFirmwareQuery))
+            || (type == 0x0C && payload == SonyVoiceAssistantSetup.query)
             || (type == 0x0E && payload == [0x06, 0x00] && supportsTable2)
+            || (type == 0x0E && linkAutoSwitch.queryPayloads.contains(payload))
+            || (type == SonyWearingPosition.frameType && wearingPosition.queryPayloads.contains(payload))
+            || leAudioRestrictions.queryPayloads(frameType: type).contains(payload)
             || (protocolInformation?.generation == .v2
                 && SonyConnectionIdentity.queryPayloads(frameType: type, supportedFunctions: supportedFunctions,
                                                        supportedFunctions2: supportedFunctions2).contains(payload)) {
@@ -6072,20 +8268,49 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             queuedNoiseControlRead = true
         }
         if type == 0x0C, systemReads[payload] != nil { return }
-        if type == 0x0C, (payload.count == 2 && standaloneNoiseControl(payload[1])?.queryPayloads.contains(payload) == true)
+        if type == 0x0E, (microphoneOperation.queryPayloads + adaptiveVolumeWithLimitation.queryPayloads + auracast.queryPayloads + leAudioCapabilities.queryPayloads).contains(payload) {
+            let key = [type] + payload
+            guard systemReads[key] == nil else { return }
+            systemReads[key] = SystemRead()
+        }
+        if type == 0x0C, payload == SonyAudioFeatures.codecQueryPayload, audioFeatures.supportsCodecStatus {
+            if let codecRead {
+                guard codecRead.transmissionOrdinal != nil else { return }
+                codecRepliesAreAmbiguous = true
+                invalidateCodecSource()
+            }
+            codecRead = CodecRead()
+        }
+        if type == 0x0C, (leAudioStandbyQueries.contains(payload)
+            || payload.count == 2 && standaloneNoiseControl(payload[1])?.queryPayloads.contains(payload) == true)
             || noiseToggle?.queryPayloads.contains(payload) == true
             || payload == noiseTest?.queryPayload
             || legacyControls?.connectionQuality.queryPayloads.contains(payload) == true
             || legacyControls?.wearingControl.queryPayloads.contains(payload) == true
             || (protocolInformation?.generation == .v2 && payload.count == 2 && [0xE0, 0xE2].contains(payload[0])
                 && audioFeatures.queryPayloads.contains(payload))
-            || systemReadSetting(payload) == .dsee
+            || (payload == SonyAudioFeatures.upscalingQueryPayload && audioFeatures.supportsUpscalingStatus)
+            || (earTipFit.supportsEarpieceSelection && (payload == SonyEarTipFit.selectionStatusQueryPayload
+                || (payload == SonyEarTipFit.selectionQueryPayload && earTipFitTransition?.blocksCommands != true)))
+            || systemReadSetting(payload) == .dsee || systemReadSetting(payload) == .soundLeakageReduction || systemReadSetting(payload) == .bassBoost
+            || systemReadSetting(payload) == .voiceContents
+            || (payload.count == 2 && SonyUpmix.Variant(rawValue: payload[1]).map {
+                audioFeatures.upmix[$0] != nil && $0.queryPayloads.contains(payload)
+            } == true)
+            || systemReadSetting(payload) == .lrBalanceCorrection || systemReadSetting(payload) == .turnKeyEQ
+            || systemReadSetting(payload) == .ultSoundEffectAssignment
+            || systemReadSetting(payload) == .customSoundEffect
+            || systemReadSetting(payload) == .soundEffect || systemReadSetting(payload) == .customEQ
+            || (audioFeatures.tvSoundBooster != nil && SonyTVSoundBooster.queryPayloads.contains(payload))
+            || (audioFeatures.soundFieldOptimization != nil && SonySoundFieldOptimization.queryPayloads.contains(payload))
+            || audioFeatures.backgroundMusic?.queryPayloads.contains(payload) == true
+            || systemReadSetting(payload) == .listeningModeAssignments
             || touchAssignments.queryPayloads.contains(payload)
             || automaticPowerOff?.queryPayloads.contains(payload) == true
             || systemFeatures.voiceAssistant?.queryPayloads.contains(payload) == true
             || (payload.first == 0xD0 && systemFeatures.queryPayloads.contains(payload))
             || (payload.count == 2 && [0xD2, 0xD6].contains(payload[0]) && payload[1] == systemFeatures.sidetoneSlot)
-            || (payload.count == 2 && [0xF2, 0xF6, 0xFA].contains(payload[0]) && systemFeatures.queryPayloads.contains(payload)) {
+            || (payload.count == 2 && [0xF0, 0xF2, 0xF6, 0xFA].contains(payload[0]) && systemFeatures.queryPayloads.contains(payload)) {
             systemReads[payload] = SystemRead()
         }
         if protocolInformation?.generation == .v2, type == 0x0C, payload.count == 2, payload[0] == 0x22,
@@ -6096,6 +8321,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if type == 0x0E, voiceGuidance.queryPayloads.contains(payload) {
             guard voiceGuidanceReads[payload] == nil else { return }
             voiceGuidanceReads[payload] = SystemRead()
+        }
+        if type == SonySpeakerLighting.frameType,
+           speakerLighting.queryPayloads.contains(payload) || djControl.queryPayloads.contains(payload)
+            || karaoke.queryPayloads.contains(payload) {
+            guard lightingReads[payload] == nil else { return }
+            lightingReads[payload] = SystemRead()
         }
         if let setting = powerQuerySetting(payload, type: type) {
             let key = [type] + payload
@@ -6114,7 +8345,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             guard multipointReadbacks.isEmpty || multipointTransition?.phase == .queuedReadback else { return }
             multipointQueuedReadSlot = payload[1]
         }
-        if type == 0x0E, payload.count == 2, payload[0] == 0x36, payload[1] == multipoint.inventoryInquiryType {
+        if type == 0x0E, multipoint.supportsLegacyInventory, payload == [0x30, 1] || payload == [0x32, 1] {
+            guard legacyPeripheralReads[payload] == nil else { return }
+            legacyPeripheralReads[payload] = SystemRead()
+        }
+        if type == 0x0E, payload.count == 2, payload[0] == 0x36, payload[1] == multipoint.deviceInventoryInquiryType {
             guard inventoryRead == nil else { return }
             let request = deviceActionTransition?.phase == .queuedReadback ? deviceActionTransition?.requestID
                 : sourceTransition?.phase == .queuedReadback ? sourceTransition?.requestID : nil
@@ -6134,11 +8369,119 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             initialFeatureReads?.prepare(payload)
         }
         if type == 0x0C { noiseControlReadSequence?.prepare(payload) }
-        let prioritizing = type == 0x0C && payload.first == 0xA8 && playbackVolumeSetting(payload) == .playbackVolume
-        if let frame = commandQueue.enqueue(payload: payload, type: type, prioritizing: prioritizing) { transmit(frame) }
+        let isVolumeWrite = type == 0x0C && payload.first == 0xA8 && playbackVolumeSetting(payload) == .playbackVolume
+        if let frame = commandQueue.enqueue(payload: payload, type: type, prioritizing: prioritizing || isVolumeWrite) { transmit(frame) }
     }
 
     private func transmit(_ frame: SonyFrame) {
+        if frame.type == 0x0C, frame.payload.starts(with: SonyVoiceAssistantSideAlert.replyPrefix),
+           !(systemControlContextIsAvailable && supportedFunctions.contains(SonyVoiceAssistantSideAlert.capability)
+             && voiceAssistantSideReply?.payload == frame.payload
+             && voiceAssistantSideReply?.requestID == settingRequests[.voiceAssistant]) {
+            voiceAssistantSideReply = nil
+            discardUnsentSetting(.voiceAssistant, error: String(localized: "Voice assistant settings changed before the change could be sent."))
+            return
+        }
+        if frame.type == 0x0C, frame.payload.starts(with: [0xF8, SonySystemFeature.adaptiveVolume.rawValue]),
+           !systemFeatureIsAvailable(.adaptiveVolume) {
+            discardUnsentSetting(.system(.adaptiveVolume), error: String(localized: "Adaptive Volume Control became unavailable before the change could be sent."))
+            return
+        }
+        let isMusicHandoverWrite = frame.type == 0x0E && frame.payload.prefix(2) == [0x38, 0x03]
+        let isAdaptiveVolumeWrite = frame.type == 0x0E && frame.payload.starts(with: SonyAdaptiveVolumeWithLimitation.writePrefix)
+        let isAdaptiveVolumeCautionReply = frame.type == 0x0C
+            && (frame.payload.starts(with: [0x98, 0, 0x5A]) || frame.payload.starts(with: [0x98, 0, 0x5B]))
+        if (isAdaptiveVolumeWrite || isAdaptiveVolumeCautionReply), !adaptiveVolumeWriteIsCurrent(frame) {
+            adaptiveVolumeCautionReply = nil
+            discardUnsentSetting(.adaptiveVolumeWithLimitation, error: String(localized: "Adaptive Volume Control became unavailable before the change could be sent."))
+            return
+        }
+        let isMicrophoneOperationWrite = frame.type == 0x0E && frame.payload.starts(with: SonyMicrophoneOperation.writePrefix)
+        if isMicrophoneOperationWrite, !microphoneOperationWriteIsCurrent(frame.payload) {
+            discardUnsentSetting(.microphoneOperation, error: String(localized: "Microphone settings changed before the command could be sent."))
+            return
+        }
+        let isTVSoundBoosterWrite = frame.type == 0x0C && frame.payload.starts(with: SonyTVSoundBooster.writePrefix)
+        if isTVSoundBoosterWrite, !tvSoundBoosterWriteIsCurrent(frame.payload) {
+            discardUnsentSetting(.tvSoundBooster, error: String(localized: "TV Sound Booster became unavailable before the change could be sent."))
+            return
+        }
+        let isSoundFieldOptimizationWrite = frame.type == 0x0C && frame.payload.count == 3
+            && frame.payload.starts(with: SonySoundFieldOptimization.writePrefix)
+        if isSoundFieldOptimizationWrite, !soundFieldOptimizationWriteIsCurrent(frame.payload) {
+            discardUnsentSetting(.soundFieldOptimization, error: String(localized: "Sound Field Optimization became unavailable before the change could be sent."))
+            return
+        }
+        let upmixWrite = frame.type == 0x0C && frame.payload.count == 3 && frame.payload[0] == 0xE8
+            ? SonyUpmix.Variant(rawValue: frame.payload[1]) : nil
+        if let upmixWrite, !upmixWriteIsCurrent(frame.payload, variant: upmixWrite) {
+            discardUnsentSetting(.upmix(upmixWrite), error: String(localized: "Upmix became unavailable before the change could be sent."))
+            return
+        }
+        let isBackgroundMusicWrite = frame.type == 0x0C && frame.payload.count == 4
+            && frame.payload[0] == 0xE8 && [0x03, 0x09].contains(frame.payload[1])
+        if isBackgroundMusicWrite, !backgroundMusicWriteIsCurrent(frame.payload) {
+            discardUnsentSetting(.backgroundMusic, error: String(localized: "Background Music settings changed before the command could be sent."))
+            return
+        }
+        let isListeningModeAssignmentWrite = frame.type == 0x0C && frame.payload.starts(with: SonyListeningModeAssignments.writePrefix)
+        if isListeningModeAssignmentWrite, !listeningModeAssignmentWriteIsCurrent(frame.payload) {
+            discardUnsentSetting(.listeningModeAssignments, error: String(localized: "Listening mode assignments changed before the command could be sent."))
+            return
+        }
+        if frame.type == 0x0E, frame.payload.count == 3, frame.payload[1] == 0x05,
+           frame.payload[0] == 0x54 || frame.payload[0] == 0x58 {
+            let enabling = frame.payload[0] == 0x54
+            let setting: Setting = enabling ? .maxVolumeEnabled : .maxVolumePreset
+            let expected = enabling ? volumeProtection.enablePayload
+                : SonyVolumeProtection.LimitPreset(rawValue: frame.payload[2]).flatMap(volumeProtection.limitPayload)
+            guard systemControlContextIsAvailable, hasCurrentTable2Capabilities,
+                  frame.payload == expected, pendingChanges[setting] == [frame.payload[2]] else {
+                discardUnsentSetting(setting, error: String(localized: "The volume limit changed before the command could be sent."))
+                return
+            }
+        }
+        let lightingSetting: Setting?
+        if frame.type == SonySpeakerLighting.frameType, let parameter = SonySpeakerLighting.Parameter.setting(frame.payload) {
+            lightingSetting = .speakerLighting(parameter)
+        } else if frame.type == SonyDJControl.frameType, frame.payload.count >= 5, frame.payload[0] == 0x78,
+                  [0, 3].contains(frame.payload[1]) {
+            lightingSetting = .speakerDJ
+        } else if frame.type == SonyKaraoke.frameType, let setting = SonyKaraoke.settingForCommand(frame.payload) {
+            lightingSetting = .speakerKaraoke(setting)
+        } else if frame.type == 0x0C, frame.payload.prefix(3) == [0x98, 0, 0x88] {
+            lightingSetting = .speakerLighting(.mode)
+        } else {
+            lightingSetting = nil
+        }
+        if let lightingSetting, !lightingWriteIsCurrent(frame, setting: lightingSetting) {
+            discardLightingWrite(frame, setting: lightingSetting)
+            return
+        }
+        let isPartyLightingWrite = frame.type == SonySpeakerLighting.frameType
+            && (frame.payload.count == 8 && frame.payload.prefix(2) == [0x7C, 1]
+                || frame.payload.count == 5 && frame.payload.first == 0x7C && [0, 3].contains(frame.payload[1]))
+        let isLEAudioStandbyWrite = frame.type == 0x0C && frame.payload.count == 4
+            && frame.payload.starts(with: SonyLEAudioStandby.writePrefix)
+        if isLEAudioStandbyWrite, !leAudioStandbyWriteIsCurrent(frame.payload) {
+            discardUnsentSetting(.leAudioStandby, error: String(localized: "LE Audio preference became unavailable before the command could be sent."))
+            return
+        }
+        let auracastSetting = auracastSetting(type: frame.type, payload: frame.payload)
+        if let auracastSetting, !auracastWriteIsCurrent(frame.payload, setting: auracastSetting) {
+            discardUnsentSetting(auracastSetting, error: String(localized: "Auracast became unavailable before the command could be sent."))
+            return
+        }
+        let isKaraokeSample = frame.type == SonyKaraoke.frameType && frame.payload.count == 3
+            && frame.payload[0] == 0x7C && [2, 4].contains(frame.payload[1])
+        if isKaraokeSample, !karaokeSampleIsCurrent(frame.payload) {
+            if let next = commandQueue.discardUnsentPending() { transmit(next) }
+            return
+        }
+        if isPartyLightingWrite, !partyLightingWriteIsCurrent(frame) {
+            discardPartyLightingWrite(frame)
+            return
+        }
         if discoveryReads[[frame.type] + frame.payload]?.resolved == true {
             if let next = commandQueue.discardUnsentPending() { transmit(next) }
             return
@@ -6155,11 +8498,16 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             return
         }
         if frame.type == 0x0E, frame.payload.count >= 3, frame.payload[0] == 0x48,
-           [0x01, 0x20].contains(frame.payload[1]) {
-            let setting: Setting = frame.payload[1] == 1 ? .voiceGuidance : .voiceGuidanceVolume
+           let setting = voiceGuidanceSetting(for: frame.payload[1]) {
             let enabled = voiceGuidance.generation == .v1 ? frame.payload.last == 1 : frame.payload[2] == 0
-            let expected = setting == .voiceGuidance ? voiceGuidance.setEnabledPayload(enabled)
-                : voiceGuidance.setVolumePayload(Int(Int8(bitPattern: frame.payload[2])))
+            let expected: [UInt8]?
+            switch setting {
+            case .voiceGuidance: expected = voiceGuidance.setEnabledPayload(enabled)
+            case .voiceGuidanceLanguage: expected = voiceGuidance.setLanguagePayload(frame.payload[3])
+            case .voiceGuidanceTone(let tone): expected = voiceGuidance.setTonePayload(tone, enabled: enabled)
+            default:
+                expected = voiceGuidance.setVolumePayload(Int(Int8(bitPattern: frame.payload[2])), playTestAudio: frame.payload.last == 0)
+            }
             guard systemControlContextIsAvailable, unconfirmedChanges[setting] == nil,
                   pendingChanges[setting] == settingValue(frame.payload, setting: setting), expected == frame.payload else {
                 discardUnsentSetting(setting, error: String(localized: "Voice guidance settings changed before the change could be sent."))
@@ -6244,9 +8592,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         if frame.type == 0x0C, frame.payload.first == 0x84 {
             guard let transition = legacyOptimizerTransition, transition.session == controlSession, isReady,
-                  protocolInformation?.generation == .v1, legacyOptimizer.isSupported,
+                  protocolInformation?.generation == transition.inquiry.generation,
+                  legacyOptimizer.inquiry == transition.inquiry,
                   frame.payload == transition.expectedPayload,
-                  frame.payload != SonyLegacyOptimizer.startPayload || legacyOptimizer.canStart else {
+                  frame.payload != transition.inquiry.startPayload || legacyOptimizer.canStart else {
                 fail(String(localized: "NC Optimizer changed before the command could be sent."))
                 return
             }
@@ -6255,6 +8604,26 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
            legacyControls?.dsee.acceptsSetPayload(frame.payload) != true {
             discardUnsentSetting(.dsee, error: String(localized: "DSEE became unavailable before the change could be sent."))
             return
+        }
+        if frame.type == 0x0C, let inquiry = audioFeatures.dseeInquiry, frame.payload.prefix(2) == [0xE8, inquiry] {
+            guard !listeningModeExcludesDSEE, frame.payload.count == 3,
+                  audioFeatures.dseeSetPayload(SonyDSEEMode(rawValue: frame.payload[2])) == frame.payload else {
+                discardUnsentSetting(.dsee, error: String(localized: "DSEE became unavailable before the change could be sent."))
+                return
+            }
+        }
+        let isVoiceContentsWrite = frame.type == 0x0C && frame.payload.starts(with: SonyVoiceContents.writePrefix)
+        if isVoiceContentsWrite, !voiceContentsWriteIsCurrent(frame.payload) {
+            discardUnsentSetting(.voiceContents, error: String(localized: "Sound effects became unavailable before the change could be sent."))
+            return
+        }
+        if frame.type == 0x0C, frame.payload.prefix(2) == [0xE8, SonySoundLeakageReduction.inquiry] {
+            guard unconfirmedChanges[.soundLeakageReduction] == nil,
+                  soundLeakageReductionPayload(enabled: frame.payload[2] == 0) == frame.payload,
+                  pendingChanges[.soundLeakageReduction] == Array(frame.payload.dropFirst(2)) else {
+                discardUnsentSetting(.soundLeakageReduction, error: String(localized: "Sound effects became unavailable before the change could be sent."))
+                return
+            }
         }
         if frame.type == 0x0C, frame.payload.prefix(2) == [0x64, 0x40] {
             guard isReady, powerOffState == nil, frame.payload.count == 3,
@@ -6293,10 +8662,54 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
             }
         }
-        if frame.type == 0x0C, frame.payload.first == 0x58,
-           !equalizer.acceptsSetPayload(frame.payload) {
-            fail(String(localized: "Equalizer settings became unavailable before the command could be sent."))
-            return
+        if frame.type == 0x0C, frame.payload.first == 0x58 {
+            if frame.payload.prefix(2) == [0x58, 0x50] {
+                guard systemControlContextIsAvailable,
+                      equalizer.lrBalanceCorrection.setPayload(enabled: frame.payload[2] == 0) == frame.payload,
+                      pendingChanges[.lrBalanceCorrection] == Array(frame.payload.dropFirst(2)) else {
+                    discardUnsentSetting(.lrBalanceCorrection, error: String(localized: "Sound effects became unavailable before the change could be sent."))
+                    return
+                }
+            } else if frame.payload.count == 3, frame.payload[1] == equalizer.bassBoost.inquiryType {
+                guard systemControlContextIsAvailable,
+                      equalizer.bassBoost.setPayload(Int(Int8(bitPattern: frame.payload[2]))) == frame.payload,
+                      pendingChanges[.bassBoost] == [frame.payload[2]] else {
+                    discardUnsentSetting(.bassBoost, error: String(localized: "Sound effects became unavailable before the change could be sent."))
+                    return
+                }
+            } else if frame.payload.count >= 2, [0x32, 0x37].contains(frame.payload[1]) {
+                guard turnKeyWriteIsCurrent(frame.payload) else {
+                    discardUnsentSetting(.turnKeyEQ, error: String(localized: "Equalizer settings became unavailable before the command could be sent."))
+                    return
+                }
+            } else if frame.payload.prefix(2) == [0x58, 0x40] {
+                guard ultAssignmentWriteIsCurrent(frame.payload) else {
+                    discardUnsentSetting(.ultSoundEffectAssignment, error: String(localized: "Sound effects became unavailable before the change could be sent."))
+                    return
+                }
+            } else if frame.payload.count >= 2, (0x33...0x35).contains(frame.payload[1]) {
+                guard customSoundEffectWriteIsCurrent(frame.payload) else {
+                    discardUnsentSetting(.customSoundEffect, error: String(localized: "Sound effects became unavailable before the change could be sent."))
+                    return
+                }
+            } else if let standalone = standaloneEQSetting(for: frame.payload) {
+                guard standaloneEQWriteIsCurrent(frame.payload, setting: standalone) else {
+                    discardUnsentSetting(standalone, error: String(localized: "Sound effects became unavailable before the change could be sent."))
+                    return
+                }
+            } else if listeningModeExcludesEqualizer {
+                discardUnsentSetting(.equalizer, error: String(localized: "Equalizer settings became unavailable before the command could be sent."))
+                return
+            } else if !equalizer.acceptsSetPayload(frame.payload, changingULTMode: requestedEqualizerULTModeChange) {
+                let message = String(localized: "Equalizer settings became unavailable before the command could be sent.")
+                if equalizer.supportsULT {
+                    discardUnsentSetting(.equalizer, error: message)
+                    sendRequestedEqualizer()
+                } else {
+                    fail(message)
+                }
+                return
+            }
         }
         if frame.type == 0x0C, frame.payload.prefix(2) == [0xF4, 0x10] {
             guard let transition = headGesturePracticeTransition, transition.session == controlSession,
@@ -6324,8 +8737,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
             }
         }
-        if frame.type == 0x0C, frame.payload == Self.powerOffPayload {
-            guard isReady, supportedFunctions.contains(0x23), powerOffState == .sending,
+        if SonyPowerOffCommand.matches(frame) {
+            guard isReady, frame.payload == powerOffPayload, powerOffState == .sending,
                   powerOffRequestSession == controlSession else {
                 fail(String(localized: "The headphone connection changed before the power-off command could be sent."))
                 return
@@ -6420,15 +8833,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
             }
         }
-        if frame.type == 0x0C, frame.payload.count == 4, frame.payload[0...1] == [0xFC, 0x0C] {
+        if frame.type == 0x0C, frame.payload.count >= 2, frame.payload[0] == 0xFC,
+           let options = systemFeatures.speakToChatOptions, frame.payload[1] == options.variant.inquiry {
             guard systemFeatureIsAvailable(.speakToChat),
                   pendingChanges[.system(.speakToChat)] == nil, unconfirmedChanges[.system(.speakToChat)] == nil,
                   unconfirmedChanges[.speakToChatOptions] == nil,
                   pendingChanges[.speakToChatOptions] == settingValue(frame.payload, setting: .speakToChatOptions),
-                  let options = systemFeatures.speakToChatOptions,
                   let current = options.sensitivity, let delay = options.delay,
-                  options.setPayload(sensitivity: current, delay: delay) != nil,
-                  options == queuedSpeakToChatOptions || [current.rawValue, delay.rawValue] == Array(frame.payload[2...]) else {
+                  let currentPayload = options.setPayload(sensitivity: current, delay: delay),
+                  options == queuedSpeakToChatOptions || currentPayload == frame.payload else {
                 discardUnsentSetting(.speakToChatOptions, error: String(localized: "Speak-to-Chat settings changed. Try again."))
                 return
             }
@@ -6437,6 +8850,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if frame.type == 0x0C, frame.payload == multipointTransition?.expectedPayload,
            multipointTransition?.validateForTransmission(model: systemFeatures, session: controlSession) == false {
             fail(multipointTransition?.failureMessage ?? String(localized: "Device connection controls became unavailable."))
+            return
+        }
+        if frame.type == 0x0E, frame.payload.count == 19, frame.payload.starts(with: [0x3C, 0x01]),
+           frame.payload != sourceTransition?.expectedPayload {
+            if let next = commandQueue.discardUnsentPending() { transmit(next) }
             return
         }
         if frame.type == 0x0E, frame.payload == sourceTransition?.expectedPayload,
@@ -6450,8 +8868,16 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             return
         }
         if frame.type == 0x0E, frame.payload == deviceActionTransition?.expectedPayload,
-           deviceActionTransition?.validateForTransmission(model: multipoint, session: controlSession) == false {
+           deviceActionTransition?.validateForTransmission(model: multipoint, session: controlSession,
+                                                           unavailableReason: leAudioUnavailableReason(.pairedDevices)) == false {
             advanceDeviceActionTransition()
+            if let next = commandQueue.discardUnsentPending() { transmit(next) }
+            return
+        }
+        if frame.type == 0x0E, multipoint.supportsLegacyInventory, frame.payload.first == 0x34,
+           frame.payload != legacyPairingModeRequest.flatMap({ multipoint.legacyPairingModePayload($0) })
+            || leAudioUnavailableReason(.pairedDevices) != nil {
+            finishLegacyPairingMode(error: leAudioUnavailableReason(.pairedDevices))
             if let next = commandQueue.discardUnsentPending() { transmit(next) }
             return
         }
@@ -6495,6 +8921,34 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         let isBluetoothStandbyReply = frame.type == 0x0C && frame.payload.count == 4 && frame.payload.prefix(3) == [0x98, 0x06, 0x0A]
         if isBluetoothStandbyReply {
             speakerSetting = .bluetoothStandby
+        } else if isLEAudioStandbyWrite {
+            speakerSetting = .leAudioStandby
+        } else if isVoiceContentsWrite {
+            speakerSetting = .voiceContents
+        } else if isTVSoundBoosterWrite {
+            speakerSetting = .tvSoundBooster
+        } else if isSoundFieldOptimizationWrite {
+            speakerSetting = .soundFieldOptimization
+        } else if let upmixWrite {
+            speakerSetting = .upmix(upmixWrite)
+        } else if isBackgroundMusicWrite {
+            speakerSetting = .backgroundMusic
+        } else if isListeningModeAssignmentWrite {
+            speakerSetting = .listeningModeAssignments
+        } else if isMicrophoneOperationWrite {
+            speakerSetting = .microphoneOperation
+        } else if isAdaptiveVolumeWrite || isAdaptiveVolumeCautionReply {
+            speakerSetting = .adaptiveVolumeWithLimitation
+        } else if frame.type == 0x0C, frame.payload.count >= 3, frame.payload[0] == 0x58, [0x32, 0x37].contains(frame.payload[1]) {
+            speakerSetting = .turnKeyEQ
+        } else if frame.type == 0x0C, frame.payload.prefix(3) == [0x98, 0, 0x93] {
+            speakerSetting = .turnKeyEQ
+        } else if frame.type == 0x0C, frame.payload.prefix(2) == [0x58, 0x40] {
+            speakerSetting = .ultSoundEffectAssignment
+        } else if frame.type == 0x0C, frame.payload.first == 0x58, frame.payload.count >= 2, (0x33...0x35).contains(frame.payload[1]) {
+            speakerSetting = .customSoundEffect
+        } else if frame.type == 0x0C, let standalone = standaloneEQSetting(for: frame.payload) {
+            speakerSetting = standalone
         } else if frame.payload.count == 3, frame.payload[0] == 0x28,
                   let setting = powerQuerySetting([0x26, frame.payload[1]], type: frame.type),
                   [.powerSavingMode, .bluetoothStandby, .autoStandby].contains(setting) {
@@ -6513,6 +8967,23 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
                 let expected: [UInt8]?
                 switch setting {
+                case .leAudioStandby: return self.leAudioStandbyWriteIsCurrent(frame.payload)
+                case .voiceContents: return self.voiceContentsWriteIsCurrent(frame.payload)
+                case .tvSoundBooster: return self.tvSoundBoosterWriteIsCurrent(frame.payload)
+                case .soundFieldOptimization: return self.soundFieldOptimizationWriteIsCurrent(frame.payload)
+                case .upmix(let variant): return self.upmixWriteIsCurrent(frame.payload, variant: variant)
+                case .backgroundMusic: return self.backgroundMusicWriteIsCurrent(frame.payload)
+                case .listeningModeAssignments: return self.listeningModeAssignmentWriteIsCurrent(frame.payload)
+                case .microphoneOperation: return self.microphoneOperationWriteIsCurrent(frame.payload)
+                case .adaptiveVolumeWithLimitation: return self.adaptiveVolumeWriteIsCurrent(frame)
+                case .turnKeyEQ:
+                    if frame.payload.first == 0x98 {
+                        return self.pendingChanges[.turnKeyEQ] == [0x32] && self.turnKeyImportReply == frame.payload
+                    }
+                    return self.turnKeyWriteIsCurrent(frame.payload)
+                case .ultSoundEffectAssignment: return self.ultAssignmentWriteIsCurrent(frame.payload)
+                case .customSoundEffect: return self.customSoundEffectWriteIsCurrent(frame.payload)
+                case .soundEffect, .customEQ: return self.standaloneEQWriteIsCurrent(frame.payload, setting: setting)
                 case .powerSavingMode: expected = self.powerFeatures.powerSavingMode?.setPayload(enabled: frame.payload[2] == 0)
                 case .bluetoothStandby: expected = self.powerFeatures.bluetoothStandby?.setPayload(enabled: frame.payload[2] == 0)
                 default: expected = self.powerFeatures.autoStandby?.setPayload(enabled: frame.payload[2] == 0)
@@ -6547,16 +9018,92 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
             }
         }
-        let accepted = write(frame, isCurrent: volumeIsCurrent ?? speakerIsCurrent ?? noiseIsCurrent, onCancelled: { [weak self] in
+        let lightingIsCurrent: (() -> Bool)? = lightingSetting.map { setting in
+            { [weak self] in
+                guard let self, self.controlSession == session, self.transmissionID == identifier else { return false }
+                return self.lightingWriteIsCurrent(frame, setting: setting)
+            }
+        }
+        let partyLightingIsCurrent: (() -> Bool)? = isPartyLightingWrite ? { [weak self] in
+            guard let self, self.controlSession == session, self.transmissionID == identifier else { return false }
+            return self.partyLightingWriteIsCurrent(frame)
+        } : nil
+        let auracastIsCurrent: (() -> Bool)? = auracastSetting.map { setting in
+            { [weak self] in
+                guard let self, self.controlSession == session, self.transmissionID == identifier else { return false }
+                return self.auracastWriteIsCurrent(frame.payload, setting: setting)
+            }
+        }
+        let karaokeSampleIsCurrent: (() -> Bool)? = isKaraokeSample ? { [weak self] in
+            guard let self, self.controlSession == session, self.transmissionID == identifier else { return false }
+            return self.karaokeSampleIsCurrent(frame.payload)
+        } : nil
+        let sourceSelection = frame.type == 0x0E && frame.payload == sourceSelectionAuthorization?.payload
+            ? sourceSelectionAuthorization : nil
+        let sourceSelectionIsCurrent: (() -> Bool)? = sourceSelection.map { authorization in
+            { [weak self] in
+                guard let self, self.controlSession == session, self.transmissionID == identifier,
+                      self.sourceTransition?.requestID == authorization.requestID,
+                      frame.payload == self.sourceTransition?.expectedPayload else { return false }
+                return authorization.isCurrent()
+            }
+        }
+        let musicHandoverRequest = isMusicHandoverWrite ? settingRequests[.musicHandover] : nil
+        let musicHandoverIsCurrent: (() -> Bool)? = isMusicHandoverWrite ? { [weak self] in
+            guard let self, let musicHandoverRequest, self.controlSession == session, self.transmissionID == identifier,
+                  self.settingRequests[.musicHandover] == musicHandoverRequest else { return false }
+            return self.musicHandoverWriteContextIsAvailable
+        } : nil
+        let wearingPositionStart = frame.type == SonyWearingPosition.frameType && frame.payload == SonyWearingPosition.startPayload
+        let wearingPositionIsCurrent: (() -> Bool)? = wearingPositionStart ? { [weak self] in
+            guard let self, self.controlSession == session, self.transmissionID == identifier else { return false }
+            return self.checkingWearingPosition && self.hasCurrentTable2Capabilities && self.wearingPosition.available == true
+        } : nil
+        let accepted = write(frame, isCurrent: volumeIsCurrent ?? speakerIsCurrent ?? noiseIsCurrent ?? lightingIsCurrent ?? partyLightingIsCurrent
+            ?? auracastIsCurrent ?? karaokeSampleIsCurrent ?? sourceSelectionIsCurrent ?? musicHandoverIsCurrent ?? wearingPositionIsCurrent, onCancelled: { [weak self] in
             guard let self, self.controlSession == session, self.transmissionID == identifier else { return }
             self.transmissionID = nil
-            if let noiseSetting {
+            if wearingPositionStart {
+                self.finishWearingPositionCheck()
+                if let next = self.commandQueue.discardUnsentPending() { self.transmit(next) }
+            } else if let noiseSetting {
                 self.discardUnsentSetting(noiseSetting, error: String(localized: "Noise controls changed before the command could be sent."))
                 if noiseSetting == .noiseTest { self.noiseTestCompletion = nil }
             } else if let speakerSetting {
                 if isBluetoothStandbyReply { self.unconfirmedChanges[speakerSetting] = self.pendingChanges[speakerSetting] }
-                self.discardUnsentSetting(speakerSetting, error: String(localized: "Power settings became unavailable before the change could be sent."))
+                let error = switch speakerSetting {
+                case .leAudioStandby: String(localized: "LE Audio preference became unavailable before the command could be sent.")
+                case .voiceContents: String(localized: "Sound effects became unavailable before the change could be sent.")
+                case .ultSoundEffectAssignment, .customSoundEffect, .soundEffect, .customEQ:
+                    String(localized: "Sound effects became unavailable before the change could be sent.")
+                case .tvSoundBooster: String(localized: "TV Sound Booster became unavailable before the change could be sent.")
+                case .soundFieldOptimization: String(localized: "Sound Field Optimization became unavailable before the change could be sent.")
+                case .upmix: String(localized: "Upmix became unavailable before the change could be sent.")
+                case .backgroundMusic: String(localized: "Background Music settings changed before the command could be sent.")
+                case .listeningModeAssignments: String(localized: "Listening mode assignments changed before the command could be sent.")
+                case .microphoneOperation: String(localized: "Microphone settings changed before the command could be sent.")
+                case .adaptiveVolumeWithLimitation: String(localized: "Adaptive Volume Control became unavailable before the change could be sent.")
+                default: String(localized: "Power settings became unavailable before the change could be sent.")
+                }
+                self.discardUnsentSetting(speakerSetting, error: error)
                 if isBluetoothStandbyReply { self.send([0x26, 0x0D]) }
+            } else if let lightingSetting {
+                self.discardLightingWrite(frame, setting: lightingSetting)
+            } else if isPartyLightingWrite {
+                self.discardPartyLightingWrite(frame)
+            } else if let auracastSetting {
+                self.discardUnsentSetting(auracastSetting, error: String(localized: "Auracast became unavailable before the command could be sent."))
+            } else if isKaraokeSample {
+                if let next = self.commandQueue.discardUnsentPending() { self.transmit(next) }
+            } else if isMusicHandoverWrite {
+                self.discardUnsentSetting(.musicHandover, error: String(localized: "Playback switching became unavailable before the change could be sent."))
+            } else if let sourceSelection {
+                if self.sourceSelectionAuthorization?.requestID == sourceSelection.requestID { self.sourceSelectionAuthorization = nil }
+                if self.sourceTransition?.requestID == sourceSelection.requestID {
+                    self.sourceTransition?.cancelUnsentSelection()
+                    self.advanceSourceTransition()
+                }
+                if let next = self.commandQueue.discardUnsentPending() { self.transmit(next) }
             } else {
                 self.discardQueuedMusicVolume()
             }
@@ -6564,8 +9111,52 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             guard let self, self.controlSession == session, self.transmissionID == identifier else { return }
             self.transmittedFrame = frame
             self.completedTransmissionOrdinal = ordinal
+            if frame.type == 0x0C, frame.payload.starts(with: [0x18, 0x05]) {
+                self.connectionTimeAcknowledgment = (ordinal, .now() + 2)
+            }
             if self.recordsDiagnosticCommands { self.recordDiagnosticCommand("TX", frame: frame) }
             self.beginDiscoveryRead(frame.payload, type: frame.type)
+            if wearingPositionStart { self.beginWearingPositionCheck() }
+            if frame.type == 0x0E, (self.microphoneOperation.queryPayloads + self.adaptiveVolumeWithLimitation.queryPayloads + self.auracast.queryPayloads + self.leAudioCapabilities.queryPayloads).contains(frame.payload) {
+                self.beginSystemRead(frame.payload, type: frame.type)
+            }
+            if isAdaptiveVolumeWrite || isAdaptiveVolumeCautionReply {
+                let key: [UInt8] = [0x0E] + SonyAdaptiveVolumeWithLimitation.parameterQuery
+                if self.systemReads[key]?.transmitted == true { self.systemReads[key]?.isObsolete = true }
+            }
+            if isMicrophoneOperationWrite, self.systemReads[[0x0E] + SonyMicrophoneOperation.parameterQuery]?.transmitted == true {
+                self.systemReads[[0x0E] + SonyMicrophoneOperation.parameterQuery]?.isObsolete = true
+            }
+            if auracastSetting == .auracastReception {
+                let key = [SonyAuracast.frameType] + SonyAuracast.receptionQuery
+                if self.systemReads[key]?.transmitted == true { self.systemReads[key]?.isObsolete = true }
+            }
+            if isMusicHandoverWrite {
+                self.musicHandoverReadOrdinal = nil
+            } else if frame.type == 0x0E, frame.payload == SonyMultipoint.musicHandoverQuery {
+                self.musicHandoverReadOrdinal = ordinal
+            }
+            if frame.type == SonySpeakerLighting.frameType {
+                self.beginLightingRead(frame.payload)
+                if isPartyLightingWrite {
+                    if frame.payload[2] == 0 { self.partyLightingDrag?.started = true }
+                    else if frame.payload[2] == 1 { self.clearPartyLightingDrag() }
+                }
+                if self.isLightingColorPreview(frame) {
+                    self.lightingColorPreviewWasSent = true
+                } else if let parameter = SonySpeakerLighting.Parameter.setting(frame.payload) {
+                    if parameter == .customColor { self.lightingColorPreviewWasSent = false }
+                    if self.lightingReads[parameter.query]?.transmitted == true {
+                        self.lightingReads[parameter.query]?.isObsolete = true
+                    }
+                } else if case .speakerKaraoke(let setting) = lightingSetting, let query = self.karaoke.query(setting),
+                          self.lightingReads[query]?.transmitted == true {
+                    self.lightingReads[query]?.isObsolete = true
+                } else if lightingSetting == .speakerDJ, let query = self.djControl.parameterQuery,
+                          self.lightingReads[query]?.transmitted == true {
+                    self.lightingReads[query]?.isObsolete = true
+                }
+            }
             if frame.type == 0x0C {
                 if self.legacyCapabilityReads?.currentQuery == frame.payload {
                     self.legacyCapabilityReads?.transmissionOrdinal = ordinal
@@ -6587,8 +9178,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             }
             if frame.type == 0x0E {
                 self.beginVoiceGuidanceRead(frame.payload)
-                if frame.payload.count >= 2, frame.payload[0] == 0x48 {
-                    let query: [UInt8] = frame.payload[1] == 1 ? self.voiceGuidance.parameterQueryPayload : [0x46, frame.payload[1]]
+                if frame.payload.count >= 2, frame.payload[0] == 0x48,
+                   let query = self.voiceGuidance.parameterQuery(for: frame.payload[1]) {
                     if self.voiceGuidanceReads[query]?.transmitted == true { self.voiceGuidanceReads[query]?.isObsolete = true }
                 }
             }
@@ -6600,7 +9191,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if frame.type == 0x0C {
                 self.beginBatteryRead(frame.payload)
                 self.beginSystemRead(frame.payload)
-                if frame.payload.count >= 2, [0x28, 0x64, 0x68, 0xD8, 0xE8, 0xF8, 0xFC].contains(frame.payload[0]) {
+                if frame.payload == SonyAudioFeatures.codecQueryPayload { self.beginCodecRead() }
+                if frame.payload.count >= 2, [0x28, 0x48, 0x58, 0x64, 0x68, 0x88, 0xD8, 0xE8, 0xF8, 0xFC].contains(frame.payload[0]) {
                     let query: [UInt8] = [frame.payload[0] - 2, frame.payload[1]]
                     if self.systemReadSetting(query) != nil, self.systemReads[query]?.transmitted == true {
                         self.systemReads[query]?.isObsolete = true
@@ -6673,9 +9265,16 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                         self.playbackReads[query]?.timedOut = true
                         self.playbackFreshQueries.remove(query)
                         self.playbackReadTimeouts[query] = nil
-                        self.playbackReadError = String(localized: "Playback information was not received. Reconnect the headphones to try again.")
+                        if !self.playback.legacyMetadataQueryPayloads.contains(query) {
+                            self.playbackReadError = String(localized: "Playback information was not received. Reconnect the headphones to try again.")
+                        }
                         if self.playbackReadSequence?.currentQuery == query {
-                            self.finishPlaybackReadSequence()
+                            if self.playback.legacyMetadataQueryPayloads.contains(query) {
+                                self.playbackReadSequence?.discardCurrentQuery()
+                                self.advancePlaybackReadSequence()
+                            } else {
+                                self.finishPlaybackReadSequence()
+                            }
                         }
                         self.verifyConnectionPreferenceIfNeeded()
                     }
@@ -6689,7 +9288,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             }
             self.scheduleAcknowledgmentTimeout(frame, identifier: identifier, session: session, allowRetry: true,
                                                volumeIsCurrent: retryVolumeIsCurrent ?? noiseIsCurrent)
-            if frame.type == 0x0E, frame.payload == SonySoundPressure.levelQueryPayload { self.beginSoundPressureRead() }
+            if frame.type == 0x0C, frame.payload.count == 4, frame.payload.prefix(2) == [0x98, 0x00],
+               frame.payload[2] == 0x91 || frame.payload[2] == 0x95 {
+                self.usbProtection.didSendAcknowledgement(frame.payload)
+            }
+            if frame.type == 0x0E, frame.payload == self.soundPressure.levelQueryPayload { self.beginSoundPressureRead() }
+            if frame.type == 0x0E, let read = self.exposureRead,
+               frame.payload == (read.current ? self.soundPressure.exposureQueryPayload : self.soundPressure.historyPayload(start: true)) {
+                self.beginExposureRead()
+            }
             if frame.type == 0x0E, frame.payload == SonyWearingStatus.queryPayload { self.beginWearingStatusRead() }
             if frame.type == 0x0C, frame.payload.count == 2, frame.payload[0] == 0x66,
                self.standaloneNoiseControl(frame.payload[1]) == nil, frame.payload[1] != 0x30 {
@@ -6709,14 +9316,37 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 self.legacyOptimizerTransition?.transmitted(frame.payload, session: self.controlSession, transmissionOrdinal: self.completedTransmissionOrdinal)
                 self.advanceLegacyOptimizer()
             }
+            if speakerSetting == .ultSoundEffectAssignment {
+                let query = SonyULTSoundEffectAssignment.parameterQuery
+                if self.systemReads[query]?.transmitted == true { self.systemReads[query]?.isObsolete = true }
+            }
+            if speakerSetting == .customSoundEffect {
+                let query = SonyCustomSoundEffect.parameterQuery
+                if self.systemReads[query]?.transmitted == true { self.systemReads[query]?.isObsolete = true }
+            }
+            if speakerSetting == .soundEffect || speakerSetting == .customEQ {
+                let query = speakerSetting == .soundEffect ? SonySoundEffect.parameterQuery : SonyCustomEQ.parameterQuery
+                if self.systemReads[query]?.transmitted == true { self.systemReads[query]?.isObsolete = true }
+            }
             self.beginSettingConfirmation(frame)
             if frame.type == 0x0C, frame.payload == self.equalizer.parameterQueryPayload { self.beginEqualizerRead() }
             self.beginConnectionConfirmation(frame)
             self.beginSourceConfirmation(frame)
+            if let sourceSelection, self.sourceSelectionAuthorization?.requestID == sourceSelection.requestID {
+                self.sourceSelectionAuthorization = nil
+            }
             self.beginDeviceActionConfirmation(frame)
+            self.beginLegacyPeripheralConfirmation(frame)
             self.beginMultipointConfirmation(frame)
             #if DEBUG
             if self.isSimulated, self.simulatesSettingReplies {
+                if wearingPositionStart {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                        guard let self, self.controlSession == session else { return }
+                        self.dispatch([0xF9, 8, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0] + Array(repeating: 0, count: 12),
+                                      type: SonyWearingPosition.frameType)
+                    }
+                }
                 if frame.type == 0x0C, frame.payload.count == 2, let noise = self.noiseControl,
                    frame.payload[1] == noise.inquiryType {
                     switch frame.payload[0] {
@@ -6759,24 +9389,28 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                             let supported: UInt8 = self.voiceGuidance.supportsOnOffSwitch.map { $0 ? 1 : 0 } ?? 0xFF
                             if self.voiceGuidance.generation == .v1 {
                                 self.dispatch([0x41, inquiry, supported, 1, UInt8(languages.count)] + languages, type: frame.type)
-                            } else {
+                            } else if inquiry == 0 {
+                                self.dispatch([0x41, inquiry, 0, 0, 0, 0, supported], type: frame.type)
+                            } else if inquiry == 1 {
                                 self.dispatch([0x41, inquiry, 0, 0, 0, 0, supported, UInt8(languages.count)] + languages, type: frame.type)
+                            } else {
+                                self.dispatch([0x41, inquiry, supported, UInt8(languages.count)] + languages, type: frame.type)
                             }
                         }
                     case 0x42:
-                        self.dispatch([0x43, inquiry, self.voiceGuidance.generation == .v1 ? 1 : 0,
-                            self.voiceGuidance.available.map { $0 ? 0 : 1 } ?? 0xFF], type: frame.type)
+                        let value = frame.payload == [0x42, 2, 1] ? self.voiceGuidance.languageAvailable : self.voiceGuidance.availability(for: inquiry)
+                        let availability = value.map { $0 ? UInt8(0) : 1 } ?? 0xFF
+                        self.dispatch([0x43] + frame.payload.dropFirst() + [availability], type: frame.type)
                     case 0x46:
-                        let setting: Setting = inquiry == 1 ? .voiceGuidance : .voiceGuidanceVolume
-                        let current = setting == .voiceGuidance ? self.voiceGuidance.enabled.map { $0 ? UInt8(0) : 1 }
-                            : self.voiceGuidance.volume.map { UInt8(bitPattern: Int8($0)) }
+                        guard let setting = self.voiceGuidanceSetting(for: inquiry) else { break }
+                        let current = self.voiceGuidance.parameter(for: inquiry)
                         let requested = self.voiceGuidanceReads[frame.payload]?.requestID == self.settingRequests[setting]
-                            ? self.pendingChanges[setting]?.first : nil
-                        let value = requested ?? current ?? (inquiry == 1 ? 0xFF : 3)
+                            ? self.pendingChanges[setting] : nil
+                        let value = requested?.first ?? current ?? (setting == .voiceGuidanceVolume ? 3 : 0xFF)
                         if self.voiceGuidance.generation == .v1 {
                             self.dispatch([0x47, inquiry, 1, value <= 1 ? 1 - value : value], type: frame.type)
                         } else {
-                            let language: [UInt8] = setting == .voiceGuidance ? [self.voiceGuidance.currentLanguage ?? 0xFF] : []
+                            let language: [UInt8] = (1...2).contains(inquiry) ? [requested?.dropFirst().first ?? self.voiceGuidance.currentLanguage ?? 0xFF] : []
                             self.dispatch([0x47, inquiry, value] + language, type: frame.type)
                         }
                     default: break
@@ -6933,17 +9567,26 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                             self.dispatch([0xD7, frame.payload[1], 0, state.enabled.map { $0 ? 0 : 1 } ?? 0xFF], type: 0x0C)
                         }
                     }
+                    if let inquiry = self.legacyOptimizerTransition?.inquiry {
+                        let type = inquiry.type
+                        switch frame.payload {
+                        case inquiry.capabilityQuery:
+                            let fields: [UInt8] = inquiry.generation == .v1 ? [5, 1, 3, 1, 4] : type == 0 ? [5, 3, 4] : [5, 3]
+                            self.dispatch([0x81, type] + fields, type: 0x0C)
+                        case inquiry.statusQuery:
+                            let phase: UInt8 = self.legacyOptimizerTransition?.phase == .starting || self.legacyOptimizerTransition?.phase == .running ? 1 : 0
+                            self.dispatch([0x83, type, 0, phase], type: 0x0C)
+                        case inquiry.measurementsQuery:
+                            let fields: [UInt8] = inquiry.generation == .v1 ? [1, 1, 1, 10] : type == 0 ? [1, 10] : [type == 1 ? 1 : 10]
+                            self.dispatch([0x87, type] + fields, type: 0x0C)
+                        case inquiry.startPayload:
+                            self.dispatch([0x85, type, 0, 1], type: 0x0C)
+                            self.simulateLegacyOptimizerResult()
+                        case inquiry.cancelPayload: self.dispatch([0x85, type, 0, 0], type: 0x0C)
+                        default: break
+                        }
+                    }
                     switch frame.payload {
-                    case [0x80, 1]: self.dispatch([0x81, 1, 5, 1, 3, 1, 4], type: 0x0C)
-                    case [0x82, 1]:
-                        let phase: UInt8 = self.legacyOptimizerTransition?.phase == .cancelling ? 0
-                            : self.legacyOptimizerTransition?.phase == .starting || self.legacyOptimizerTransition?.phase == .running ? 1 : 0
-                        self.dispatch([0x83, 1, 0, phase], type: 0x0C)
-                    case [0x86, 1]: self.dispatch([0x87, 1, 1, 1, 1, 10], type: 0x0C)
-                    case SonyLegacyOptimizer.startPayload:
-                        self.dispatch([0x85, 1, 0, 1], type: 0x0C)
-                        self.simulateLegacyOptimizerResult()
-                    case SonyLegacyOptimizer.cancelPayload: self.dispatch([0x85, 1, 0, 0], type: 0x0C)
                     case SonyHeadGesturePractice.queryPayload: self.dispatch([0xF3, 0x10, 0], type: 0x0C)
                     case SonyHeadGesturePractice.enterPayload:
                         self.dispatch([0xF5, 0x10, 0, 0], type: 0x0C)
@@ -6952,6 +9595,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     case [0xF0, 0x06] where self.protocolInformation?.generation == .v2: self.dispatch([0xF1, 0x06, 5, 1, 1, 4, 0, 1, 2, 3], type: 0x0C)
                     case [0xF2, 0x06] where self.protocolInformation?.generation == .v2: self.dispatch([0xF3, 0x06, 0, 0, 1, 0], type: 0x0C)
                     case [0xF6, 0x06] where self.protocolInformation?.generation == .v2: self.dispatch([0xF7, 0x06, 0, 0, 1, 0, 1, 0xFF], type: 0x0C)
+                    case [0xF2, 0x07]: self.dispatch([0xF3, 0x07, 0], type: 0x0C)
                     case [0xF6, 0x07]: self.dispatch([0xF7, 0x07, 1], type: 0x0C)
                     case self.playback.capabilityQueryPayload:
                         self.dispatch(self.playback.generation == .v1 ? [0xA1, 1, 31, 1, 0]
@@ -6978,8 +9622,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     self.dispatch([0xF9, 0x06, frame.payload[2] == 0 ? 1 : 0, 0, 1, 0, frame.payload[4], 0xFF], type: 0x0C)
                     if frame.payload[2] == 0 { self.simulateEarTipFitResult() }
                 }
-                if frame.type == 0x0E, frame.payload == SonySoundPressure.levelQueryPayload {
-                    self.dispatch([0x5B, 0x03, 80, 0xFF], type: 0x0E)
+                if frame.type == 0x0E, frame.payload == self.soundPressure.levelQueryPayload {
+                    self.dispatch([0x5B, frame.payload[1], 80, 0xFF], type: 0x0E)
                 }
                 self.receive(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
             }
@@ -6992,17 +9636,21 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
 
     func canRetryRead(_ frame: SonyFrame) -> Bool {
         let payload = frame.payload
+        if leAudioRestrictions.queryPayloads(frameType: frame.type).contains(payload) { return true }
         if frame.type == 0x0E {
             return (payload == [0x06, 0x00] && supportsTable2)
+                || wearingPosition.queryPayloads.contains(payload)
                 || (protocolInformation?.generation == .v2
                     && SonyConnectionIdentity.queryPayloads(frameType: frame.type, supportedFunctions: supportedFunctions,
                                                            supportedFunctions2: supportedFunctions2).contains(payload))
-                || [voiceGuidance.queryPayloads, multipoint.queryPayloads, soundPressure.queryPayloads,
-                    wearingStatus.queryPayloads, powerFeatures.queryPayloads(frameType: frame.type)]
+                || [voiceGuidance.queryPayloads, multipoint.queryPayloads, soundPressure.queryPayloads, speakerLighting.queryPayloads, djControl.queryPayloads, karaoke.queryPayloads, volumeProtection.queryPayloads, usbProtection.queryPayloads,
+                    wearingStatus.queryPayloads, linkAutoSwitch.queryPayloads, microphoneOperation.queryPayloads,
+                    adaptiveVolumeWithLimitation.queryPayloads, auracast.queryPayloads, leAudioCapabilities.queryPayloads, powerFeatures.queryPayloads(frameType: frame.type)]
                     .contains { $0.contains(payload) }
-                || (soundPressure.isSupported && payload == SonySoundPressure.levelQueryPayload)
+                || payload == soundPressure.levelQueryPayload || payload == soundPressure.exposureQueryPayload
         }
         guard frame.type == 0x0C else { return false }
+        if payload == displayFirmwareQuery || leAudioStandbyQueries.contains(payload) { return true }
         if legacyCapabilityReads?.currentQuery == payload { return true }
         if [[0x00, 0x00], [0x04, 0x01], [0x04, 0x02], [0x04, 0x03], [0x06, 0x00], [0x10, 0x04]].contains(payload) { return true }
         if payload.count == 2, [0x60, 0x62, 0x66].contains(payload[0]), payload[1] == asmType { return true }
@@ -7010,8 +9658,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if [equalizer.queryPayloads, touchAssignments.queryPayloads, playback.queryPayloads,
             legacySurround.queryPayloads, legacySoundPosition.queryPayloads, legacyOptimizer.queryPayloads, legacyIndicators.queryPayloads,
             earTipFit.queryPayloads].contains(where: { $0.contains(payload) }) { return true }
+        if equalizer.bassBoost.queryPayloads.contains(payload) { return true }
         if headGesturePractice.isSupported, payload == SonyHeadGesturePractice.queryPayload { return true }
         if firmwareUpdateQueries[payload] != nil { return true }
+        if systemFeatures.speakToChatOptions?.variant.queryPayloads.contains(payload) == true { return true }
         if let legacyControls {
             return [legacyControls.batteryQueries, legacyControls.dsee.queryPayloads,
                     legacyControls.standaloneNoiseCancel?.queryPayloads ?? [], legacyControls.standaloneAmbient?.queryPayloads ?? [],
@@ -7019,7 +9669,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     legacyControls.automaticPowerOff?.queryPayloads ?? []].contains { $0.contains(payload) }
         }
         guard protocolInformation?.generation == .v2 else { return false }
-        return [audioFeatures.queryPayloads, systemFeatures.queryPayloads, powerFeatures.queryPayloads(frameType: frame.type)]
+        return [audioFeatures.queryPayloads, systemFeatures.queryPayloads, powerFeatures.queryPayloads(frameType: frame.type),
+                equalizer.lrBalanceCorrection.queryPayloads, equalizer.turnKey.queryPayloads,
+                equalizer.ultSoundEffectAssignment.queryPayloads, equalizer.customSoundEffect.queryPayloads,
+                equalizer.soundEffect.queryPayloads, equalizer.customEQ.queryPayloads]
             .contains { $0.contains(payload) }
             || SonyBatteries.queryTypes(supportedFunctions: supportedFunctions).contains { payload == [0x22, $0] }
             || SonyConnectionIdentity.queryPayloads(frameType: frame.type, supportedFunctions: supportedFunctions,
@@ -7051,7 +9704,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             }
             setting = .noiseControl
         case 0x58:
-            guard equalizer.acceptsSetPayload(payload) else { return false }
+            guard equalizer.acceptsSetPayload(payload, changingULTMode: requestedEqualizerULTModeChange) else { return false }
             setting = .equalizer
         case 0xE8:
             if protocolInformation?.generation == .v1 {
@@ -7101,10 +9754,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
                 self.recordDiagnosticCommand("ACK timeout; exhausted", frame: frame)
                 Self.logger.error("Command ACK timeout; type=\(frame.type, format: .hex) sequence=\(frame.sequence) session=\(session) length=\(frame.payload.count) payloadPrefix=\(payload, privacy: .private)")
-                if frame.type == 0x0E, frame.payload == SonySoundPressure.levelQueryPayload {
+                if frame.type == 0x0E, frame.payload == self.soundPressure.levelQueryPayload {
                     self.soundPressureAutomaticRefreshSuspended = true
                 }
-                self.fail(frame.type == 0x0C && frame.payload == Self.powerOffPayload
+                self.fail(SonyPowerOffCommand.matches(frame)
                           ? String(localized: "The power-off command was not acknowledged. Its outcome is unknown.")
                           : String(localized: "Headphones did not acknowledge a command."))
             }
@@ -7140,6 +9793,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if setting == .speakToChatOptions { queuedSpeakToChatOptions = nil }
         if setting == .stamina { staminaChange = nil }
         if setting == .bluetoothStandby { resetBluetoothStandbyChange() }
+        if setting == .adaptiveVolumeWithLimitation { adaptiveVolumeCautionReply = nil }
+        if setting == .turnKeyEQ {
+            turnKeyImportAlert = nil
+            turnKeyImportJudged = false
+            turnKeyImportReply = nil
+        }
         if setting == .noiseTest {
             noiseTestCompletion = nil
             if noiseTest?.active == false, unconfirmedChanges[.noiseTest] == nil { noiseTestMayBeActive = false }
@@ -7269,9 +9928,20 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 acknowledgmentTimeout = nil
                 transmissionID = nil
                 transmittedFrame = nil
-                if sent.type == 0x0C, sent.payload == Self.powerOffPayload,
+                if SonyPowerOffCommand.matches(sent),
                    powerOffState == .sending, powerOffRequestSession == session {
                     powerOffState = .acknowledged
+                }
+                if sent.type == 0x0C, sent.payload == turnKeyImportReply {
+                    turnKeyImportReply = nil
+                    turnKeyImportJudged = false
+                    pendingChanges[.turnKeyEQ] = nil
+                    settingRequests[.turnKeyEQ] = nil
+                    settingTransmissionOrdinals[.turnKeyEQ] = nil
+                    if sent.payload.last == SonyConnectionAlertAction.positive.rawValue {
+                        equalizer.turnKey.lastCompletedOperation = 0x32
+                        refreshTurnKeyEqualizer()
+                    }
                 }
                 if sent.type == 0x0C, sent.payload == [0x94, protocolInformation?.generation == .v1 ? 0x01 : 0x00, 0x00] {
                     fixedAlertsEnabled = true
@@ -7317,7 +9987,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 if noiseControlReadCompleted { advanceNoiseControlRead() }
                 if playbackAcknowledged, isReady {
                     send(playback.statusQueryPayload)
-                    send([0xA6, playback.playbackInquiryType])
+                    if playback.generation == .v2 { send([0xA6, playback.playbackInquiryType]) }
                 }
                 advanceEarTipFit()
                 advanceHeadGesturePractice()
@@ -7394,66 +10064,303 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         return payload[0] == 0x21 ? state.threshold != nil : state.enabled != nil && state.effectActive != nil
     }
 
+    private func resetLegacyPeripheralReads() {
+        for read in legacyPeripheralReads.values { read.timeout?.cancel() }
+        legacyPeripheralReads = [:]
+        deviceActionTransmissionOrdinal = nil
+        finishLegacyPairingMode()
+    }
+
+    private func beginLegacyPeripheralConfirmation(_ frame: SonyFrame) {
+        guard frame.type == 0x0E, multipoint.supportsLegacyInventory else { return }
+        let payload = frame.payload
+        let session = controlSession
+        if let read = legacyPeripheralReads[payload] {
+            legacyPeripheralReads[payload]?.transmitted = true
+            legacyPeripheralReads[payload]?.transmissionOrdinal = completedTransmissionOrdinal
+            let timeout = DispatchWorkItem { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.controlSession == session, self.legacyPeripheralReads[payload]?.id == read.id else { return }
+                    self.legacyPeripheralReads[payload]?.isObsolete = true
+                    self.legacyPeripheralReads[payload]?.timeout = nil
+                }
+            }
+            legacyPeripheralReads[payload]?.timeout = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
+        }
+        if payload.first == 0x34, let requested = legacyPairingModeRequest {
+            let ordinal = completedTransmissionOrdinal
+            legacyPairingModeTransmissionOrdinal = ordinal
+            let timeout = DispatchWorkItem { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.controlSession == session, self.legacyPairingModeRequest == requested,
+                          self.legacyPairingModeTransmissionOrdinal == ordinal else { return }
+                    self.finishLegacyPairingMode(error: String(localized: "The headphones did not confirm the pairing mode change."))
+                    self.send([0x32, 1], type: 0x0E)
+                }
+            }
+            legacyPairingModeTimeout = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
+        }
+    }
+
     private func receiveLegacyDeviceList(_ payload: [UInt8]) -> Bool {
-        guard multipoint.supportsLegacyInventory, payload.count >= 2,
-              [0x37, 0x39].contains(payload[0]), payload[1] == 0x01 else { return false }
+        guard multipoint.supportsLegacyInventory, payload.count >= 2 else { return false }
+        let query: [UInt8]?
+        switch (payload[0], payload[1]) {
+        case (0x31, 0x01): query = [0x30, 1]
+        case (0x33, 0x01): query = [0x32, 1]
+        case (0x35, 0x01), (0x37, 0x01), (0x39, 0x01), (0x3D, 0x01): query = nil
+        default: return false
+        }
+        if let query {
+            guard let read = legacyPeripheralReads[query], read.transmitted, receivedAfter(read.transmissionOrdinal) else { return true }
+        }
+        if payload[0] == 0x37 {
+            guard let read = inventoryRead, read.transmitted, receivedAfter(read.transmissionOrdinal) else { return true }
+        }
+        if payload[0] == 0x3D, !receivedAfter(deviceActionTransmissionOrdinal) { return true }
         var received = multipoint
-        let updated = received.update(payload)
+        guard received.update(payload) else {
+            if inventoryRead?.isObsolete != true || payload[0] == 0x39, multipoint != received { multipoint = received }
+            return true
+        }
+        if let query, let read = legacyPeripheralReads.removeValue(forKey: query) {
+            read.timeout?.cancel()
+            if read.isObsolete {
+                if read.timeout == nil, multipoint.queryPayloads.contains(query) { send(query, type: 0x0E) }
+                return true
+            }
+        }
+        if payload[0] == 0x37, inventoryRead?.isObsolete == true {
+            receiveMultipoint(payload)
+            return true
+        }
+        if payload[0] == 0x35, let read = legacyPeripheralReads[[0x32, 1]], read.transmitted, receivedAfter(read.transmissionOrdinal) {
+            legacyPeripheralReads[[0x32, 1]]?.isObsolete = true
+        }
+        if payload[0] == 0x39, let read = inventoryRead, read.transmitted, receivedAfter(read.transmissionOrdinal) {
+            inventoryRead?.isObsolete = true
+        }
         if multipoint != received { multipoint = received }
-        if updated { lastSyncDate = Date() }
+        if payload[0] == 0x35, let requested = legacyPairingModeRequest, received.pairingMode == requested,
+           receivedAfter(legacyPairingModeTransmissionOrdinal) {
+            finishLegacyPairingMode()
+        }
+        lastSyncDate = Date()
+        receiveMultipoint(payload)
         return true
     }
 
     private func receiveVoiceGuidance(_ payload: [UInt8]) {
-        let isLegacy = voiceGuidance.generation == .v1
-        guard payload.count >= 2, [0x41, 0x43, 0x45, 0x47].contains(payload[0])
-                || (isLegacy && payload[0] == 0x49) else { return }
-        if isLegacy, payload[0] != 0x41, payload.count < 3 { return }
-        let query: [UInt8]? = payload[0] == 0x45 || payload[0] == 0x49 ? nil
-            : [payload[0] - 1, payload[1]] + (isLegacy && payload[0] != 0x41 ? [payload[2]]
-                : payload[0] == 0x43 && payload[1] == 1 ? [0] : [])
-        let read = query.flatMap { voiceGuidanceReads[$0] }
+        guard payload.count >= 2, let relatedQuery = voiceGuidance.replyQuery(for: payload) else { return }
+        let isNotification = payload[0] == 0x45 || payload[0] == 0x49
+        let read = isNotification ? nil : voiceGuidanceReads[relatedQuery]
         var guidance = voiceGuidance
-        let owned = query == nil || (read?.transmitted == true && receivedAfter(read?.transmissionOrdinal))
+        let owned = isNotification || (read?.transmitted == true && receivedAfter(read?.transmissionOrdinal))
         let parsed = owned && guidance.update(payload)
         let bytes = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
         Self.logger.notice("Voice guidance RX; session=\(self.controlSession) owned=\(owned) valid=\(parsed) payload=\(bytes, privacy: .private)")
         guard parsed else { return }
-        let known: Bool
-        switch payload[0] {
-        case 0x41: known = guidance.supportsOnOffSwitch != nil && guidance.supportedLanguages != nil
-        case 0x43, 0x45: known = guidance.available != nil
-        default: known = payload[1] == 1 ? guidance.enabled != nil : guidance.volume != nil
-        }
-        let setting: Setting = payload[1] == 1 ? .voiceGuidance : .voiceGuidanceVolume
-        if let query {
-            voiceGuidanceReads.removeValue(forKey: query)?.timeout?.cancel()
+        if isNotification {
+            if voiceGuidanceReads[relatedQuery]?.transmitted == true, receivedAfter(voiceGuidanceReads[relatedQuery]?.transmissionOrdinal) {
+                voiceGuidanceReads[relatedQuery]?.isObsolete = true
+            }
         } else {
-            let previousQuery: [UInt8] = payload[0] == 0x49 ? voiceGuidance.parameterQueryPayload
-                : [0x42, payload[1]] + (isLegacy ? [payload[2]] : payload[1] == 1 ? [0] : [])
-            if voiceGuidanceReads[previousQuery]?.transmitted == true, receivedAfter(voiceGuidanceReads[previousQuery]?.transmissionOrdinal) { voiceGuidanceReads[previousQuery]?.isObsolete = true }
+            voiceGuidanceReads.removeValue(forKey: relatedQuery)?.timeout?.cancel()
         }
-        if let read, read.isObsolete || (payload[0] == 0x47 && unconfirmedChanges[setting] != nil
+        let setting = voiceGuidanceSetting(for: payload[1])
+        let isParameter = relatedQuery[0] == 0x46
+        if let read, read.isObsolete || (isParameter && setting.flatMap { unconfirmedChanges[$0] } != nil
             && read.requestID == nil && !read.resolvesUnconfirmed) {
-            if let query, voiceGuidance.queryPayloads.contains(query) { send(query, type: 0x0E) }
+            if voiceGuidance.queryPayloads.contains(relatedQuery) { send(relatedQuery, type: 0x0E) }
             return
         }
         if voiceGuidance != guidance { voiceGuidance = guidance }
         lastSyncDate = Date()
-        if isLegacy, payload[0] == 0x41 {
+        if voiceGuidance.generation == .v1, payload[0] == 0x41 {
             for query in voiceGuidance.queryPayloads { send(query, type: 0x0E) }
         }
-        guard known, payload[0] == 0x47 || payload[0] == 0x49 else { return }
-        let confirmsNotification = payload[0] == 0x49
+        guard isParameter, let setting, let value = guidance.parameter(for: payload[1]) else { return }
+        let confirmsNotification = isNotification
             && (settingTimeouts[setting] != nil || unconfirmedChanges[setting] != nil)
         if confirmsNotification || (read?.requestID != nil && read?.requestID == settingRequests[setting]) {
-            confirmSetting(setting, value: settingValue(payload, setting: setting))
+            let confirmed: [UInt8] = payload[1] == 2 ? Array(payload.dropFirst(2)) : [value]
+            confirmSetting(setting, value: confirmed)
         }
         if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil, confirmsNotification || read?.requestID != nil || read?.resolvesUnconfirmed == true {
             unconfirmedChanges[setting] = nil
             settingErrors[setting] = nil
         }
-        if let query, pendingChanges[setting] != nil, read?.requestID != settingRequests[setting] { send(query, type: 0x0E) }
+        if !isNotification, pendingChanges[setting] != nil, read?.requestID != settingRequests[setting] { send(relatedQuery, type: 0x0E) }
+    }
+
+    private func receiveSpeakerLighting(_ payload: [UInt8], type: UInt8) -> Bool {
+        guard type == SonySpeakerLighting.frameType, table2CapabilitiesSession == controlSession,
+              let response = SonySpeakerLighting.readQuery(for: payload),
+              speakerLighting.queryPayloads.contains(response.query) else { return false }
+        let query = response.query
+        let read = response.notification ? nil : lightingReads[query]
+        if !response.notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        var lighting = speakerLighting
+        guard lighting.update(payload, frameType: type) else { return true }
+        if response.notification {
+            if lightingReads[query]?.transmitted == true, receivedAfter(lightingReads[query]?.transmissionOrdinal) {
+                lightingReads[query]?.isObsolete = true
+            }
+        } else {
+            lightingReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query, type: type)
+                return true
+            }
+        }
+        if speakerLighting.colorType != lighting.colorType {
+            cancelSpeakerLightingColorPreview()
+            lightingColorPreviewWasSent = false
+        }
+        if speakerLighting != lighting { speakerLighting = lighting }
+        if case .lighting(let item) = partyLightingDrag?.target,
+           item != lighting.partyItem || lighting.partyAvailable == false {
+            finishPartyLightingDrag()
+        }
+        lastSyncDate = Date()
+        guard let parameter = SonySpeakerLighting.Parameter(rawValue: query[1]), parameter.query == query else { return true }
+        let setting = Setting.speakerLighting(parameter)
+        if parameter == .mode, lightingModeAlert != nil || lightingModeAlertReply != nil { return true }
+        if response.notification || (read?.requestID != nil && read?.requestID == settingRequests[setting]) {
+            confirmSetting(setting, value: lighting.value(parameter))
+        }
+        if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil,
+           response.notification || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[setting] = nil
+            settingErrors[setting] = nil
+        }
+        if let read, pendingChanges[setting] != nil, settingTimeouts[setting] != nil,
+           settingRequests[setting] != read.requestID { send(query, type: type) }
+        return true
+    }
+
+    private func receiveKaraoke(_ payload: [UInt8], type: UInt8) -> Bool {
+        guard type == SonyKaraoke.frameType, table2CapabilitiesSession == controlSession,
+              let response = karaoke.readQuery(for: payload) else { return false }
+        let query = response.query
+        let read = response.notification ? nil : lightingReads[query]
+        if !response.notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        var updated = karaoke
+        guard updated.update(payload, frameType: type) else { return true }
+        if response.notification {
+            if lightingReads[query]?.transmitted == true, receivedAfter(lightingReads[query]?.transmissionOrdinal) {
+                lightingReads[query]?.isObsolete = true
+            }
+        } else {
+            lightingReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query, type: type)
+                return true
+            }
+        }
+        if updated != karaoke { karaoke = updated }
+        lastSyncDate = Date()
+        guard let kind = updated.setting(forQuery: query), let value = updated.current(kind) else { return true }
+        let setting = Setting.speakerKaraoke(kind)
+        if response.notification || (read?.requestID != nil && read?.requestID == settingRequests[setting]) {
+            confirmSetting(setting, value: value)
+        }
+        if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil,
+           response.notification || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[setting] = nil
+            settingErrors[setting] = nil
+        }
+        if let read, pendingChanges[setting] != nil, settingTimeouts[setting] != nil,
+           settingRequests[setting] != read.requestID { send(query, type: type) }
+        return true
+    }
+
+    private func receiveSpeakerOptimizer(_ payload: [UInt8], type: UInt8) -> Bool {
+        guard type == 0x0C else { return false }
+        let setting: Setting
+        let response: (query: [UInt8], notification: Bool)
+        if audioFeatures.soundFieldOptimization != nil, let reply = SonySoundFieldOptimization.response(to: payload) {
+            setting = .soundFieldOptimization
+            response = reply
+        } else if audioFeatures.tvSoundBooster != nil, let reply = SonyTVSoundBooster.response(to: payload) {
+            setting = .tvSoundBooster
+            response = reply
+        } else {
+            return false
+        }
+        let query = response.query
+        let read = response.notification ? nil : systemReads[query]
+        if !response.notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        var features = audioFeatures
+        guard features.update(payload) else { return true }
+        if response.notification {
+            if systemReads[query]?.transmitted == true, receivedAfter(systemReads[query]?.transmissionOrdinal) {
+                systemReads[query]?.isObsolete = true
+            }
+        } else {
+            systemReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query)
+                return true
+            }
+        }
+        if audioFeatures != features { audioFeatures = features }
+        clearSystemReadError(setting)
+        lastSyncDate = Date()
+        guard query[0] == 0x86 else { return true }
+        if response.notification || (read?.requestID != nil && read?.requestID == settingRequests[setting]) {
+            let value = setting == .soundFieldOptimization
+                ? features.soundFieldOptimization?.parameterValue : features.tvSoundBooster?.parameterValue
+            confirmSetting(setting, value: value)
+        }
+        if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil,
+           response.notification || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[setting] = nil
+            settingErrors[setting] = nil
+        }
+        if let read, pendingChanges[setting] != nil, settingTimeouts[setting] != nil,
+           settingRequests[setting] != read.requestID { send(query) }
+        return true
+    }
+
+    private func receiveDJControl(_ payload: [UInt8], type: UInt8) -> Bool {
+        guard type == SonyDJControl.frameType, table2CapabilitiesSession == controlSession,
+              let response = djControl.readQuery(for: payload) else { return false }
+        let query = response.query
+        let read = response.notification ? nil : lightingReads[query]
+        if !response.notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        var control = djControl
+        guard control.update(payload, frameType: type) else { return true }
+        if response.notification {
+            if lightingReads[query]?.transmitted == true, receivedAfter(lightingReads[query]?.transmissionOrdinal) {
+                lightingReads[query]?.isObsolete = true
+            }
+        } else {
+            lightingReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query, type: type)
+                return true
+            }
+        }
+        if control != djControl { djControl = control }
+        if case .dj(let effect) = partyLightingDrag?.target, control.available == false || control.effect != effect {
+            finishDJControlDrag()
+        }
+        lastSyncDate = Date()
+        guard query == control.parameterQuery else { return true }
+        if response.notification || (read?.requestID != nil && read?.requestID == settingRequests[.speakerDJ]) {
+            confirmSetting(.speakerDJ, value: control.parameterValue)
+        }
+        if receivedAfter(settingTransmissionOrdinals[.speakerDJ]), unconfirmedChanges[.speakerDJ] != nil,
+           response.notification || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[.speakerDJ] = nil
+            settingErrors[.speakerDJ] = nil
+        }
+        if let read, pendingChanges[.speakerDJ] != nil, settingTimeouts[.speakerDJ] != nil,
+           settingRequests[.speakerDJ] != read.requestID { send(query, type: type) }
+        return true
     }
 
     private func receivePowerSettings(_ payload: [UInt8], type: UInt8) -> Bool {
@@ -7513,6 +10420,273 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         if let read, settings.contains(where: { pendingChanges[$0] != nil && settingRequests[$0] != read.requestID }) {
             send(query, type: type)
+        }
+        return true
+    }
+
+    private func receiveBassBoost(_ payload: [UInt8]) -> Bool {
+        guard payload.count >= 2, let inquiry = equalizer.bassBoost.inquiryType, payload[1] == inquiry else { return false }
+        let query: [UInt8]
+        switch payload[0] {
+        case 0x51: query = [0x50, inquiry, 1]
+        case 0x53, 0x55: query = [0x52, inquiry]
+        case 0x57, 0x59: query = [0x56, inquiry]
+        default: return false
+        }
+        let notification = payload[0] == 0x55 || payload[0] == 0x59
+        let read = systemReads[query]
+        if !notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        var updated = equalizer.bassBoost
+        guard updated.update(payload) else { return true }
+        if notification {
+            if read?.transmitted == true, receivedAfter(read?.transmissionOrdinal) { systemReads[query]?.isObsolete = true }
+        } else {
+            systemReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query)
+                return true
+            }
+        }
+        equalizer.bassBoost = updated
+        lastSyncDate = Date()
+        if updated.range != nil, updated.available != nil, updated.level != nil { clearSystemReadError(.bassBoost) }
+        if payload[0] == 0x55, updated.available == true { send([0x56, inquiry]) }
+        guard query[0] == 0x56, let level = updated.level else { return true }
+        let ownsRead = !notification && read?.requestID != nil && read?.requestID == settingRequests[.bassBoost]
+        if notification || ownsRead { confirmSetting(.bassBoost, value: [UInt8(bitPattern: Int8(level))]) }
+        if receivedAfter(settingTransmissionOrdinals[.bassBoost]), unconfirmedChanges[.bassBoost] != nil,
+           notification || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[.bassBoost] = nil
+            settingErrors[.bassBoost] = nil
+        }
+        if !notification, pendingChanges[.bassBoost] != nil, !ownsRead { send(query) }
+        return true
+    }
+
+    private func receiveLRBalanceCorrection(_ payload: [UInt8]) -> Bool {
+        var updated = equalizer.lrBalanceCorrection
+        guard let query = updated.query(for: payload) else { return false }
+        let notification = payload[0] == 0x55 || payload[0] == 0x59
+        let read = systemReads[query]
+        if !notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        guard updated.update(payload) else { return true }
+        if notification {
+            if read?.transmitted == true, receivedAfter(read?.transmissionOrdinal) { systemReads[query]?.isObsolete = true }
+        } else {
+            systemReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query)
+                return true
+            }
+        }
+        equalizer.lrBalanceCorrection = updated
+        lastSyncDate = Date()
+        let setting = Setting.lrBalanceCorrection
+        if updated.adjustmentCapability != nil, updated.available != nil, updated.adjustmentAvailable != nil, updated.mode != nil {
+            clearSystemReadError(setting)
+        }
+        guard query == SonyLRBalanceCorrection.parameterQuery, let mode = updated.mode else { return true }
+        let ownsRead = !notification && read?.requestID != nil && read?.requestID == settingRequests[setting]
+        if notification || ownsRead { confirmSetting(setting, value: [mode.rawValue]) }
+        if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil,
+           notification || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[setting] = nil
+            settingErrors[setting] = nil
+        }
+        if !notification, pendingChanges[setting] != nil, !ownsRead { send(query) }
+        return true
+    }
+
+    private func receiveULTSoundEffectAssignment(_ payload: [UInt8]) -> Bool {
+        var assignment = equalizer.ultSoundEffectAssignment
+        guard let query = assignment.query(for: payload) else { return false }
+        let notification = payload[0] == 0x59
+        let read = systemReads[query]
+        if !notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        guard assignment.update(payload) else { return true }
+        if notification {
+            if read?.transmitted == true, receivedAfter(read?.transmissionOrdinal) { systemReads[query]?.isObsolete = true }
+        } else {
+            systemReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query)
+                return true
+            }
+        }
+        equalizer.ultSoundEffectAssignment = assignment
+        lastSyncDate = Date()
+        let setting = Setting.ultSoundEffectAssignment
+        if assignment.selectionCount != nil, assignment.entries != nil { clearSystemReadError(setting) }
+        guard query == SonyULTSoundEffectAssignment.parameterQuery else { return true }
+        let ownsRead = !notification && read?.requestID != nil && read?.requestID == settingRequests[setting]
+        if notification || ownsRead || read?.resolvesUnconfirmed == true {
+            confirmSetting(setting, value: settingValue(payload, setting: setting))
+        }
+        if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil,
+           notification || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[setting] = nil
+            settingErrors[setting] = nil
+        }
+        if !notification, pendingChanges[setting] != nil, !ownsRead { send(query) }
+        return true
+    }
+
+    private func receiveStandaloneSpeakerEQ(_ payload: [UInt8]) -> Bool {
+        var soundEffect = equalizer.soundEffect
+        var customEQ = equalizer.customEQ
+        let setting: Setting
+        let query: [UInt8]
+        let parameterQuery: [UInt8]
+        if let matched = soundEffect.query(for: payload) {
+            setting = .soundEffect
+            query = matched
+            parameterQuery = SonySoundEffect.parameterQuery
+        } else if let matched = customEQ.query(for: payload) {
+            setting = .customEQ
+            query = matched
+            parameterQuery = SonyCustomEQ.parameterQuery
+        } else {
+            return false
+        }
+        let notification = payload[0] == 0x55 || payload[0] == 0x59
+        let read = systemReads[query]
+        if !notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        guard setting == .soundEffect ? soundEffect.update(payload) : customEQ.update(payload) else { return true }
+        if notification {
+            if read?.transmitted == true, receivedAfter(read?.transmissionOrdinal) { systemReads[query]?.isObsolete = true }
+        } else {
+            systemReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query)
+                return true
+            }
+        }
+        if setting == .soundEffect {
+            equalizer.soundEffect = soundEffect
+            if soundEffect.modeCodes != nil, soundEffect.available != nil, soundEffect.selectedCode != nil {
+                clearSystemReadError(setting)
+            }
+        } else {
+            equalizer.customEQ = customEQ
+            if customEQ.levelSteps != nil, customEQ.available != nil, customEQ.bands != nil, customEQ.values != nil {
+                clearSystemReadError(setting)
+            }
+        }
+        lastSyncDate = Date()
+        guard query == parameterQuery else { return true }
+        let ownsRead = !notification && read?.requestID != nil && read?.requestID == settingRequests[setting]
+        if notification || ownsRead || read?.resolvesUnconfirmed == true {
+            confirmSetting(setting, value: settingValue(payload, setting: setting))
+        }
+        if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil,
+           notification || read?.resolvesUnconfirmed == true {
+            unconfirmedChanges[setting] = nil
+            settingErrors[setting] = nil
+        }
+        if !notification, pendingChanges[setting] != nil, !ownsRead { send(query) }
+        return true
+    }
+
+    private func receiveCustomSoundEffect(_ payload: [UInt8]) -> Bool {
+        var effect = equalizer.customSoundEffect
+        guard let query = effect.query(for: payload) else { return false }
+        let notification = payload[0] == 0x59
+        let read = systemReads[query]
+        if !notification, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
+        guard effect.update(payload) else { return true }
+        if notification {
+            if read?.transmitted == true, receivedAfter(read?.transmissionOrdinal) { systemReads[query]?.isObsolete = true }
+        } else {
+            systemReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read?.timedOut == true || read?.isObsolete == true {
+                send(query)
+                return true
+            }
+        }
+        equalizer.customSoundEffect = effect
+        lastSyncDate = Date()
+        let setting = Setting.customSoundEffect
+        if effect.effects != nil, effect.bands != nil, effect.selectedCode != nil { clearSystemReadError(setting) }
+        guard query == SonyCustomSoundEffect.parameterQuery else { return true }
+        if notification {
+            switch payload[1] {
+            case 0x33, 0x34:
+                confirmSetting(setting, value: Array(payload[1...2]))
+            case 0x35:
+                confirmSetting(setting, value: [0x35, 0] + payload.dropFirst(2))
+            default: break
+            }
+        } else {
+            let ownsRead = read?.requestID != nil && read?.requestID == settingRequests[setting]
+            if ownsRead || read?.resolvesUnconfirmed == true, let code = effect.selectedCode {
+                if let expected = pendingChanges[setting] ?? unconfirmedChanges[setting] {
+                    if expected[0] == 0x33 { confirmSetting(setting, value: [0x33, code]) }
+                    if expected[0] == 0x35, let values = effect.values {
+                        confirmSetting(setting, value: [0x35, 0, code, UInt8(values.count)] + values)
+                    }
+                }
+                if receivedAfter(settingTransmissionOrdinals[setting]), unconfirmedChanges[setting] != nil {
+                    unconfirmedChanges[setting] = nil
+                    settingErrors[setting] = nil
+                }
+            }
+            if pendingChanges[setting] != nil, !ownsRead { send(query) }
+        }
+        return true
+    }
+
+    private func refreshTurnKeyEqualizer() {
+        equalizer.invalidatePresetInventory()
+        refreshEqualizer()
+        for query in equalizer.turnKey.queryPayloads {
+            if systemReads[query]?.transmitted == true { systemReads[query]?.isObsolete = true }
+            equalizer.turnKey.invalidate(query)
+            send(query)
+        }
+    }
+
+    private func receiveTurnKeyEqualizer(_ payload: [UInt8]) -> Bool {
+        var updated = equalizer.turnKey
+        let setting = Setting.turnKeyEQ
+        if let query = updated.query(for: payload) {
+            guard let read = systemReads[query], read.transmitted, receivedAfter(read.transmissionOrdinal),
+                  updated.update(payload) else { return true }
+            systemReads.removeValue(forKey: query)?.timeout?.cancel()
+            if read.timedOut || read.isObsolete { send(query); return true }
+            equalizer.turnKey = updated
+            if updated.deletablePresets != nil, updated.limit != nil { clearSystemReadError(setting) }
+            lastSyncDate = Date()
+            return true
+        }
+        guard let result = updated.result(payload) else { return false }
+        let request = pendingChanges[setting] ?? unconfirmedChanges[setting]
+        guard let request, request.first == payload[1], receivedAfter(settingTransmissionOrdinals[setting]) else { return true }
+        if result == .success {
+            if payload[1] == 0x32 {
+                guard pendingChanges[setting] != nil else { return true }
+                turnKeyImportJudged = true
+                if turnKeyImportAlert != nil { settingTimeouts.removeValue(forKey: setting)?.cancel() }
+                return true
+            }
+            confirmSetting(setting, value: request)
+            equalizer.turnKey.lastCompletedOperation = payload[1]
+            refreshTurnKeyEqualizer()
+        } else {
+            let requestID = settingRequests.removeValue(forKey: setting)
+            pendingChanges[setting] = nil
+            unconfirmedChanges[setting] = nil
+            settingTransmissionOrdinals[setting] = nil
+            settingTimeouts.removeValue(forKey: setting)?.cancel()
+            settingRefreshes.removeValue(forKey: setting)?.cancel()
+            if payload[1] == 0x32 {
+                turnKeyImportJudged = false
+                turnKeyImportAlert = nil
+                turnKeyImportReply = nil
+            }
+            let message = result == .notSupported ? String(localized: "The headphones do not support this preset.")
+                : String(localized: "The headphones rejected the preset change.")
+            settingErrors[setting] = message
+            finishSettingIntent(setting, requestID: requestID, error: HeadphoneControlError(message: message))
         }
         return true
     }
@@ -7654,15 +10828,23 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
     }
 
     private func receivePlayback(_ payload: [UInt8]) -> Bool {
+        if playback.isLegacyTrackChange(payload) {
+            playback.clearLegacyMetadata()
+            for query in playback.legacyMetadataQueryPayloads { playbackReads[query]?.isObsolete = true }
+            if isReady { requestPlayback(.legacyMetadata) }
+            return true
+        }
         var updatedPlayback = playback
         guard updatedPlayback.update(payload) else { return false }
         let isResponse = payload[0] == 0xA1 || payload[0] == 0xA3 || payload[0] == 0xA7
         let query = playback.queryPayload(for: payload)!
+        let isLegacyMetadata = playback.legacyMetadataQueryPayloads.contains(query)
         var read: PlaybackRead?
         var isFreshResponse = false
         var needsReplacement = false
         defer {
-            if needsReplacement, isReady, connectionTransition?.isFinished != false,
+            if needsReplacement, isReady, !isLegacyMetadata || playback.canReadLegacyMetadata,
+               connectionTransition?.isFinished != false,
                multipointTransition?.isFinished != false,
                playbackReadSequence?.queries.contains(query) != true || playbackReadSequence?.currentQuery == query,
                read?.sourceGeneration == playbackSourceGeneration || playbackReadSequence?.currentQuery == query { send(query) }
@@ -7680,9 +10862,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if let read {
                 playbackReadTimeouts.removeValue(forKey: query)?.cancel()
                 if !expiredLegacyCapabilities.contains(playback.capabilityQueryPayload),
-                   !playbackReads.values.contains(where: { $0.timedOut }) { playbackReadError = nil }
+                   !playbackReads.contains(where: { !playback.legacyMetadataQueryPayloads.contains($0.key) && $0.value.timedOut }) {
+                    playbackReadError = nil
+                }
                 needsReplacement = read.refreshRequested || read.isObsolete || read.sourceGeneration != playbackSourceGeneration
                 guard read.sourceGeneration == playbackSourceGeneration, !read.isObsolete else { return true }
+                if read.timedOut, isLegacyMetadata { return true }
                 isFreshResponse = !read.timedOut && !read.refreshRequested
                 if isFreshResponse { playbackFreshQueries.insert(query) }
                 else { playbackFreshQueries.remove(query) }
@@ -7695,7 +10880,18 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if playbackSourceGeneration > 0, !playbackFreshQueries.contains(query) { return true }
             if receivedAfter(playbackReads[query]?.transmissionOrdinal) { playbackReads[query]?.isObsolete = true }
         }
+        let hadLegacyMetadataAvailability = playback.canReadLegacyMetadata
         playback = updatedPlayback
+        if isReady, hadLegacyMetadataAvailability != playback.canReadLegacyMetadata {
+            if playback.canReadLegacyMetadata {
+                requestPlayback(.legacyMetadata)
+            } else {
+                for query in playback.legacyMetadataQueryPayloads { playbackReads[query]?.isObsolete = true }
+                if let query = playbackReadSequence?.currentQuery, playback.legacyMetadataQueryPayloads.contains(query) {
+                    finishPlaybackReadSequence()
+                }
+            }
+        }
         #if !ACOUPLET_PUBLIC_APIS_ONLY
         if payload[0] == 0xA7, query == playback.musicVolumeQueryPayload, isFreshResponse {
             musicVolumeReadbackID = UUID()
@@ -7723,6 +10919,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         defer { receivedTransmissionOrdinal = previousOrdinal }
         if stage == .unsupported { return }
         if receiveLegacyCapability(payload, type: type) { return }
+        if type == 0x0C, SonyConnectionEstablishedTime.acknowledges(payload) {
+            if let acknowledgment = connectionTimeAcknowledgment, receivedAfter(acknowledgment.ordinal) {
+                connectionTimeAcknowledgment = nil
+                if DispatchTime.now() <= acknowledgment.deadline {
+                    recordDiagnostic("Headphone connection time synchronized")
+                }
+            }
+            return
+        }
         if type == 0x0E, payload.count >= 2, payload[0] == 0x37, payload[1] == multipoint.inventoryInquiryType, let read = inventoryRead,
            read.transmitted, !receivedAfter(read.transmissionOrdinal) { return }
         if type == 0x0C, payload.count >= 2, payload[0] == 0xE7,
@@ -7732,6 +10937,18 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
            let read = multipointReadbacks.first(where: { $0.slot == payload[1] }),
            !receivedAfter(read.transmissionOrdinal) { return }
         if receiveFirmwareUpdateIdentity(payload, type: type) { return }
+        if type == 0x0C, let query = displayFirmwareQuery, let version = SonyDisplayFirmwareVersion(payload: payload) {
+            if consumeDiscoveryRead(query, type: type) { displayFirmwareVersion = version.value }
+            return
+        }
+        if type == 0x0C, protocolInformation?.generation == .v2,
+           supportedFunctions.contains(SonyVoiceAssistantSetup.capability),
+           let options = SonyVoiceAssistantSetup.options(from: payload) {
+            if consumeDiscoveryRead(SonyVoiceAssistantSetup.query, type: type) {
+                voiceAssistantSetupOptions = options
+            }
+            return
+        }
         if protocolInformation?.generation == .v2,
            let identity = SonyConnectionIdentity(payload: payload, frameType: type, supportedFunctions: supportedFunctions,
                                                  supportedFunctions2: supportedFunctions2) {
@@ -7746,9 +10963,12 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             }
             return
         }
-        if type == 0x0C, receivePlayback(payload) { return }
+        if type == 0x0C, receivePlayback(payload) || receiveBassBoost(payload) || receiveLRBalanceCorrection(payload)
+            || receiveTurnKeyEqualizer(payload) || receiveULTSoundEffectAssignment(payload)
+            || receiveCustomSoundEffect(payload) || receiveStandaloneSpeakerEQ(payload) { return }
         if type == 0x0C, receiveNoiseToggle(payload) { return }
         if type == 0x0C, receiveNoiseTest(payload) { return }
+        if type == 0x0C, receiveLegacyOptimizer(payload) { return }
         if type == 0x0C, protocolInformation?.generation == .v1, receiveStandaloneNoiseControl(payload) { return }
         if protocolInformation?.generation == .v1 {
             if type == 0x0E {
@@ -7759,12 +10979,29 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             return
         }
         if receivePowerSettings(payload, type: type) { return }
+        if receiveSpeakerLighting(payload, type: type) { return }
+        if receiveDJControl(payload, type: type) { return }
+        if receiveKaraoke(payload, type: type) { return }
+        if receiveAuracast(payload, type: type) { return }
+        if receiveSpeakerOptimizer(payload, type: type) { return }
+        if receiveLEAudioRestriction(payload, type: type) { return }
         if payload[0] == 0x07 {
             parseSupportFunctions(payload, type: type)
             return
         }
         if type == 0x0E {
+            if receiveLEAudioCapabilities(payload) { return }
+            if receiveLinkAutoSwitch(payload) { return }
+            if receiveMicrophoneOperation(payload) { return }
+            if receiveAdaptiveVolumeWithLimitation(payload) { return }
+            if receiveWearingPosition(payload) { return }
+            if receiveMusicHandover(payload) { return }
+            let inventoryReport = payload.count >= 2 && [0x37, 0x39].contains(payload[0]) && payload[1] == multipoint.inventoryInquiryType
+            let freshInventoryRead = inventoryReport && payload[0] == 0x37 && inventoryRead.map {
+                $0.transmitted && !$0.timedOut && !$0.isObsolete && receivedAfter($0.transmissionOrdinal)
+            } == true
             let previousSource = multipoint.selectedSource?.address
+            let wasVerifyingSource = sourceTransition?.phase == .verifying
             let previousDeviceActionPhase = deviceActionTransition?.phase
             var receivedMultipoint = multipoint
             let updatedMultipoint = receivedMultipoint.update(payload)
@@ -7781,12 +11018,25 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     playback = SonyPlayback(supportedFunctions: supportedFunctions)
                 }
                 if previousSource != multipoint.selectedSource?.address
+                    || (wasVerifyingSource && sourceTransition?.phase == .complete)
                     || (previousDeviceActionPhase != .complete && deviceActionTransition?.phase == .complete) {
                     if isReady, connectionTransition?.isFinished != false, multipointTransition?.isFinished != false,
                        sourceTransition?.isFinished != false, deviceActionTransition?.isFinished != false {
                         requestPlayback(.all)
                     }
                 }
+                if inventoryReport {
+                    observeCodecInventory(fresh: updatedMultipoint && (freshInventoryRead || payload[0] == 0x39), readback: freshInventoryRead)
+                }
+                #if !ACOUPLET_PUBLIC_APIS_ONLY
+                if updatedMultipoint, hasCurrentTable2Capabilities, isReady, isDeviceConnected, !multipoint.inventoryIsStale,
+                   sourceTransition?.isFinished != false, deviceActionTransition?.isFinished != false,
+                   payload[1] == multipoint.inventoryInquiryType,
+                   payload[0] == 0x39 || (payload[0] == 0x37 && wasVerifyingSource && sourceTransition?.phase == .complete) {
+                    let source = multipoint.selectedSource
+                    musicSourceConfirmations.send(source?.isConnected == true ? source : nil)
+                }
+                #endif
                 if updatedMultipoint, isReady, isDeviceConnected, !multipoint.inventoryIsStale,
                    sourceTransition?.isFinished != false, deviceActionTransition?.isFinished != false,
                    ((payload.count >= 2 && payload[0] == 0x39 && payload[1] == multipoint.inventoryInquiryType)
@@ -7798,16 +11048,27 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
                 return
             }
-            if receiveWearingStatus(payload) || receiveSoundPressure(payload) { return }
+            if receiveWearingStatus(payload) || receiveSoundPressure(payload) || receiveExposure(payload) || receiveVolumeProtection(payload) { return }
+            var updatedUSBProtection = usbProtection
+            if updatedUSBProtection.update(payload, frameType: type) {
+                usbProtection = updatedUSBProtection
+                return
+            }
             receiveVoiceGuidance(payload)
             return
         }
         guard type == 0x0C else { return }
         if handleCommonConnection(payload) { return }
-        if receiveEarTipFit(payload) || receiveHeadGesturePractice(payload) { return }
+        if receiveLEAudioStandby(payload), payload.first != 0x49 { return }
+        if payload.first == 0x99, receiveLEAudioStandbyAlert(payload) { return }
+        if receiveEarpieceSelection(payload) || receiveEarTipFit(payload) || receiveHeadGesturePractice(payload) { return }
         var receivedEqualizer = equalizer
         if [0x51, 0x53, 0x55, 0x5B].contains(payload[0]), receivedEqualizer.update(payload) {
             if equalizer != receivedEqualizer { equalizer = receivedEqualizer }
+            if equalizer.supportsULT {
+                if let curve = equalizer.settings { customEqualizer = curve }
+                if payload[0] == 0x55 { refreshEqualizer() }
+            }
             lastSyncDate = Date()
             return
         }
@@ -7867,7 +11128,55 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if stage == .bleIdentity { beginControlSync() }
             return
         }
+        if let alert = SonyVoiceAssistantSideAlert(payload: payload) {
+            receiveVoiceAssistantSideAlert(alert)
+            return
+        }
         if let alert = SonyConnectionAlert(payload: payload) {
+            if alert.isAdaptiveVolumeCaution {
+                let setting = Setting.adaptiveVolumeWithLimitation
+                if adaptiveVolumeWithLimitation.isSupported, hasCurrentTable2Capabilities, !adaptiveVolumeCautionSeen,
+                   pendingChanges[setting] == [0], settingTimeouts[setting] != nil,
+                   receivedAfter(settingTransmissionOrdinals[setting]),
+                   alert.actionType == .confirmationOnly || alert.availableActions.contains(.positive) {
+                    adaptiveVolumeCautionSeen = true
+                    settingTimeouts.removeValue(forKey: setting)?.cancel()
+                    settingRefreshes.removeValue(forKey: setting)?.cancel()
+                    let key: [UInt8] = [0x0E] + SonyAdaptiveVolumeWithLimitation.parameterQuery
+                    if systemReads[key]?.transmitted == true { systemReads[key]?.isObsolete = true }
+                    adaptiveVolumeCaution = alert
+                }
+                return
+            }
+            if alert.isTurnKeyEqualizerImport {
+                if equalizer.turnKey.supportsImport, pendingChanges[.turnKeyEQ] == [0x32], turnKeyImportReply == nil,
+                   receivedAfter(settingTransmissionOrdinals[.turnKeyEQ]), !alert.availableActions.isEmpty {
+                    turnKeyImportAlert = alert
+                    if turnKeyImportJudged { settingTimeouts.removeValue(forKey: .turnKeyEQ)?.cancel() }
+                }
+                return
+            }
+            if equalizer.turnKey.isDeletionAlert(alert) {
+                refreshTurnKeyEqualizer()
+                return
+            }
+            var updatedUSBProtection = usbProtection
+            if updatedUSBProtection.receiveCaution(alert) {
+                usbProtection = updatedUSBProtection
+                return
+            }
+            let lightingSetting = Setting.speakerLighting(.mode)
+            if alert.isLightingModeChange, !lightingModeAlertSeen, !alert.availableActions.isEmpty,
+               speakerLighting.modeExclusiveFunctions.contains(0), settingTimeouts[lightingSetting] != nil,
+               receivedAfter(settingTransmissionOrdinals[lightingSetting]) {
+                lightingModeAlertSeen = true
+                settingTimeouts.removeValue(forKey: lightingSetting)?.cancel()
+                settingRefreshes.removeValue(forKey: lightingSetting)?.cancel()
+                let query = SonySpeakerLighting.Parameter.mode.query
+                if lightingReads[query]?.transmitted == true { lightingReads[query]?.isObsolete = true }
+                lightingModeAlert = alert
+                return
+            }
             if alert.isBluetoothStandbyChange, let change = bluetoothStandbyChange, !change.receivedAlert,
                change.requestID == settingRequests[.bluetoothStandby], change.session == controlSession,
                pendingChanges[.bluetoothStandby] == [1], settingTimeouts[.bluetoothStandby] != nil,
@@ -7908,20 +11217,41 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             return
         }
         if handleMultipointDirective(payload) || handleConnectionDirective(payload) { return }
+        if type == 0x0C, audioFeatures.supportsCodecStatus, payload.count >= 2,
+           [0x13, 0x15].contains(payload[0]), payload[1] == 0x02 {
+            observeCodecReport(payload)
+        }
         var receivedAudioFeatures = audioFeatures
         if receivedAudioFeatures.update(payload) {
-            let dseeQuery: [UInt8] = [0xE6, 0x01]
-            let query: [UInt8]? = [0xE1, 0xE3, 0xE7].contains(payload[0]) ? [payload[0] - 1, payload[1]] : nil
+            let dseeQuery = audioFeatures.dseeParameterQuery
+            let query: [UInt8]? = switch (payload[0], payload[1]) {
+            case (0x13, 0x03): SonyAudioFeatures.upscalingQueryPayload
+            case (0xE1, _), (0xE3, _), (0xE7, _): [payload[0] - 1, payload[1]]
+            default: nil
+            }
             let connectionModeRead = payload[0] == 0xE7 && payload[1] == audioFeatures.connectionModeInquiryType
             let audioRead = query.flatMap { systemReads[$0] }
             let dseeRead = query == dseeQuery ? audioRead : nil
+            let soundLeakageParameter = payload[1] == SonySoundLeakageReduction.inquiry && (payload[0] == 0xE7 || payload[0] == 0xE9)
+            let voiceContentsParameter = payload[1] == SonyVoiceContents.inquiry && (payload[0] == 0xE7 || payload[0] == 0xE9)
+            let upmix = SonyUpmix.Variant(rawValue: payload[1]).flatMap { receivedAudioFeatures.upmix[$0] }
+            let upmixSetting = upmix.map { Setting.upmix($0.variant) }
+            let backgroundMusic = [0xE1, 0xE3, 0xE5, 0xE7, 0xE9].contains(payload[0])
+                && payload[1] == receivedAudioFeatures.backgroundMusic?.inquiry ? receivedAudioFeatures.backgroundMusic : nil
+            let listeningModeAssignments = payload[1] == SonyListeningModeAssignments.inquiry ? receivedAudioFeatures.listeningModeAssignments : nil
+            let listeningParameter = payload[0] == 0xE7 || payload[0] == 0xE9
             let known: Bool = switch (payload[0], payload[1]) {
-            case (0xE1, 1): receivedAudioFeatures.dseeType != nil
+            case (_, _) where upmix != nil || backgroundMusic != nil || listeningModeAssignments != nil: true
+            case (_, SonyVoiceContents.inquiry): true
+            case (0xE1, let inquiry) where inquiry == audioFeatures.dseeInquiry: receivedAudioFeatures.dseeType != nil
+            case (0xE1, SonySoundLeakageReduction.inquiry): receivedAudioFeatures.soundLeakageReduction?.exclusions != nil
             case (0xE1, _): receivedAudioFeatures.supportedConnectionModes != nil
-            case (0xE3, 1): receivedAudioFeatures.dseeAvailable != nil
+            case (0xE3, let inquiry) where inquiry == audioFeatures.dseeInquiry: receivedAudioFeatures.dseeAvailable != nil
+            case (0xE3, SonySoundLeakageReduction.inquiry): receivedAudioFeatures.soundLeakageReduction?.available != nil
             case (0xE3, _): receivedAudioFeatures.connectionModeAvailable != nil
                 && (payload[1] == 0 || receivedAudioFeatures.connectionModeLDACAvailable != nil)
-            case (0xE7, 1): receivedAudioFeatures.dseeMode?.sonyValue != nil
+            case (0xE7, let inquiry) where inquiry == audioFeatures.dseeInquiry: receivedAudioFeatures.dseeMode?.sonyValue != nil
+            case (0xE7, SonySoundLeakageReduction.inquiry): receivedAudioFeatures.soundLeakageReduction?.enabled != nil
             case (0xE7, _): receivedAudioFeatures.connectionMode?.sonyValue != nil
             default: true
             }
@@ -7929,11 +11259,17 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 guard let audioRead, audioRead.transmitted, receivedAfter(audioRead.transmissionOrdinal) else { return }
                 if known { systemReads.removeValue(forKey: query)?.timeout?.cancel() }
                 if audioRead.timedOut || audioRead.isObsolete
-                    || (query == dseeQuery && unconfirmedChanges[.dsee] != nil && audioRead.requestID == nil && !audioRead.resolvesUnconfirmed) {
+                    || ((query == dseeQuery && unconfirmedChanges[.dsee] != nil
+                        || soundLeakageParameter && unconfirmedChanges[.soundLeakageReduction] != nil
+                        || voiceContentsParameter && unconfirmedChanges[.voiceContents] != nil
+                        || listeningParameter && (upmixSetting.map { unconfirmedChanges[$0] != nil } == true
+                            || backgroundMusic != nil && unconfirmedChanges[.backgroundMusic] != nil
+                            || listeningModeAssignments != nil && unconfirmedChanges[.listeningModeAssignments] != nil))
+                        && audioRead.requestID == nil && !audioRead.resolvesUnconfirmed) {
                     if known { send(query) }
                     return
                 }
-            } else if [0xE5, 0xE9].contains(payload[0]) {
+            } else if [0xE5, 0xE9].contains(payload[0]) || payload.starts(with: [0x15, 0x03]) {
                 let previousQuery: [UInt8] = [payload[0] - 3, payload[1]]
                 if systemReads[previousQuery]?.transmitted == true, receivedAfter(systemReads[previousQuery]?.transmissionOrdinal) {
                     systemReads[previousQuery]?.isObsolete = true
@@ -7945,7 +11281,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             if (payload[0] == 0x13 || payload[0] == 0x15), payload[1] == 0x01 {
                 updateConnectionStatus(previousLeft: previousConnection.0, previousRight: previousConnection.1)
             }
-            if (payload[0] == 0xE7 || payload[0] == 0xE9), payload[1] == 0x01 {
+            if let dseeQuery, (payload[0] == 0xE7 || payload[0] == 0xE9), payload[1] == audioFeatures.dseeInquiry {
                 let confirmsRead = (dseeRead?.requestID != nil && dseeRead?.requestID == settingRequests[.dsee])
                     || (settingRequests[.dsee] == nil && (dseeRead?.requestID != nil || dseeRead?.resolvesUnconfirmed == true))
                 if let value = audioFeatures.dseeMode?.sonyValue, receivedAfter(settingTransmissionOrdinals[.dsee]),
@@ -7955,6 +11291,77 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 }
                 if payload[0] == 0xE7, pendingChanges[.dsee] != nil, dseeRead?.requestID != settingRequests[.dsee] {
                     send(dseeQuery)
+                }
+            }
+            if soundLeakageParameter, let enabled = audioFeatures.soundLeakageReduction?.enabled {
+                let setting = Setting.soundLeakageReduction
+                let confirmsRead = audioRead?.requestID != nil && audioRead?.requestID == settingRequests[setting]
+                    || settingRequests[setting] == nil && (audioRead?.requestID != nil || audioRead?.resolvesUnconfirmed == true)
+                if receivedAfter(settingTransmissionOrdinals[setting]), payload[0] == 0xE9 || confirmsRead {
+                    confirmSetting(setting, value: [enabled ? 0 : 1])
+                    unconfirmedChanges[setting] = nil
+                }
+                if payload[0] == 0xE7, pendingChanges[setting] != nil, audioRead?.requestID != settingRequests[setting] {
+                    send(SonySoundLeakageReduction.parameterQuery)
+                }
+            }
+            if payload[1] == SonyVoiceContents.inquiry {
+                let setting = Setting.voiceContents
+                clearSystemReadError(setting)
+                if voiceContentsParameter, let enabled = audioFeatures.voiceContents?.enabled {
+                    let confirmsRead = audioRead?.requestID != nil && audioRead?.requestID == settingRequests[setting]
+                        || settingRequests[setting] == nil && audioRead?.resolvesUnconfirmed == true
+                    if receivedAfter(settingTransmissionOrdinals[setting]), payload[0] == 0xE9 || confirmsRead {
+                        confirmSetting(setting, value: [enabled ? 0 : 1])
+                        unconfirmedChanges[setting] = nil
+                    }
+                    if payload[0] == 0xE7, pendingChanges[setting] != nil, audioRead?.requestID != settingRequests[setting] {
+                        send(SonyVoiceContents.parameterQuery)
+                    }
+                }
+            }
+            if let upmix, let setting = upmixSetting {
+                clearSystemReadError(setting)
+                if listeningParameter {
+                    let confirmsRead = audioRead?.requestID != nil && audioRead?.requestID == settingRequests[setting]
+                        || settingRequests[setting] == nil && audioRead?.resolvesUnconfirmed == true
+                    if receivedAfter(settingTransmissionOrdinals[setting]), payload[0] == 0xE9 || confirmsRead {
+                        confirmSetting(setting, value: upmix.parameterValue)
+                        unconfirmedChanges[setting] = nil
+                    }
+                    if payload[0] == 0xE7, pendingChanges[setting] != nil, audioRead?.requestID != settingRequests[setting] {
+                        send(upmix.variant.parameterQuery)
+                    }
+                }
+            }
+            if let backgroundMusic {
+                let setting = Setting.backgroundMusic
+                clearSystemReadError(setting)
+                if listeningParameter {
+                    let confirmsRead = audioRead?.requestID != nil && audioRead?.requestID == settingRequests[setting]
+                        || settingRequests[setting] == nil && audioRead?.resolvesUnconfirmed == true
+                    if receivedAfter(settingTransmissionOrdinals[setting]), payload[0] == 0xE9 || confirmsRead {
+                        confirmSetting(setting, value: backgroundMusic.parameterValue)
+                        unconfirmedChanges[setting] = nil
+                    }
+                    if payload[0] == 0xE7, pendingChanges[setting] != nil, audioRead?.requestID != settingRequests[setting] {
+                        send(backgroundMusic.parameterQuery)
+                    }
+                }
+            }
+            if let listeningModeAssignments {
+                let setting = Setting.listeningModeAssignments
+                clearSystemReadError(setting)
+                if listeningParameter {
+                    let confirmsRead = audioRead?.requestID != nil && audioRead?.requestID == settingRequests[setting]
+                        || settingRequests[setting] == nil && audioRead?.resolvesUnconfirmed == true
+                    if receivedAfter(settingTransmissionOrdinals[setting]), payload[0] == 0xE9 || confirmsRead {
+                        confirmSetting(setting, value: listeningModeAssignments.parameterValue)
+                        unconfirmedChanges[setting] = nil
+                    }
+                    if payload[0] == 0xE7, pendingChanges[setting] != nil, audioRead?.requestID != settingRequests[setting] {
+                        send(SonyListeningModeAssignments.parameterQuery)
+                    }
                 }
             }
             if connectionModeRead,
@@ -8017,9 +11424,16 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 touchAssignments = SonyTouchAssignments()
                 voiceGuidance = SonyVoiceGuidance()
                 soundPressure = SonySoundPressure()
+                volumeProtection = SonyVolumeProtection()
+                usbProtection = SonyUSBProtection()
                 earTipFit = SonyEarTipFit()
                 headGesturePractice = SonyHeadGesturePractice()
                 multipoint = SonyMultipoint()
+                linkAutoSwitch = SonyLinkAutoSwitch()
+                microphoneOperation = SonyMicrophoneOperation()
+                adaptiveVolumeWithLimitation = SonyAdaptiveVolumeWithLimitation()
+                resetWearingPosition()
+                leAudioRestrictions = SonyLEAudioRestrictions()
             }
             supportsTable2 = info.supportsTable2
             stage = .supportFunctions
@@ -8161,26 +11575,32 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         let feature = systemFeature(inquiry: payload[1])
         let isVoiceAssistant = !isLegacy && systemFeatures.voiceAssistant != nil && payload[1] == 0x04
             && [0xF1, 0xF3, 0xF5, 0xF7, 0xF9].contains(payload[0])
+        let isCallSettings = systemFeatures.callSettings != nil && payload[1] == SonyCallSettings.inquiry
+            && [0xF1, 0xF3, 0xF5, 0xF7, 0xF9].contains(payload[0])
         let isAutomaticPowerOff = payload[1] == automaticPowerOff?.inquiryType
             && (isLegacy ? [0xF1, 0xF3, 0xF5, 0xF7, 0xF9] : [0x21, 0x23, 0x25, 0x27, 0x29]).contains(payload[0])
-        guard isVoiceAssistant || isAutomaticPowerOff || (feature != nil && ((isLegacy && payload[0] == 0xF1)
+        guard isVoiceAssistant || isAutomaticPowerOff || isCallSettings || (feature != nil && ((isLegacy && payload[0] == 0xF1)
             || [0xF3, 0xF5, 0xF7, 0xF9].contains(payload[0])
-            || (feature == .speakToChat && [0xFB, 0xFD].contains(payload[0])))) else { return false }
+            || (feature == .speakToChat && [0xF1, 0xFB, 0xFD].contains(payload[0])))) else { return false }
         let query: [UInt8]? = [0x21, 0x23, 0x27, 0xF1, 0xF3, 0xF7, 0xFB].contains(payload[0]) ? [payload[0] - 1, payload[1]] : nil
         let read = query.flatMap { systemReads[$0] }
         if query != nil, read?.transmitted != true || !receivedAfter(read?.transmissionOrdinal) { return true }
         var features = systemFeatures
         var controls = legacyControls
-        if isLegacy {
+        let legacyOnOff = systemFeatures.legacyOnOffFeature(inquiry: payload[1])
+        let updatesLegacyControls = isLegacy && feature != .speakToChat && legacyOnOff == nil
+        if updatesLegacyControls {
             guard controls?.update(payload) == true else { return true }
         } else {
             guard features.update(payload) else { return true }
         }
         let powerOff = isLegacy ? controls?.automaticPowerOff : features.automaticPowerOff
-        let state = isLegacy ? controls?.wearingControl.state : feature.flatMap { features[$0] }
+        let state = updatesLegacyControls ? controls?.wearingControl.state : feature.flatMap { features[$0] }
         let setting = systemReadSetting([payload[0] - (query == nil ? 3 : 1), payload[1]])
         let known: Bool
-        if isVoiceAssistant {
+        if isCallSettings {
+            known = true
+        } else if isVoiceAssistant {
             switch payload[0] {
             case 0xF1: known = features.voiceAssistant?.hasKnownCapability == true
             case 0xF3, 0xF5: known = features.voiceAssistant?.available != nil
@@ -8195,14 +11615,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         } else {
             switch payload[0] {
             case 0xF1:
-                known = controls?.wearingControl.settingType == 0
+                if let legacyOnOff { known = features.hasLegacyOnOffCapability(legacyOnOff) }
+                else if feature == .speakToChat { known = features.speakToChatOptions?.hasKnownCapability == true }
+                else { known = controls?.wearingControl.settingType == 0 }
             case 0xF3, 0xF5:
                 known = state?.available != nil && state?.isVisible != nil
             case 0xF7, 0xF9:
                 known = state?.enabled != nil
             default:
-                known = features.speakToChatOptions?.sensitivity?.sonyValue != nil
-                    && features.speakToChatOptions?.delay?.sonyValue != nil
+                known = features.speakToChatOptions?.hasKnownParameters == true
             }
         }
         if let query {
@@ -8211,6 +11632,9 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             let previousQuery: [UInt8] = [payload[0] - 3, payload[1]]
             if systemReads[previousQuery]?.transmitted == true, receivedAfter(systemReads[previousQuery]?.transmissionOrdinal) { systemReads[previousQuery]?.isObsolete = true }
         }
+        if isVoiceAssistant, [0xF7, 0xF9].contains(payload[0]), voiceAssistantSideAlert != nil || voiceAssistantSideReply != nil {
+            return true
+        }
         if read?.timedOut == true {
             if known, let query { send(query) }
             return true
@@ -8218,10 +11642,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         if let read, read.isObsolete || (setting.map { unconfirmedChanges[$0] != nil } == true
             && read.requestID == nil && !read.resolvesUnconfirmed) {
             if known, let query, initialFeatureReads?.currentQuery == query
+                || (isVoiceAssistant && voiceAssistantSideAlertSeen)
                 || setting.map({ pendingChanges[$0] != nil || unconfirmedChanges[$0] != nil }) == true { send(query) }
             return true
         }
-        if isLegacy { legacyControls = controls }
+        if updatesLegacyControls { legacyControls = controls }
         else { systemFeatures = features }
         lastSyncDate = Date()
         if known { clearSystemReadError(read?.errorSetting ?? setting) }
@@ -8559,7 +11984,6 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             }
             return
         }
-        if receiveLegacyOptimizer(payload) { return }
         if receiveLegacySoundEffect(payload) { return }
         if [0x51, 0x53, 0x55, 0x5B, 0x57, 0x59].contains(payload[0]), payload[1] == equalizer.inquiryType {
             if payload[0] == 0x57 || payload[0] == 0x59 {
@@ -8730,10 +12154,62 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 return
             }
             invalidateSoundPressureReading()
+            if functions.intersection(0x50...0x53) != supportedFunctions2.intersection(0x50...0x53) {
+                resetExposureRead()
+            }
             soundPressure = SonySoundPressure(supportedFunctions: functions)
+            if functions.intersection([0x54, 0x55]) != supportedFunctions2.intersection([0x54, 0x55]) {
+                volumeProtection = SonyVolumeProtection(supportedFunctions: functions)
+            }
+            if functions.intersection([0x23, 0x24]) != supportedFunctions2.intersection([0x23, 0x24]) {
+                usbProtection = SonyUSBProtection(supportedFunctions: functions)
+            }
             invalidateWearingStatus()
             wearingStatus = SonyWearingStatus(supportedFunctions: functions)
+            if functions.intersection(SonyWearingPosition.capabilities) != supportedFunctions2.intersection(SonyWearingPosition.capabilities) {
+                resetWearingPosition(supportedFunctions: functions)
+                for query in wearingPosition.queryPayloads { send(query, type: SonyWearingPosition.frameType) }
+            }
+            let supportedFunctions2BeforeUpdate = supportedFunctions2
             supportedFunctions2 = functions
+            linkAutoSwitch = SonyLinkAutoSwitch(supportedFunctions2: functions)
+            if microphoneOperation.isSupported != functions.contains(SonyMicrophoneOperation.capability) {
+                if pendingChanges[.microphoneOperation] != nil || unconfirmedChanges[.microphoneOperation] != nil {
+                    fail(String(localized: "Microphone settings changed before the command could be sent."))
+                    return
+                }
+                for query in microphoneOperation.queryPayloads {
+                    systemReads[[0x0E] + query]?.isObsolete = true
+                }
+                microphoneOperation = SonyMicrophoneOperation(supportedFunctions2: functions)
+            }
+            if adaptiveVolumeWithLimitation.isSupported != functions.contains(SonyAdaptiveVolumeWithLimitation.function) {
+                if pendingChanges[.adaptiveVolumeWithLimitation] != nil || unconfirmedChanges[.adaptiveVolumeWithLimitation] != nil {
+                    fail(String(localized: "Headphones did not confirm the change."))
+                    return
+                }
+                for query in adaptiveVolumeWithLimitation.queryPayloads {
+                    systemReads[[0x0E] + query]?.isObsolete = true
+                }
+                adaptiveVolumeWithLimitation = SonyAdaptiveVolumeWithLimitation(supportedFunctions2: functions)
+            }
+            leAudioRestrictions.updateTable2(functions)
+            if (supportedFunctions2BeforeUpdate.intersection([0x60, 0x61, 0x62])) != functions.intersection([0x60, 0x61, 0x62]) {
+                for query in leAudioCapabilities.queryPayloads {
+                    systemReads[[SonyLEAudioCapabilities.frameType] + query]?.isObsolete = true
+                }
+                leAudioCapabilities = SonyLEAudioCapabilities(supportedFunctions2: functions)
+            }
+            speakerLighting = SonySpeakerLighting(supportedFunctions2: functions)
+            djControl = SonyDJControl(supportedFunctions2: functions)
+            karaoke = SonyKaraoke(supportedFunctions2: functions)
+            let nextAuracast = SonyAuracast(supportedFunctions2: functions)
+            if auracast.variant != nextAuracast.variant {
+                for query in auracast.queryPayloads {
+                    systemReads[[SonyAuracast.frameType] + query]?.isObsolete = true
+                }
+                auracast = nextAuracast
+            }
             for query in SonyConnectionIdentity.queryPayloads(frameType: type, supportedFunctions: supportedFunctions,
                                                              supportedFunctions2: functions) { send(query, type: type) }
             let previousCare = powerFeatures.batteryCare?.includesThreshold
@@ -8747,8 +12223,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                     powerReads[key]?.isRetired = true
                 }
             }
-            if pendingChanges[.voiceGuidance] != nil || pendingChanges[.voiceGuidanceVolume] != nil
-                || unconfirmedChanges[.voiceGuidance] != nil || unconfirmedChanges[.voiceGuidanceVolume] != nil {
+            let guidanceSettings = [.voiceGuidance, .voiceGuidanceVolume, .voiceGuidanceLanguage] + SonyVoiceGuidance.Tone.allCases.map(Setting.voiceGuidanceTone)
+            if guidanceSettings.contains(where: { pendingChanges[$0] != nil || unconfirmedChanges[$0] != nil }) {
                 fail(String(localized: "The voice guidance settings changed before the change was confirmed."))
                 return
             }
@@ -8756,9 +12232,27 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 voiceGuidanceReads[query]?.isObsolete = true
             }
             voiceGuidance = SonyVoiceGuidance(supportedFunctions: functions)
+            if pendingChanges[.musicHandover] != nil || unconfirmedChanges[.musicHandover] != nil {
+                fail(String(localized: "Playback switching became unavailable before the change was confirmed."))
+                return
+            }
+            musicHandoverReadOrdinal = nil
             multipoint = SonyMultipoint(supportedFunctions: functions)
             if isReady {
-                for payload in voiceGuidance.queryPayloads + multipoint.queryPayloads + soundPressure.queryPayloads + powerFeatures.queryPayloads(frameType: 0x0E) { send(payload, type: 0x0E) }
+                if let inquiry = multipoint.inventoryInquiryType {
+                    send([0x36, inquiry], type: type, prioritizing: true)
+                }
+                requestLEAudioRestrictions(frameType: type)
+                requestLEAudioCapabilities()
+                requestSpeakerLighting()
+                requestDJControl()
+                requestKaraoke()
+                requestAuracast()
+                for payload in voiceGuidance.queryPayloads + multipoint.queryPayloads + soundPressure.queryPayloads
+                    + volumeProtection.queryPayloads + powerFeatures.queryPayloads(frameType: 0x0E) { send(payload, type: 0x0E) }
+                for payload in usbProtection.queryPayloads { send(payload, type: 0x0E) }
+                for payload in linkAutoSwitch.queryPayloads { send(payload, type: 0x0E) }
+                for payload in microphoneOperation.queryPayloads + adaptiveVolumeWithLimitation.queryPayloads { send(payload, type: 0x0E) }
             }
             return
         }
@@ -8767,9 +12261,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         let supported = Self.asmByFunction.first(where: { functions.contains($0.function) })
         supportedFunctions = functions
         equalizer = SonyEqualizer(supportedFunctions: functions)
+        legacyOptimizer = SonyLegacyOptimizer(supportedFunctions: functions, generation: .v2)
         earTipFit = SonyEarTipFit(supportedFunctions: functions)
         headGesturePractice = SonyHeadGesturePractice(supportedFunctions: functions)
         audioFeatures = SonyAudioFeatures(supportedFunctions: functions)
+        leAudioRestrictions = SonyLEAudioRestrictions(supportedFunctions: functions, supportedFunctions2: supportedFunctions2)
         systemFeatures = SonySystemFeatures(supportedFunctions: functions)
         powerFeatures = SonyPowerFeatures(supportedFunctions: functions, supportedFunctions2: supportedFunctions2)
         playback = SonyPlayback(supportedFunctions: functions)
@@ -8965,8 +12461,15 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         retrySecondsRemaining = nil
         lastErrorMessage = nil
         lastSyncDate = Date()
+        if isInitialSync, !usesBluetoothLE, protocolInformation?.generation == .v2,
+           connectionTimeSyncSession != controlSession,
+           let payload = SonyConnectionEstablishedTime.payload(supportedFunctions: supportedFunctions, at: Date(), timeZone: .current) {
+            connectionTimeSyncSession = controlSession
+            send(payload)
+        }
+        if isInitialSync, supportsTable2 { send([0x06, 0x00], type: 0x0E) }
         if batteryLevel == nil { requestBattery() }
-        if equalizer.presetID == nil { refreshEqualizer() }
+        if equalizer.presetID == nil || (isInitialSync && equalizer.supportsULT) { refreshEqualizer() }
         if firmwareVersion == nil { send([0x04, 0x02]) }
         if isInitialSync {
             if connectionTransition?.controlReady(session: controlSession) == true {
@@ -8979,13 +12482,13 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             commonConnectionHoldAddress = nil
             commonConnectionFailureWasConnected = nil
             requestAudioFeatures(initial: true)
-            if supportsTable2 { send([0x06, 0x00], type: 0x0E) }
+            if let query = displayFirmwareQuery { send(query) }
         }
     }
 
     private func parseBattery(_ payload: [UInt8]) {
         var updated = batteries
-        guard updated.update(payload) else { return }
+        guard updated.update(payload), SonyBatteries.queryTypes(supportedFunctions: supportedFunctions).contains(payload[1]) else { return }
         let query: [UInt8] = [0x22, payload[1]]
         if payload[0] == 0x23 {
             guard let read = batteryReads[query], read.transmitted, receivedAfter(read.transmissionOrdinal) else { return }
@@ -9069,7 +12572,8 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
                 if part == .right, rightConnected != true { return nil }
             }
             return SonyLowBatteryPolicy.Reading(part: part, level: value.level,
-                                               isCharging: value.isCharging, observedAt: observedAt)
+                                               isCharging: value.isCharging, observedAt: observedAt,
+                                               reportedCaseThreshold: type == 0x0A ? value.lowBatteryThreshold : nil)
         }
         lowBatteryReadings = readings
     }
@@ -9116,7 +12620,7 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         if let read, read.setting == .equalizerReadback, let requestID = read.requestID,
            settingRequests[.equalizerReadback] == requestID {
-            if equalizer.generation == .v1, equalizer.settings == nil {
+            if (equalizer.generation == .v1 || equalizer.supportsULT), equalizer.settings == nil {
                 failEqualizerReadback(message: String(localized: "The headphones did not report an equalizer curve."))
             } else {
                 confirmSetting(.equalizerReadback, value: [])
@@ -9125,6 +12629,10 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
         }
         if let equalizerPreset {
             Self.logger.info("Equalizer ready; preset=\(equalizerPreset.title, privacy: .public)")
+        }
+        if equalizer.supportsULT, payload[0] == 0x59 {
+            send([0x5A, payload[1]])
+            if equalizer.rawValues == nil, let query = equalizer.parameterQueryPayload { send(query) }
         }
     }
 
@@ -9583,6 +13091,11 @@ final class SonyHeadphonesController: NSObject, ObservableObject {
             firmwareUpdateIdentity = identity
         }
         return true
+    }
+
+    private var displayFirmwareQuery: [UInt8]? {
+        guard protocolInformation?.generation == .v2 else { return nil }
+        return SonyDisplayFirmwareVersion.query(supportedFunctions: supportedFunctions)
     }
 
     private func resetFirmwareUpdateReads() {

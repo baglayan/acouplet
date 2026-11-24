@@ -47,8 +47,8 @@ final class SonyLegacyIndicatorsTests: XCTestCase {
                     XCTAssertTrue(indicators.update([command, 0, type, status]))
                     XCTAssertEqual(indicators.upscalingTypeValue, type)
                     XCTAssertEqual(indicators.upscalingStatusValue, status)
-                    XCTAssertEqual(indicators.upscalingType, SonyLegacyIndicators.UpscalingType(rawValue: type))
-                    XCTAssertEqual(indicators.upscalingStatus, SonyLegacyIndicators.UpscalingStatus(rawValue: status))
+                    XCTAssertEqual(indicators.upscalingType, type < 3 ? SonyDSEEType(rawValue: type) : nil)
+                    XCTAssertEqual(indicators.upscalingStatus, SonyUpscalingStatus(rawValue: status))
                 }
             }
         }
@@ -111,7 +111,7 @@ final class SonyLegacyIndicatorsTests: XCTestCase {
             indicators.update([0x25, 1, 1, 0])
             indicators.invalidateRead(query)
             XCTAssertEqual(indicators.codec, query == [0x18, 0] ? nil : .ldac)
-            XCTAssertEqual(indicators.upscalingType, query == [0x14, 0] ? nil : .dseeHXAI)
+            XCTAssertEqual(indicators.upscalingType, query == [0x14, 0] ? nil : .extreme)
             XCTAssertEqual(indicators.upscalingStatus, query == [0x14, 0] ? nil : .valid)
             XCTAssertEqual(indicators.leftConnected, query == [0x24, 1] ? nil : true)
             XCTAssertEqual(indicators.rightConnected, query == [0x24, 1] ? nil : false)

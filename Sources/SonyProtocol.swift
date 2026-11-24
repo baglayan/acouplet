@@ -480,7 +480,7 @@ enum SonyDeviceModel: String, CaseIterable, Sendable {
 
     var isEarbuds: Bool { formFactor == .earbuds }
 
-    var offersLDACOnlyWithoutMultipoint: Bool { self == .whXM4 }
+    var offersLDACOnlyWithoutMultipoint: Bool { self == .whXM4 || self == .whXB910N || self == .whULT900N }
 
     var isSpeaker: Bool {
         switch formFactor {
@@ -814,7 +814,11 @@ struct BatteryReading: Equatable, Sendable {
     var isCharging: Bool { chargingState == .charging }
 
     var isBelowLowBatteryThreshold: Bool? {
-        guard let lowBatteryThreshold, lowBatteryThreshold <= 100 else { return nil }
+        lowBatteryThreshold.flatMap { Self.isBelowLowBatteryThreshold(level: level, lowBatteryThreshold: $0) }
+    }
+
+    static func isBelowLowBatteryThreshold(level: Int, lowBatteryThreshold: UInt8) -> Bool? {
+        guard lowBatteryThreshold <= 100 else { return nil }
         return level < Int(lowBatteryThreshold)
     }
 
@@ -851,12 +855,9 @@ struct SonyBatteries: Equatable, Sendable {
     var isCharging: Bool { single?.isCharging ?? ([left, right].compactMap { $0 }.contains { $0.isCharging }) }
 
     static func queryTypes(supportedFunctions: Set<UInt8>) -> [UInt8] {
-        [(UInt8(0x20), UInt8(0x28), UInt8(0x00), UInt8(0x08)),
-         (0x21, 0x29, 0x01, 0x09), (0x22, 0x2A, 0x02, 0x0A)].compactMap { function, thresholdFunction, type, thresholdType in
-            if supportedFunctions.contains(function) { return type }
-            if supportedFunctions.contains(thresholdFunction) { return thresholdType }
-            return nil
-        }
+        let headphones = [UInt8(0x20), 0x21, 0x28, 0x29].first(where: supportedFunctions.contains)
+        let cradle = [UInt8(0x22), 0x2A].first(where: supportedFunctions.contains)
+        return [headphones, cradle].compactMap { $0.map { $0 - 0x20 } }
     }
 
     @discardableResult

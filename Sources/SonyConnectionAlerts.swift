@@ -25,6 +25,40 @@ enum SonyConnectionAlertAction: UInt8, Sendable {
     case positive = 0x01
 }
 
+struct SonyVoiceAssistantSideAlert: Equatable, Sendable {
+    enum Action: UInt8, Sendable {
+        case cancel = 0x00, left, right
+    }
+
+    static let capability: UInt8 = 0x92
+    static let replyPrefix: [UInt8] = [0x98, 0x02]
+    let messageID: UInt8
+    let defaultSide: Action
+
+    init?(payload: [UInt8]) {
+        guard payload.count == 4, payload.starts(with: [0x99, 0x02]), payload[2] <= 3, payload[3] <= 1 else { return nil }
+        messageID = payload[2]
+        defaultSide = payload[3] == 0 ? .left : .right
+    }
+
+    var usesTouchSensor: Bool { messageID.isMultiple(of: 2) == false }
+    var restartsHeadphones: Bool { messageID <= 1 }
+
+    func replyPayload(_ action: Action) -> [UInt8] { Self.replyPrefix + [messageID, action.rawValue] }
+}
+
+enum SonyVoiceAssistantSetup {
+    static let capability: UInt8 = 0x93
+    static let inquiry: UInt8 = 0x03
+    static let query: [UInt8] = [0x92, inquiry]
+
+    static func options(from payload: [UInt8]) -> [SonyVoiceAssistantOption]? {
+        guard payload.count >= 3, payload.starts(with: [0x93, inquiry]),
+              payload.count == 3 + Int(payload[2]), payload.dropFirst(3).allSatisfy({ $0 <= 2 }) else { return nil }
+        return payload.dropFirst(3).map { SonyVoiceAssistantOption(rawValue: 0x31 + $0) }
+    }
+}
+
 struct SonyConnectionAffectedFeature: RawRepresentable, Equatable, Sendable {
     let rawValue: UInt8
 
@@ -105,12 +139,28 @@ struct SonyConnectionAlert: Equatable, Sendable {
         format == .flexible && messageID == 0x0A
     }
 
+    var isLightingModeChange: Bool {
+        format == .fixed && messageID == 0x88
+    }
+
+    var isAdaptiveVolumeCaution: Bool {
+        format == .fixed && (messageID == 0x5A || messageID == 0x5B)
+    }
+
+    var isTurnKeyEqualizerImport: Bool {
+        format == .fixed && messageID == 0x93
+    }
+
     var isLegacyConnectionChange: Bool {
         format == .legacyFixed && messageID == 0x01 && actionType == .positiveNegative
     }
 
     var availableActions: [SonyConnectionAlertAction] {
-        guard requestedMode != nil || isMultipointChange || isLegacyConnectionChange || isBluetoothStandbyChange else { return [] }
+        if isAdaptiveVolumeCaution {
+            return actionType == .positiveConfirmationWithReply || actionType == .positiveNegative ? [.positive] : []
+        }
+        guard requestedMode != nil || isMultipointChange || isLegacyConnectionChange || isBluetoothStandbyChange || isLightingModeChange
+            || isTurnKeyEqualizerImport else { return [] }
         return switch actionType {
         case .positiveNegative: [.negative, .positive]
         case .positiveConfirmationWithReply: [.positive]

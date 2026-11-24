@@ -24,6 +24,16 @@ struct SonyLowBatteryPolicy: Codable, Equatable {
         let level: Int
         let isCharging: Bool
         let observedAt: Date
+        let reportedCaseThreshold: UInt8?
+
+        init(part: Part, level: Int, isCharging: Bool, observedAt: Date,
+             reportedCaseThreshold: UInt8? = nil) {
+            self.part = part
+            self.level = level
+            self.isCharging = isCharging
+            self.observedAt = observedAt
+            self.reportedCaseThreshold = reportedCaseThreshold
+        }
 
         func isFresh(at date: Date) -> Bool {
             (0...100).contains(level) && observedAt.timeIntervalSince1970.isFinite
@@ -67,6 +77,15 @@ struct SonyLowBatteryPolicy: Codable, Equatable {
         for group in groups {
             let available = fresh.filter { $0.part.group == group }
             guard !available.isEmpty else { continue }
+            if group == .caseBattery, let reading = available.first, let threshold = reading.reportedCaseThreshold {
+                guard let belowThreshold = BatteryReading.isBelowLowBatteryThreshold(level: reading.level, lowBatteryThreshold: threshold) else { continue }
+                if !belowThreshold || reading.isCharging {
+                    deviceRecords[group] = nil
+                } else if deviceRecords[group] == nil {
+                    warnings.append(Warning(deviceID: deviceID, group: group, reading: reading, evaluatedAt: date))
+                }
+                continue
+            }
             let discharging = available.filter { !$0.isCharging }
             if discharging.allSatisfy({ $0.level >= 50 }) {
                 deviceRecords[group] = nil

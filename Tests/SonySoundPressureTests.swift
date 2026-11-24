@@ -2,8 +2,10 @@ import XCTest
 @testable import Acouplet
 
 final class SonySoundPressureTests: XCTestCase {
-    func testOnlyNegotiatedTWS2DialectAcceptsT2Replies() {
-        for functions: Set<UInt8> in [[], [0x50, 0x51, 0x52], [0x54, 0x55]] {
+    private let levelQueryPayload: [UInt8] = [0x5A, 3]
+
+    func testOnlyNegotiatedDialectAcceptsT2Replies() {
+        for functions: Set<UInt8> in [[], [0x54, 0x55]] {
             var pressure = SonySoundPressure(supportedFunctions: functions)
             XCTAssertFalse(pressure.isSupported)
             XCTAssertTrue(pressure.queryPayloads.isEmpty)
@@ -12,7 +14,7 @@ final class SonySoundPressureTests: XCTestCase {
         var pressure = SonySoundPressure(supportedFunctions: [0x53])
         XCTAssertTrue(pressure.isSupported)
         XCTAssertEqual(pressure.queryPayloads, [[0x50, 3], [0x56, 3]])
-        XCTAssertEqual(SonySoundPressure.levelQueryPayload, [0x5A, 3])
+        XCTAssertEqual(pressure.levelQueryPayload, levelQueryPayload)
         let prior = pressure
         for payload in validPayloads {
             for type: UInt8 in [0, 0x0C, 0x10, 0xFF] {
@@ -26,6 +28,224 @@ final class SonySoundPressureTests: XCTestCase {
                 XCTAssertEqual(pressure, prior)
             }
         }
+    }
+
+    @MainActor
+    func testControllerQueriesAndDisplaysEachNegotiatedVariant() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        for inquiry: UInt8 in 0...3 {
+            controller.simulateDeviceConnection(named: "WF-1000XM5", simulatedTable2Functions: [0x50 + inquiry])
+            XCTAssertEqual(controller.soundPressure.inquiryType, inquiry)
+            XCTAssertEqual(controller.soundPressure.queryPayloads, [[0x56, inquiry]])
+            XCTAssertEqual(controller.soundPressure.available, true)
+            controller.refreshSoundPressure()
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x5A, inquiry])
+            acknowledgeSimulatedCommands(controller)
+            deliver([0x5B, (inquiry + 1) % 4, 75, 0xFF], to: controller)
+            XCTAssertNil(controller.soundPressure.reading)
+            XCTAssertTrue(controller.isReadingSoundPressure)
+            deliver([0x5B, inquiry, 75, 0xFF], to: controller)
+            XCTAssertEqual(controller.soundPressure.reading, .decibels(75))
+            XCTAssertFalse(controller.isReadingSoundPressure)
+            controller.simulateControlLoss()
+        }
+    }
+
+    @MainActor
+    func testControllerReadsCurrentExposureAndCompletesBatchedHistory() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5", simulatedTable2Functions: [0x53])
+        defer { controller.simulateControlLoss() }
+        let left: [UInt8] = [1, 0, 0, 0, 9, 0, 1, 5, 0x07, 0x27, 0x0E, 0, 3]
+        let right: [UInt8] = [2, 0, 0, 0, 9, 0, 1, 5, 0x07, 0x27, 0x0E, 0, 5]
+
+        controller.readExposure(current: true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x52, 3])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x53, 3, 1, 2] + left + right, to: controller)
+        XCTAssertEqual(controller.currentExposure?.listeningMinutes, 5)
+        XCTAssertEqual(controller.currentExposure?.averageDecibels, 100)
+        XCTAssertEqual(controller.currentExposure?.ambientMinutes, 8)
+        XCTAssertNil(controller.exposureHistory)
+
+        controller.defersSimulatedWrites = true
+        controller.readExposure(current: false)
+        controller.defersSimulatedWrites = false
+        let final: [UInt8] = [0x55, 3, 2, 2, 2] + left + right
+        deliver(final, to: controller)
+        XCTAssertNil(controller.exposureHistory)
+        controller.completeSimulatedWrite()
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x54, 3, 1, 1] + Array(repeating: 0, count: 12))
+        acknowledgeSimulatedCommands(controller)
+
+        deliver([0x55, 3, 1, 1, 1] + left, to: controller)
+        deliver(Array(final.dropLast()), to: controller)
+        XCTAssertTrue(controller.isReadingExposure)
+        XCTAssertNil(controller.exposureHistory)
+        deliver(final, to: controller)
+        XCTAssertFalse(controller.isReadingExposure)
+        XCTAssertEqual(controller.exposureHistory?.listeningMinutes, 5)
+        XCTAssertEqual(controller.exposureHistory?.averageDecibels, 100)
+        XCTAssertEqual(controller.exposureHistory?.ambientMinutes, 8)
+        XCTAssertNil(controller.exposureReadError)
+    }
+
+    @MainActor
+    func testExposureTransferErrorStopsTransferAndReconnectClearsState() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM5", simulatedTable2Functions: [0x50])
+        defer { controller.simulateControlLoss() }
+        controller.readExposure(current: false)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x55, 0, 4, 0], to: controller)
+        XCTAssertFalse(controller.isReadingExposure)
+        XCTAssertNotNil(controller.exposureReadError)
+        XCTAssertNil(controller.exposureHistory)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x54, 0, 3] + Array(repeating: 0, count: 6))
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertFalse(controller.canReadExposure)
+        controller.simulateDeviceConnection(named: "WH-1000XM5", simulatedTable2Functions: [0x50])
+        XCTAssertTrue(controller.canReadExposure)
+        XCTAssertNil(controller.exposureReadError)
+    }
+
+    @MainActor
+    func testControllerConfirmsModeOnlyFromMatchingTable2Notification() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM5", simulatedTable2Functions: [0x52])
+        defer { controller.simulateControlLoss() }
+        deliver([0x59, 2, 1, 1], to: controller)
+        controller.setSoundPressureMode(.preview)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 2, 1, 0])
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertEqual(controller.soundPressure.mode, .off)
+        deliver([0x59, 3, 1, 0], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.soundPressureMode])
+        deliver([0x59, 2, 1, 0], to: controller)
+        XCTAssertEqual(controller.soundPressure.mode, .preview)
+        XCTAssertNil(controller.pendingChanges[.soundPressureMode])
+    }
+
+    @MainActor
+    func testVolumeProtectionReportsSafeVolumeAndConfirmsOnlyEnabledMaxVolumeWrites() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM5", simulatedTable2Functions: [0x54, 0x55])
+        defer { controller.simulateControlLoss() }
+        XCTAssertEqual(controller.volumeProtection.queryPayloads, [[0x50, 5], [0x52, 5], [0x56, 5]])
+        XCTAssertNil(controller.volumeProtection.safeVolumeEnabled)
+        deliver([0x59, 4, 1, 0], to: controller)
+        deliver([0x55, 4, 1], to: controller)
+        XCTAssertEqual(controller.volumeProtection.safeVolumeEnabled, true)
+        XCTAssertEqual(controller.volumeProtection.automaticallyLimiting, false)
+        XCTAssertEqual(controller.volumeProtection.hearingProfile, .sensitive)
+
+        controller.enableMaxVolume()
+        XCTAssertNil(controller.simulatedPendingFrame)
+        deliver([0x51, 5, 1, 31], to: controller)
+        deliver([0x53, 5, 1], to: controller)
+        deliver([0x57, 5, 3], to: controller)
+        controller.setMaxVolumePreset(.percent30)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        controller.enableMaxVolume()
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x54, 5, 0])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x53, 5, 0], to: controller)
+        XCTAssertNotNil(controller.pendingChanges[.maxVolumeEnabled])
+        XCTAssertEqual(controller.volumeProtection.maxVolumeEnabled, false)
+        deliver([0x55, 5, 0], to: controller)
+        XCTAssertEqual(controller.volumeProtection.maxVolumeEnabled, true)
+        XCTAssertNil(controller.pendingChanges[.maxVolumeEnabled])
+
+        controller.setMaxVolumePreset(.percent30)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 5, 0])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x59, 5, 0], to: controller)
+        XCTAssertEqual(controller.volumeProtection.limitPreset, .percent30)
+        XCTAssertNil(controller.pendingChanges[.maxVolumePreset])
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.dropFirst().first == 4 })
+    }
+
+    func testVolumeProtectionKeepsUnknownStatesAndRejectsUnadvertisedStates() {
+        var model = SonyVolumeProtection(supportedFunctions: [0x54])
+        XCTAssertTrue(model.queryPayloads.isEmpty)
+        XCTAssertNil(model.safeVolumeEnabled)
+        XCTAssertNil(model.automaticallyLimiting)
+        XCTAssertFalse(model.update([0x53, 5, 0]))
+        XCTAssertFalse(model.update([0x59, 4, 1, 0], frameType: 0x0C))
+        XCTAssertFalse(model.update([0x59, 4, 1, 2]))
+        XCTAssertTrue(model.update([0x59, 4, 0, 0]))
+        XCTAssertEqual(model.safeVolumeEnabled, true)
+        XCTAssertEqual(model.automaticallyLimiting, true)
+        XCTAssertNil(model.enablePayload)
+    }
+
+    @MainActor
+    func testUSBProtectionReportsOnlyNegotiatedStatusAndDiscardsStaleReads() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM5", controlBusy: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x07, 0, 1, 0x90, 0], type: 0x0C, to: controller)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(controller.usbProtection.ports.isEmpty)
+        deliver([0x07, 0, 1, 0x23, 0], to: controller)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertEqual(controller.usbProtection.queryPayloads, [[0x20, 2], [0x22, 2]])
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E }.map(\.payload),
+                       [[0x06, 0], [0x20, 2], [0x22, 2]])
+        deliver([0x21, 2, 0], to: controller)
+        deliver([0x25, 2, 0], type: 0x0C, to: controller)
+        deliver([0x25, 3, 0], to: controller)
+        XCTAssertNil(controller.usbProtection.ports[.moisture]?.detected)
+        XCTAssertNil(controller.usbProtection.ports[.overheat])
+        XCTAssertEqual(controller.usbProtection.ports[.moisture]?.monitoring, .whileNotCharging)
+        deliver([0x25, 2, 0], to: controller)
+        deliver([0x23, 2, 1], to: controller)
+        XCTAssertEqual(controller.usbProtection.ports[.moisture]?.detected, true)
+        XCTAssertTrue(controller.usbProtection.queryPayloads.isEmpty)
+        deliver([0x25, 2, 1], to: controller)
+        XCTAssertEqual(controller.usbProtection.ports[.moisture]?.detected, false)
+        controller.simulateControlLoss()
+        XCTAssertTrue(controller.usbProtection.ports.isEmpty)
+    }
+
+    @MainActor
+    func testUSBCautionAcknowledgementPreservesDeviceReportedProtectionState() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM5", simulatedTable2Functions: [0x23, 0x24])
+        defer { controller.simulateControlLoss() }
+        XCTAssertEqual(controller.usbProtection.queryPayloads, [[0x20, 2], [0x22, 2], [0x20, 3], [0x22, 3]])
+        deliver([0x25, 2, 0], to: controller)
+        deliver([0x25, 3, 0], to: controller)
+        deliver([0x99, 0, 0x92, 2], type: 0x0C, to: controller)
+        deliver([0x99, 0, 0x94, 2], type: 0x0C, to: controller)
+        XCTAssertTrue(controller.usbProtection.cautions.isEmpty)
+        deliver([0x99, 0, 0x91, 2], type: 0x0C, to: controller)
+        deliver([0x99, 0, 0x95, 2], type: 0x0C, to: controller)
+        let session = controller.notificationSession
+        controller.acknowledgeUSBCaution(.moisture, expectedSession: session &+ 1)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        controller.acknowledgeUSBCaution(.moisture, expectedSession: session)
+        XCTAssertEqual(controller.simulatedPendingFrame?.type, 0x0C)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x98, 0, 0x91, 1])
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertFalse(controller.usbProtection.cautions.contains(.moisture))
+        XCTAssertEqual(controller.usbProtection.ports[.moisture]?.detected, true)
+        controller.acknowledgeUSBCaution(.overheat, expectedSession: session)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x98, 0, 0x95, 1])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x29, 3, 1], to: controller)
+        XCTAssertFalse(controller.usbProtection.cautions.contains(.overheat))
+        XCTAssertEqual(controller.usbProtection.heatAcknowledgementAccepted, false)
+        controller.acknowledgeUSBCaution(.overheat, expectedSession: session)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        deliver([0x29, 3, 0], to: controller)
+        XCTAssertFalse(controller.usbProtection.cautions.contains(.overheat))
+        XCTAssertEqual(controller.usbProtection.heatAcknowledgementAccepted, true)
+        XCTAssertEqual(controller.usbProtection.ports[.overheat]?.detected, true)
+        deliver([0x25, 3, 1], to: controller)
+        XCTAssertEqual(controller.usbProtection.ports[.overheat]?.detected, false)
     }
 
     func testCapabilityUsesUnsignedFieldsAndPositiveIntervalWithoutScalingLevel() {
@@ -165,12 +385,12 @@ final class SonySoundPressureTests: XCTestCase {
         controller.refreshSoundPressure()
         controller.defersSimulatedWrites = false
         XCTAssertTrue(controller.isReadingSoundPressure)
-        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == SonySoundPressure.levelQueryPayload })
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == levelQueryPayload })
         deliver([0x5B, 3, 80, 0xFF], to: controller)
         XCTAssertNil(controller.soundPressure.reading)
         controller.completeSimulatedWrite()
         acknowledgeSimulatedCommands(controller)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 1)
         deliver([0x5B, 3, 80, 0xFF], type: 0x0C, to: controller)
         for payload: [UInt8] in [[0x5B, 3, 80], [0x5B, 3, 80, 0xFF, 0], [0x5B, 2, 80, 0xFF], [0x5B, 3, 0xFF, 0xFF]] {
             deliver(payload, to: controller)
@@ -203,7 +423,7 @@ final class SonySoundPressureTests: XCTestCase {
             }
             acknowledgeSimulatedCommands(controller)
             let commands = controller.simulatedTransmittedFrames.filter { $0.type != 0x01 }
-            XCTAssertFalse(commands.contains { $0.payload == SonySoundPressure.levelQueryPayload })
+            XCTAssertFalse(commands.contains { $0.payload == levelQueryPayload })
             XCTAssertTrue(commands.contains { $0.type == 0x0E && $0.payload == [0x36, 2] })
             XCTAssertEqual(commands.map(\.sequence), commands.indices.map { UInt8($0 % 2) })
             XCTAssertNil(controller.simulatedPendingFrame)
@@ -217,7 +437,7 @@ final class SonySoundPressureTests: XCTestCase {
             acknowledgeSimulatedCommands(controller)
             deliver([0x5B, 3, 80, 0xFF], to: controller)
             XCTAssertEqual(controller.soundPressure.reading, .decibels(80))
-            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 1)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 1)
         }
     }
 
@@ -242,7 +462,7 @@ final class SonySoundPressureTests: XCTestCase {
             acknowledgeSimulatedCommands(controller)
             XCTAssertEqual(controller.isReadingSoundPressure, testCase.readable)
             XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E }.map(\.payload),
-                           testCase.readable ? [SonySoundPressure.levelQueryPayload] : [])
+                           testCase.readable ? [levelQueryPayload] : [])
             deliver([0x5B, 3, 80, 0xFF], to: controller)
             XCTAssertEqual(controller.soundPressure.reading, testCase.readable ? .decibels(80) : nil)
             XCTAssertFalse(controller.isReadingSoundPressure)
@@ -280,7 +500,7 @@ final class SonySoundPressureTests: XCTestCase {
             deliver([0x5B, 3, 80, 0xFF], to: controller)
             XCTAssertNil(controller.soundPressure.reading, "Change \(change)")
             XCTAssertFalse(controller.isReadingSoundPressure)
-            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 1)
+            XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 1)
         }
     }
 
@@ -296,15 +516,15 @@ final class SonySoundPressureTests: XCTestCase {
         deliver([0x5B, 3, 80, 0xFF], to: controller)
         controller.refreshSoundPressure()
         controller.refreshSoundPressure(automatically: true)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 1)
         try await Task.sleep(for: .milliseconds(1_100))
         controller.refreshSoundPressure(automatically: true)
         acknowledgeSimulatedCommands(controller)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 2)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 2)
         deliver([0x5B, 3, 81, 0xFF], to: controller)
         deliver([0x51, 3, 1, 0, 0, 0, 0, 0, 16], to: controller)
         controller.refreshSoundPressure(automatically: true)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 2)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 2)
         XCTAssertFalse(controller.isReadingSoundPressure)
     }
 
@@ -322,15 +542,15 @@ final class SonySoundPressureTests: XCTestCase {
         XCTAssertTrue(controller.isReady)
         controller.refreshSoundPressure()
         controller.refreshSoundPressure(automatically: true)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 1)
         deliver([0x5B, 3, 80, 0xFF], to: controller)
         XCTAssertNil(controller.soundPressure.reading)
         XCTAssertNotNil(controller.soundPressureReadError)
         controller.refreshSoundPressure(automatically: true)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 1)
         controller.refreshSoundPressure()
         acknowledgeSimulatedCommands(controller)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 2)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 2)
         deliver([0x5B, 3, 82, 0xFF], to: controller)
         XCTAssertEqual(controller.soundPressure.reading, .decibels(82))
         XCTAssertNil(controller.soundPressureReadError)
@@ -350,12 +570,12 @@ final class SonySoundPressureTests: XCTestCase {
         XCTAssertFalse(controller.isReadingSoundPressure)
         XCTAssertFalse(controller.canRefreshSoundPressure)
         controller.refreshSoundPressure()
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 1)
         deliver([0x5B, 3, 80, 0xFF], to: controller)
         XCTAssertNil(controller.soundPressure.reading)
         controller.refreshSoundPressure(automatically: true)
         acknowledgeSimulatedCommands(controller)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 2)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 2)
         deliver([0x5B, 3, 82, 0xFF], to: controller)
         XCTAssertEqual(controller.soundPressure.reading, .decibels(82))
         XCTAssertNil(controller.soundPressureReadError)
@@ -371,7 +591,7 @@ final class SonySoundPressureTests: XCTestCase {
         let session = controller.simulatedControlSession
         controller.refreshSoundPressure(automatically: true)
         other.refreshEqualizer()
-        XCTAssertEqual(controller.simulatedPendingFrame?.payload, SonySoundPressure.levelQueryPayload)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, levelQueryPayload)
         XCTAssertFalse(controller.soundPressureAutomaticRefreshSuspended)
         let frame = try XCTUnwrap(controller.simulatedPendingFrame)
         let otherFrame = try XCTUnwrap(other.simulatedPendingFrame)
@@ -401,10 +621,10 @@ final class SonySoundPressureTests: XCTestCase {
         XCTAssertTrue(controller.soundPressureAutomaticRefreshSuspended)
         XCTAssertNil(controller.soundPressureReadError)
         for _ in 0..<3 { controller.refreshSoundPressure(automatically: true) }
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 2)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 2)
         controller.refreshSoundPressure()
         XCTAssertFalse(controller.soundPressureAutomaticRefreshSuspended)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 3)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 3)
         acknowledgeSimulatedCommands(controller)
         deliver([0x5B, 3, 80, 0xFF], to: controller)
         XCTAssertEqual(controller.soundPressure.reading, .decibels(80))
@@ -412,7 +632,7 @@ final class SonySoundPressureTests: XCTestCase {
         deliver([0x51, 3, 1, 0, 0, 0, 0, 1, 16], to: controller)
         try await Task.sleep(for: .milliseconds(1_100))
         controller.refreshSoundPressure(automatically: true)
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, 4)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == levelQueryPayload }.count, 4)
         acknowledgeSimulatedCommands(controller)
     }
 

@@ -594,9 +594,9 @@ final class SonyDeviceActionControllerTests: XCTestCase {
         XCTAssertNil(controller.soundPressure.reading)
         XCTAssertFalse(controller.isReadingSoundPressure)
         XCTAssertFalse(controller.canRefreshSoundPressure)
-        let reads = controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count
+        let reads = controller.simulatedTransmittedFrames.filter { $0.payload == [0x5A, 0x03] }.count
         controller.refreshSoundPressure()
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == SonySoundPressure.levelQueryPayload }.count, reads)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x5A, 0x03] }.count, reads)
         controller.simulateControlLoss()
     }
 

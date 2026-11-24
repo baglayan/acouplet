@@ -2,6 +2,181 @@ import XCTest
 @testable import Acouplet
 
 final class SonySourceControllerTests: XCTestCase {
+    #if !ACOUPLET_PUBLIC_APIS_ONLY
+    @MainActor
+    func testXM5HandshakeReadsOwnedSourceBeforeBootstrappingPlayback() throws {
+        enum Table2Delivery: CaseIterable { case beforeAcknowledgment, afterAcknowledgment, withheld }
+        let profile = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        profile.simulateDeviceConnection(named: "WF-1000XM5", galleryModel: .wfXM5)
+        let functions = profile.supportedFunctions.sorted()
+        let functions2 = profile.supportedFunctions2.sorted()
+        profile.simulateControlLoss()
+        let supportFunctions: [UInt8] = [0x07, 0, UInt8(functions.count)] + functions.flatMap { [$0, 0] }
+        let table2Functions: [UInt8] = [0x07, 0, UInt8(functions2.count)] + functions2.flatMap { [$0, 0] }
+        let localAddress = "02:00:00:00:00:01"
+        let playbackQueries: [[UInt8]] = [[0xA0, 1], [0xA2, 1], [0xA6, 1], [0xA6, 0x20]]
+
+        for delivery in Table2Delivery.allCases {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+            defer { controller.simulateControlLoss() }
+            controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+            var playbackBeforeSource = false
+            for _ in 0..<128 {
+                guard let frame = controller.simulatedPendingFrame else { break }
+                let query = frame.payload
+                let reply: [UInt8]?
+                if frame.type == 0x0E {
+                    switch query {
+                    case [0x06, 0]: reply = delivery == .withheld ? nil : table2Functions
+                    case [0x36, 2]: reply = inventory(command: 0x37, selected: 1)
+                    default: reply = nil
+                    }
+                } else {
+                    switch query {
+                    case [0x04, 1]: reply = [0x05, 1, 10] + Array("WF-1000XM5".utf8)
+                    case [0x04, 3]: reply = [0x05, 3, 0x30, 1]
+                    case [0x06, 0]: reply = supportFunctions
+                    case [0x60, 0x17]: reply = [0x61, 0x17, 2, 0, 1, 20, 1, 1, 1, 20, 1]
+                    case [0x62, 0x17]: reply = [0x63, 0x17, 0]
+                    case [0x66, 0x17]: reply = [0x67, 0x17, 1, 1, 0, 0, 10]
+                    case [0xA0, 1]: reply = [0xA1, 1, 31, 16]
+                    case [0xA2, 1]: reply = [0xA3, 1, 0, 2, 0]
+                    case [0xA6, 1]: reply = [0xA7, 1, 1, 0, 1, 0, 1, 0, 1, 0]
+                    case [0xA6, 0x20]: reply = [0xA7, 0x20, 17]
+                    default: reply = nil
+                    }
+                }
+                let replyBeforeAcknowledgment = frame.type == 0x0E && query == [0x06, 0] && delivery == .beforeAcknowledgment
+                if let reply, replyBeforeAcknowledgment { deliver(reply, type: frame.type, to: controller) }
+                controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - frame.sequence, payload: []))
+                if let reply, !replyBeforeAcknowledgment { deliver(reply, type: frame.type, to: controller) }
+                if controller.hasCurrentMusicVolumeRead, !controller.hasCurrentMusicSourceContext(for: localAddress) {
+                    playbackBeforeSource = true
+                }
+            }
+            XCTAssertNil(controller.simulatedPendingFrame)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.playback.volume, 17)
+            XCTAssertTrue(controller.hasFreshMusicVolumeReadback)
+            let frames = controller.simulatedTransmittedFrames.filter { $0.type != 1 }
+            XCTAssertEqual(frames.filter { $0.type == 0x0E && $0.payload == [0x06, 0] }.count, 1)
+            if delivery == .withheld {
+                XCTAssertFalse(controller.hasCurrentTable2Capabilities)
+                XCTAssertFalse(controller.hasCurrentMusicSourceContext(for: localAddress))
+                XCTAssertTrue(playbackBeforeSource)
+                XCTAssertTrue(controller.canControlMusicVolume)
+                continue
+            }
+            let ready = try XCTUnwrap(frames.firstIndex { $0.type == 0x0C && $0.payload == [0x66, 0x17] })
+            let inventory = try XCTUnwrap(frames.firstIndex { $0.type == 0x0E && $0.payload == [0x36, 2] })
+            XCTAssertLessThanOrEqual(inventory - ready, 3, "Source inventory should follow T2 discovery and at most one pending read")
+            XCTAssertTrue(controller.hasCurrentMusicSourceContext(for: localAddress))
+            XCTAssertFalse(playbackBeforeSource)
+            XCTAssertEqual(frames.filter { $0.type == 0x0E && $0.payload == [0x36, 2] }.count, 1)
+            XCTAssertEqual(frames.filter { $0.type == 0x0C && playbackQueries.contains($0.payload) }.map(\.payload), playbackQueries)
+        }
+    }
+
+    @MainActor
+    func testLDACPreparationRequiresFreshSourceAndPreservesSourceKeeping() throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5", simulatedTable2Functions: [0x32, 0x31])
+        defer { controller.simulateControlLoss() }
+        deliver([0x39, 2, 1], to: controller)
+        XCTAssertEqual(controller.ldacPreparationIssue(for: "02:00:00:00:00:01"), .readingSources)
+
+        deliver([0x33, 2, 0, 0], to: controller)
+        deliver(inventory(command: 0x37, selected: 2), to: controller)
+        deliver([0x37, 1, 1], to: controller)
+        let mac = try XCTUnwrap(controller.multipoint.devices.first)
+        XCTAssertEqual(controller.ldacPreparationIssue(for: mac.address), .selectMac(mac))
+        XCTAssertNil(controller.ldacPreparationIssue(for: controller.multipoint.selectedSource?.address))
+
+        deliver([0x37, 1, 0], to: controller)
+        XCTAssertEqual(controller.ldacPreparationIssue(for: mac.address), .selectMac(nil))
+        XCTAssertEqual(controller.ldacPreparationIssue(for: nil), .unknownLocalAddress)
+
+        deliver([0x37, 1, 0xFF], to: controller)
+        XCTAssertEqual(controller.ldacPreparationIssue(for: mac.address), .readingSources)
+
+        deliver([0x39, 2, 1], to: controller)
+        XCTAssertEqual(controller.ldacPreparationIssue(for: mac.address), .readingSources)
+    }
+
+    @MainActor
+    func testLDACSourceConfirmationRequiresNotificationOrOwnedReadback() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        var sources: [String?] = []
+        let observer = controller.musicSourceConfirmations.sink { sources.append($0?.address) }
+        defer { observer.cancel() }
+
+        let local = "02:00:00:00:00:01"
+        let remote = "02:00:00:00:00:02"
+        deliver(inventory(command: 0x37, selected: 1), to: controller)
+        deliver(inventory(command: 0x37, selected: 2), to: controller)
+        deliver([0x39, 2, 1], to: controller)
+        XCTAssertTrue(sources.isEmpty)
+        deliver(inventory(command: 0x39, selected: 2), to: controller)
+        XCTAssertEqual(sources, [remote])
+
+        let mac = try XCTUnwrap(controller.multipoint.devices.first { $0.address == local })
+        acknowledgeAll(controller)
+        let phoneGeneration = controller.playbackSourceGeneration
+        controller.selectAudioSource(mac)
+        acknowledgeAll(controller)
+        deliver(inventory(command: 0x39, selected: 1), to: controller)
+        XCTAssertEqual(controller.multipoint.selectedSource?.address, local)
+        XCTAssertEqual(controller.playbackSourceGeneration, phoneGeneration + 1)
+        XCTAssertEqual(controller.sourceTransition?.phase, .awaitingSelection)
+        XCTAssertEqual(sources, [remote])
+        deliver([0x3D, 1, 0] + Array(local.utf8), to: controller)
+        XCTAssertEqual(sources, [remote])
+        acknowledgeAll(controller)
+        deliver(inventory(command: 0x37, selected: 1), to: controller)
+        XCTAssertEqual(controller.sourceTransition?.phase, .complete)
+        XCTAssertEqual(controller.playbackSourceGeneration, phoneGeneration + 1)
+        XCTAssertEqual(sources, [remote, local])
+
+        deliver(inventory(command: 0x39, selected: 0), to: controller)
+        XCTAssertEqual(sources, [remote, local, nil])
+        controller.simulateControlLoss()
+        deliver(inventory(command: 0x39, selected: 2), to: controller)
+        XCTAssertEqual(sources, [remote, local, nil])
+    }
+
+    @MainActor
+    func testExpiredQueuedLDACSourceDoesNotWriteAfterReplacement() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        let mac = "02:00:00:00:00:01"
+        let phone = "02:00:00:00:00:02"
+        let replacement = "02:00:00:00:00:03"
+        deliver(inventory(command: 0x39, selected: 1), to: controller)
+        acknowledgeAll(controller)
+        controller.setDSEE(.off)
+        XCTAssertNotNil(controller.simulatedPendingFrame)
+        controller.selectAudioSource(try XCTUnwrap(controller.multipoint.devices.first { $0.address == phone }), isCurrent: { true })
+        let expired = try XCTUnwrap(controller.sourceTransition?.requestID)
+        XCTAssertTrue(controller.isQueuedAudioSourceSelection(expired))
+        controller.cancelQueuedAudioSourceSelection(expired, expired: true)
+        XCTAssertEqual(controller.sourceTransition?.failureMessage, String(localized: "The headphones did not confirm the audio source change in time."))
+        XCTAssertFalse(controller.isQueuedAudioSourceSelection(expired))
+
+        deliver([0x39, 2, 2] + entry(address: mac, id: 1, name: "MacBook Pro")
+                + entry(address: replacement, id: 2, name: "Other phone") + [1], to: controller)
+        controller.selectAudioSource(try XCTUnwrap(controller.multipoint.devices.first { $0.address == replacement }), isCurrent: { true })
+        let current = try XCTUnwrap(controller.sourceTransition?.requestID)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload.starts(with: [0x3C, 1]) }.map(\.payload),
+                       [[0x3C, 1] + Array(replacement.utf8)])
+        XCTAssertEqual(controller.sourceTransition?.phase, .awaitingSelection)
+        controller.cancelQueuedAudioSourceSelection(current, expired: true)
+        XCTAssertEqual(controller.sourceTransition?.phase, .awaitingSelection)
+    }
+    #endif
+
     @MainActor
     func testClassicInventorySelectionKeepsReadOwnershipAndConfirmsItsSchema() throws {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
@@ -58,6 +233,78 @@ final class SonySourceControllerTests: XCTestCase {
         controller.simulateDeviceConnection(named: "WF-1000XM5")
         deliver(inventory(command: 0x39, selected: 2), to: controller)
         XCTAssertEqual(changes.count, 2)
+    }
+
+    @MainActor
+    func testDiagnosticCodecReadDoesNotCarryAcrossSourceOrControlSession() {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        let unavailable = "Headphone codec observed with selected source: Unavailable"
+        let phoneLDAC = "Headphone codec observed with selected source: Phone connection 2. Headphones report LDAC."
+        let otherSource = entry(address: "02:00:00:00:00:01", id: 1, name: "Laptop")
+        let phone = Array("02:00:00:00:00:02".utf8) + [2, 0, 2, 0x0C, 5] + Array("Phone".utf8)
+        deliver([0x13, 2, 0x10], type: 0x0C, to: controller)
+        XCTAssertEqual(controller.audioCodec, .ldac)
+        XCTAssertTrue(controller.diagnosticReport.contains(unavailable))
+
+        controller.refreshDevices()
+        acknowledgeAll(controller)
+        deliver([0x37, 2, 2] + otherSource + phone + [1], to: controller)
+        acknowledgeAll(controller)
+        deliver([0x39, 2, 2] + otherSource + phone + [2], to: controller)
+        deliver([0x13, 2, 0x10], type: 0x0C, to: controller)
+        XCTAssertTrue(controller.diagnosticReport.contains(unavailable))
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x12, 2] }.count, 2)
+        deliver([0x13, 2, 0x10], type: 0x0C, to: controller)
+        XCTAssertTrue(controller.diagnosticReport.contains(phoneLDAC))
+
+        deliver([0x39, 2, 2] + otherSource + phone + [2], to: controller)
+        XCTAssertTrue(controller.diagnosticReport.contains(phoneLDAC))
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x12, 2] }.count, 2)
+        deliver([0x39, 2, 2], to: controller)
+        XCTAssertTrue(controller.diagnosticReport.contains(unavailable))
+        deliver([0x39, 2, 2] + otherSource + phone + [2], to: controller)
+        deliver([0x15, 2, 0x10], type: 0x0C, to: controller)
+        XCTAssertTrue(controller.diagnosticReport.contains(unavailable))
+
+        let previousSession = controller.simulatedControlSession
+        controller.simulateControlLoss()
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        controller.simulateProtocolMessage([0x13, 2, 0x10], session: previousSession)
+        XCTAssertTrue(controller.diagnosticReport.contains(unavailable))
+    }
+
+    @MainActor
+    func testDiagnosticCodecUsesClassicInventoryWithoutInferringDeviceType() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5", simulatedTable2Functions: [0x30])
+        controller.refreshDevices()
+        acknowledgeAll(controller)
+        let source = Array("02:00:00:00:00:02".utf8) + [2, 5] + Array("Phone".utf8)
+        deliver([0x37, 0, 1] + source + [2], to: controller)
+        acknowledgeAll(controller)
+        deliver([0x13, 2, 0x10], type: 0x0C, to: controller)
+        XCTAssertTrue(controller.diagnosticReport.contains("Headphone codec observed with selected source: Source connection 2. Headphones report LDAC."))
+
+        deliver([0x15, 2, 0x02], type: 0x0C, to: controller)
+        XCTAssertEqual(controller.audioCodec, .aac)
+        XCTAssertTrue(controller.diagnosticReport.contains("Headphone codec observed with selected source: Unavailable"))
+    }
+
+    @MainActor
+    func testDiagnosticCodecPreservesHeadphoneIndicatorWithoutSourceInventory() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5", simulatedTable2Functions: [0x34])
+        controller.refreshDevices()
+        acknowledgeAll(controller)
+        deliver(inventory(command: 0x39, selected: 2), to: controller)
+        deliver([0x13, 2, 0x10], type: 0x0C, to: controller)
+        XCTAssertEqual(controller.audioCodec, .ldac)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0x12, 2] })
+        XCTAssertTrue(controller.diagnosticReport.contains("Headphone codec observed with selected source: Unavailable"))
     }
 
     @MainActor
@@ -147,40 +394,127 @@ final class SonySourceControllerTests: XCTestCase {
         XCTAssertEqual(controller.sourceTransition?.phase, .verifying)
         XCTAssertEqual(controller.multipoint.selectedSource?.connectionID, 1)
         acknowledgeAll(controller)
+        let playbackCapabilityQuery = controller.playback.capabilityQueryPayload
+        let capabilityReadsBeforeSwitch = controller.simulatedTransmittedFrames.filter { $0.payload == playbackCapabilityQuery }.count
         deliver(inventory(command: 0x39, selected: 2), to: controller)
         XCTAssertEqual(controller.sourceTransition?.phase, .verifying)
         XCTAssertTrue(changes.isEmpty)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == playbackCapabilityQuery }.count, capabilityReadsBeforeSwitch)
         deliver(inventory(command: 0x37, selected: 2), to: controller)
         XCTAssertEqual(controller.sourceTransition?.phase, .complete)
         XCTAssertEqual(controller.multipoint.selectedSource?.address, phone.address)
         XCTAssertFalse(controller.simulatedInventoryReadPending)
         XCTAssertEqual(changes.map(\.name), ["Phone"])
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == playbackCapabilityQuery }.count, capabilityReadsBeforeSwitch + 1)
         controller.simulateControlLoss()
     }
 
     @MainActor
     func testEarlierInventoryReadCannotBecomeSwitchConfirmation() throws {
         let controller = preparedController()
+        defer { controller.simulateControlLoss() }
         let phone = try XCTUnwrap(controller.multipoint.devices.last)
-        controller.refreshDevices()
-        acknowledgeAll(controller)
+        for _ in 0..<5 { controller.simulateAutomaticRefresh() }
         XCTAssertTrue(controller.simulatedInventoryReadPending)
+        XCTAssertNil(controller.sourceControlUnavailableReason)
         controller.selectAudioSource(phone)
-        XCTAssertNil(controller.sourceTransition)
+        XCTAssertEqual(controller.sourceTransition?.phase, .queued)
+        acknowledgeAll(controller)
         controller.refreshDevices()
-        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x36, 2] }.count, 1)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x36, 2] }.count, 1)
         deliver(inventory(command: 0x39, selected: 1), to: controller)
         XCTAssertTrue(controller.simulatedInventoryReadPending)
+        XCTAssertEqual(controller.sourceTransition?.phase, .queued)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x3C })
         deliver(inventory(command: 0x37, selected: 1), to: controller)
-        controller.selectAudioSource(phone)
         XCTAssertEqual(controller.sourceTransition?.phase, .awaitingSelection)
         acknowledgeAll(controller)
         deliver([0x3D, 1, 0] + Array(phone.address.utf8), to: controller)
         acknowledgeAll(controller)
+        XCTAssertEqual(controller.sourceTransition?.phase, .verifying)
         deliver(inventory(command: 0x37, selected: 1), to: controller)
         XCTAssertEqual(controller.sourceTransition?.phase, .failed)
         XCTAssertEqual(controller.multipoint.selectedSource?.connectionID, 1)
-        controller.simulateControlLoss()
+    }
+
+    @MainActor
+    func testQueuedSourceSelectionRevalidatesTargetAfterEarlierInventoryRead() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        controller.refreshDevices()
+        acknowledgeAll(controller)
+        controller.selectAudioSource(phone)
+        XCTAssertEqual(controller.sourceTransition?.phase, .queued)
+        deliver([0x37, 2, 2] + entry(address: "02:00:00:00:00:01", id: 1, name: "MacBook Pro")
+                + entry(address: phone.address, id: 0, name: "Phone") + [1], to: controller)
+        XCTAssertEqual(controller.sourceTransition?.phase, .failed)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x3C })
+    }
+
+    @MainActor
+    func testGuardedSourceSelectionIsRevokedWhenPlaybackMovesAwayAndBackBeforeWrite() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        let generation = controller.playbackSourceGeneration
+        controller.defersSimulatedWrites = true
+        controller.selectAudioSource(phone, isCurrent: { controller.playbackSourceGeneration == generation })
+        XCTAssertEqual(controller.sourceTransition?.phase, .queued)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload.first, 0x3C)
+        deliver(inventory(command: 0x39, selected: 2), to: controller)
+        deliver(inventory(command: 0x39, selected: 1), to: controller)
+        XCTAssertEqual(controller.multipoint.selectedSource?.connectionID, 1)
+        XCTAssertEqual(controller.playbackSourceGeneration, generation + 2)
+        controller.defersSimulatedWrites = false
+        controller.completeSimulatedWrite()
+        XCTAssertEqual(controller.sourceTransition?.phase, .failed)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertEqual(controller.multipoint.selectedSource?.connectionID, 1)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x3C })
+        controller.selectAudioSource(phone)
+        XCTAssertEqual(controller.sourceTransition?.phase, .awaitingSelection)
+    }
+
+    @MainActor
+    func testQueuedSourceSelectionFailsOnEarlierInventoryReadTimeoutWithoutSendingIt() async throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        controller.refreshDevices()
+        acknowledgeAll(controller)
+        controller.selectAudioSource(phone)
+        XCTAssertEqual(controller.sourceTransition?.phase, .queued)
+        controller.simulateInventoryReadTimeout()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(controller.sourceTransition?.phase, .failed)
+        XCTAssertNotNil(controller.sourceControlUnavailableReason)
+        deliver(inventory(command: 0x37, selected: 1), to: controller)
+        XCTAssertEqual(controller.sourceTransition?.phase, .failed)
+        XCTAssertNil(controller.sourceControlUnavailableReason)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x3C })
+    }
+
+    @MainActor
+    func testUnresolvedOwnedReadbackBlocksAnotherSourceSelection() throws {
+        let controller = preparedController()
+        defer { controller.simulateControlLoss() }
+        let phone = try XCTUnwrap(controller.multipoint.devices.last)
+        controller.selectAudioSource(phone)
+        acknowledgeAll(controller)
+        deliver([0x3D, 1, 0] + Array(phone.address.utf8), to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.sourceTransition?.phase, .verifying)
+        controller.simulateSourceTimeout()
+        XCTAssertEqual(controller.sourceTransition?.phase, .failed)
+        XCTAssertTrue(controller.simulatedInventoryReadPending)
+        let previous = controller.sourceTransition?.requestID
+        controller.selectAudioSource(phone)
+        XCTAssertEqual(controller.sourceTransition?.requestID, previous)
+        deliver(inventory(command: 0x37, selected: 1), to: controller)
+        XCTAssertNil(controller.sourceControlUnavailableReason)
     }
 
     @MainActor

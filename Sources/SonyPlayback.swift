@@ -14,7 +14,9 @@ struct SonyTrack: Equatable, Sendable {
     let album: String?
     let artist: String?
     let genre: String?
+}
 
+extension SonyTrack {
     init?(payload: [UInt8]) {
         var offset = 2
         var names: [String?] = []
@@ -28,10 +30,7 @@ struct SonyTrack: Equatable, Sendable {
             offset = end
         }
         guard offset == payload.count else { return nil }
-        title = names[0]
-        album = names[1]
-        artist = names[2]
-        genre = names[3]
+        self.init(title: names[0], album: names[1], artist: names[2], genre: names[3])
     }
 }
 
@@ -41,6 +40,9 @@ struct SonyPlayback: Equatable, Sendable {
     let playbackInquiryType: UInt8
     let supportsCallVolume: Bool
     let supportsMute: Bool
+    private var legacySupportsPlaybackCommands = false
+    private(set) var supportsLegacyMetadata = false
+    private var legacyTrackNames: [UInt8: String] = [:]
     private(set) var hasReceivedCapabilities = false
     private(set) var available: Bool?
     private(set) var state: SonyPlaybackState?
@@ -67,10 +69,13 @@ struct SonyPlayback: Equatable, Sendable {
     var statusQueryPayload: [UInt8] { [0xA2, playbackInquiryType] }
     var musicVolumeQueryPayload: [UInt8] { generation == .v1 ? [0xA6, 0x01, 0x20] : [0xA6, supportsMute ? 0x30 : 0x20] }
     var callVolumeQueryPayload: [UInt8]? { supportsCallVolume ? [0xA6, supportsMute ? 0x31 : 0x21] : nil }
+    var legacyMetadataQueryPayloads: [[UInt8]] {
+        supportsLegacyMetadata ? (0...3).map { [0xA6, 1, UInt8($0)] } : []
+    }
 
     var queryPayloads: [[UInt8]] {
         guard isSupported else { return [] }
-        return generation == .v1 ? [capabilityQueryPayload, statusQueryPayload, musicVolumeQueryPayload]
+        return generation == .v1 ? [capabilityQueryPayload, statusQueryPayload, musicVolumeQueryPayload] + legacyMetadataQueryPayloads
             : [capabilityQueryPayload, statusQueryPayload, [0xA6, playbackInquiryType], musicVolumeQueryPayload]
                 + (callVolumeQueryPayload.map { [$0] } ?? [])
     }
@@ -82,8 +87,11 @@ struct SonyPlayback: Equatable, Sendable {
         case 0xA3, 0xA5: return payload[1] == playbackInquiryType ? statusQueryPayload : nil
         case 0xA6, 0xA7, 0xA8, 0xA9:
             if generation == .v1 {
-                guard payload.count == (payload[0] == 0xA6 ? 3 : 4), payload[1...2] == [1, 0x20] else { return nil }
-                return musicVolumeQueryPayload
+                guard payload.count >= 3, payload[1] == 1 else { return nil }
+                if payload[2] == 0x20, payload.count == (payload[0] == 0xA6 ? 3 : 4) { return musicVolumeQueryPayload }
+                let query = [0xA6, 1, payload[2]]
+                return legacyMetadataQueryPayloads.contains(query)
+                    && ((payload[0] == 0xA6 && payload.count == 3) || (payload[0] == 0xA7 && payload.count >= 5)) ? query : nil
             }
             return queryPayloads.contains([0xA6, payload[1]]) ? [0xA6, payload[1]] : nil
         default: return nil
@@ -105,13 +113,32 @@ struct SonyPlayback: Equatable, Sendable {
             && (playbackInquiryType == 1 || playbackControlAvailable != nil)
     }
 
+    var supportsPlaybackCommands: Bool {
+        generation == .v1 ? legacySupportsPlaybackCommands : isSupported
+    }
+
     var canControl: Bool {
-        generation == .v2 && isSupported && available == true && (!supportsCallVolume || musicCallStatus == 0)
-            && (playbackInquiryType == 1 || playbackControlAvailable == true) && state != nil && state != .unsettled
+        guard supportsPlaybackCommands, available == true, state != nil else { return false }
+        if generation == .v1 { return true }
+        return (!supportsCallVolume || musicCallStatus == 0)
+            && (playbackInquiryType == 1 || playbackControlAvailable == true) && state != .unsettled
     }
 
     var canControlMusicVolume: Bool {
         isSupported && available == true && (!supportsCallVolume || musicCallStatus == 0) && volume != nil
+    }
+
+    var canReadLegacyMetadata: Bool {
+        supportsLegacyMetadata && available == true && (state == .playing || state == .paused)
+    }
+
+    func isLegacyTrackChange(_ payload: [UInt8]) -> Bool {
+        supportsLegacyMetadata && payload == [0xA9, 1, 0]
+    }
+
+    mutating func clearLegacyMetadata() {
+        legacyTrackNames.removeAll()
+        track = nil
     }
 
     var canControlCallVolume: Bool {
@@ -141,13 +168,28 @@ struct SonyPlayback: Equatable, Sendable {
                 guard payload.count == 5 else { return false }
                 hasReceivedCapabilities = true
                 musicVolumeRange = payload[2] > 0 ? 0...(Int(payload[2]) - 1) : nil
+                legacySupportsPlaybackCommands = payload[3] == 1
+                supportsLegacyMetadata = payload[4] == 1
+                if !supportsLegacyMetadata, track != nil { clearLegacyMetadata() }
             case (0xA3, 0x01), (0xA5, 0x01):
                 guard payload.count == 4 else { return false }
                 available = payload[2] <= 1 ? payload[2] == 0 : nil
                 state = SonyPlaybackState(rawValue: payload[3])
+                if !canReadLegacyMetadata, track != nil { clearLegacyMetadata() }
             case (0xA7, 0x01), (0xA9, 0x01):
-                guard payload.count == 4, payload[2] == 0x20 else { return false }
-                reportedMusicVolume = Int(payload[3])
+                if payload.count == 4, payload[2] == 0x20 {
+                    reportedMusicVolume = Int(payload[3])
+                } else {
+                    guard payload[0] == 0xA7, supportsLegacyMetadata, payload.count >= 5, payload[2] <= 3,
+                          payload[4] <= 128, payload.count == 5 + Int(payload[4]),
+                          let name = String(bytes: payload.dropFirst(5), encoding: .utf8) else { return false }
+                    if canReadLegacyMetadata {
+                        legacyTrackNames[payload[2]] = payload[3] == 2 && !name.isEmpty ? name : nil
+                        track = legacyTrackNames.isEmpty ? nil
+                            : SonyTrack(title: legacyTrackNames[0], album: legacyTrackNames[1],
+                                        artist: legacyTrackNames[2], genre: legacyTrackNames[3])
+                    }
+                }
             default: return false
             }
             return true
@@ -197,6 +239,7 @@ struct SonyPlaybackReadSequence: Equatable, Sendable {
     private var received = false
 
     var currentQuery: [UInt8]? { queries.first }
+    var queriesAwaitingReplies: ArraySlice<[UInt8]> { received ? queries.dropFirst() : queries[...] }
 
     init(queries: [[UInt8]]) {
         self.queries = queries
@@ -220,11 +263,15 @@ struct SonyPlaybackReadSequence: Equatable, Sendable {
         return advance()
     }
 
-    private mutating func advance() -> Bool {
-        guard acknowledged, received else { return false }
+    mutating func discardCurrentQuery() {
         queries.removeFirst()
         acknowledged = false
         received = false
+    }
+
+    private mutating func advance() -> Bool {
+        guard acknowledged, received else { return false }
+        discardCurrentQuery()
         return true
     }
 }

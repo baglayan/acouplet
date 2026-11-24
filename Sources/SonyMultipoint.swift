@@ -240,9 +240,12 @@ struct SonyPeripheralActionResult: Equatable, Sendable {
 }
 
 struct SonyMultipoint: Equatable, Sendable {
+    static let musicHandoverQuery: [UInt8] = [0x36, 0x03]
+
     let inventoryInquiryType: UInt8?
     let supportsSourceControl: Bool
     let supportsLegacyInventory: Bool
+    let supportsMusicHandover: Bool
     private(set) var maxPairedDevices: UInt8?
     private(set) var maxConnectedDevices: UInt8?
     private(set) var multipleConnectionFileTransfer: Bool?
@@ -251,31 +254,35 @@ struct SonyMultipoint: Equatable, Sendable {
     private(set) var inventory: SonyMultipointInventory?
     private(set) var inventoryIsStale = false
     private(set) var keeping: Bool?
+    private(set) var musicHandoverEnabled: Bool?
     private(set) var lastKeepingResult: SonySourceControlResult?
     private(set) var lastSourceResult: SonySourceSelectionResult?
     private(set) var lastPeripheralResult: SonyPeripheralActionResult?
 
     var supportsInventory: Bool { inventoryInquiryType != nil }
+    var deviceInventoryInquiryType: UInt8? { supportsLegacyInventory ? 0x01 : inventoryInquiryType }
 
     init(supportedFunctions: Set<UInt8> = []) {
         inventoryInquiryType = !supportedFunctions.isDisjoint(with: [0x32, 0x33]) ? 0x02
             : supportedFunctions.contains(0x30) ? 0x00 : nil
         supportsSourceControl = supportedFunctions.contains(0x31)
         supportsLegacyInventory = false
+        supportsMusicHandover = supportedFunctions.contains(0x34)
     }
 
     init(legacySupportedFunctions supportedFunctions: Set<UInt8>) {
         inventoryInquiryType = nil
         supportsSourceControl = false
         supportsLegacyInventory = supportedFunctions.contains(0x38)
+        supportsMusicHandover = false
     }
 
     var queryPayloads: [[UInt8]] {
-        (supportsLegacyInventory ? [[0x36, 0x01]] : [])
-            + (inventoryInquiryType.map { type in
+        (deviceInventoryInquiryType.map { type in
                 (maxPairedDevices == nil ? [[0x30, type]] : []) + [[0x32, type], [0x36, type]]
             } ?? [])
             + (supportsSourceControl ? [[0x36, 0x01]] : [])
+            + (supportsMusicHandover ? [Self.musicHandoverQuery] : [])
     }
 
     var devices: [SonyMultipointDevice] { inventory?.devices ?? [] }
@@ -290,7 +297,7 @@ struct SonyMultipoint: Equatable, Sendable {
     }
 
     var canManageDevices: Bool {
-        supportsInventory && available == true && pairingMode != nil && inventory != nil && !inventoryIsStale
+        deviceInventoryInquiryType != nil && available == true && pairingMode != nil && inventory != nil && !inventoryIsStale
     }
 
     var canControlSources: Bool { supportsSourceControl && canManageDevices && keeping != nil }
@@ -306,29 +313,40 @@ struct SonyMultipoint: Equatable, Sendable {
         return [0x38, 0x01, enabled ? 0x00 : 0x01]
     }
 
+    func musicHandoverSetPayload(_ enabled: Bool) -> [UInt8]? {
+        guard supportsMusicHandover else { return nil }
+        return [0x38, 0x03, enabled ? 0x01 : 0x00]
+    }
+
     func peripheralActionPayload(_ action: SonyPeripheralAction, address: String) -> [UInt8]? {
-        guard canManageDevices, let address = multipointAddress(Array(address.utf8)[...]),
+        guard canManageDevices, let type = deviceInventoryInquiryType, let address = multipointAddress(Array(address.utf8)[...]),
               let device = devices.first(where: { $0.address == address }) else { return nil }
         switch action {
         case .connect:
             guard !device.isConnected, let maxConnectedDevices,
                   devices.filter(\.isConnected).count < Int(maxConnectedDevices) else { return nil }
         case .disconnect: guard device.isConnected else { return nil }
-        case .unpair: break
+        case .unpair: guard !supportsLegacyInventory || !device.isConnected else { return nil }
         }
-        return [0x3C, inventoryInquiryType!, action.rawValue] + Array(address.utf8)
+        let prefix: [UInt8] = supportsLegacyInventory ? [0x3C, type, 0x00] : [0x3C, type]
+        return prefix + [action.rawValue] + Array(address.utf8)
+    }
+
+    func legacyPairingModePayload(_ enabled: Bool) -> [UInt8]? {
+        guard supportsLegacyInventory, let pairingMode, pairingMode != enabled, !enabled || available == true else { return nil }
+        return [0x34, 0x01, enabled ? 0x01 : 0x00, 0x00]
     }
 
     @discardableResult
     mutating func update(_ payload: [UInt8]) -> Bool {
         guard payload.count >= 2 else { return false }
         switch (payload[0], payload[1]) {
-        case (0x31, let type) where type == inventoryInquiryType:
+        case (0x31, let type) where type == deviceInventoryInquiryType:
             guard payload.count == 5 else { return false }
             maxPairedDevices = payload[2]
             maxConnectedDevices = payload[3]
             multipleConnectionFileTransfer = payload[4] <= 1 ? payload[4] == 0 : nil
-        case (0x33, let type) where type == inventoryInquiryType, (0x35, let type) where type == inventoryInquiryType:
+        case (0x33, let type) where type == deviceInventoryInquiryType, (0x35, let type) where type == deviceInventoryInquiryType:
             guard payload.count == 4 else { return false }
             bluetoothMode = payload[2]
             available = payload[3] <= 1 ? payload[3] == 0 : nil
@@ -353,6 +371,15 @@ struct SonyMultipoint: Equatable, Sendable {
             guard supportsSourceControl, payload.count == 4 else { return false }
             keeping = payload[2] <= 1 ? payload[2] == 0 : nil
             lastKeepingResult = SonySourceControlResult(rawValue: payload[3])
+        case (0x37, 0x03), (0x39, 0x03):
+            guard supportsMusicHandover, payload.count == 3, payload[2] <= 1 else { return false }
+            musicHandoverEnabled = payload[2] == 0x01
+        case (0x3D, 0x01) where supportsLegacyInventory:
+            guard payload.count == 21, payload[2] == 0x00,
+                  let address = multipointAddress(payload[4...]) else { return false }
+            let result = SonyPeripheralResult(rawValue: payload[3])
+            let action = (payload[3] & 0x0F) <= 3 && payload[3] < 0x30 ? payload[3] >> 4 : 0xFF
+            lastPeripheralResult = SonyPeripheralActionResult(action: action, result: result, address: address)
         case (0x3D, 0x01):
             guard supportsSourceControl, payload.count == 20,
                   let address = multipointAddress(payload[3...]) else { return false }

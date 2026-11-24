@@ -235,7 +235,7 @@ final class SonyPreferencePaneServer {
             .init(id: id, title: title, enabled: enabled, canSet: writable(setting, available),
                   pending: controller.pendingChanges[setting] != nil, error: controller.settingErrors[setting])
         }
-        result.firmwareVersion = controller.firmwareVersion
+        result.firmwareVersion = controller.firmwareVersionLabel
         result.codec = controller.supportsCodecStatus ? controller.audioCodec?.title ?? "Unknown" : nil
         let equalizer = controller.equalizer
         if equalizer.isSupported {

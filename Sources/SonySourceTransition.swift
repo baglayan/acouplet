@@ -139,6 +139,17 @@ struct SonySourceTransition: Equatable, Sendable {
         return true
     }
 
+    mutating func inventoryReadFailed() {
+        guard phase == .queued else { return }
+        fail(String(localized: "The device list was not received. Reconnect the headphones to try again."))
+    }
+
+    mutating func cancelUnsentSelection(expired: Bool = false) {
+        guard expectedPayload?.first == 0x3C else { return }
+        fail(expired ? String(localized: "The headphones did not confirm the audio source change in time.")
+             : String(localized: "The audio source changed or its controls are no longer available."))
+    }
+
     @discardableResult
     mutating func timeout() -> Bool {
         guard phase == .awaitingKeeping || phase == .awaitingSelection || phase == .verifying else { return false }

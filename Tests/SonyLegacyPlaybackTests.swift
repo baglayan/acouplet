@@ -101,25 +101,26 @@ final class SonyLegacyPlaybackTests: XCTestCase {
         }
     }
 
-    func testLegacyVolumeDoesNotGrantTransportCallOrMetadataControls() {
+    func testLegacyPlaybackCommandsRequireAdvertisedControlTypeAndAvailability() {
         var playback = SonyPlayback(supportedFunctions: [0xA1], generation: .v1)
-        playback.update([0xA3, 1, 0, 1])
-        playback.update([0xA7, 1, 0x20, 12])
-        for controlType: UInt8 in [0, 1, 255] {
-            for metadataType: UInt8 in [0, 1, 255] {
-                XCTAssertTrue(playback.update([0xA1, 1, 31, controlType, metadataType]))
-                XCTAssertTrue(playback.canControlMusicVolume)
-                XCTAssertFalse(playback.canControl)
-                XCTAssertFalse(playback.canControlCallVolume)
-                XCTAssertNil(playback.musicCallStatus)
-                XCTAssertNil(playback.callVolumeRange)
-                XCTAssertNil(playback.callVolume)
-                XCTAssertNil(playback.track)
-                XCTAssertNil(playback.callVolumePayload(0))
-                for command in [SonyPlaybackCommand.play, .pause, .next, .previous] {
-                    XCTAssertNil(playback.commandPayload(command))
+        let commands: [(SonyPlaybackCommand, UInt8)] = [(.play, 7), (.pause, 1), (.next, 2), (.previous, 3)]
+        XCTAssertNil(playback.commandPayload(.play))
+        for controlType: UInt8 in [0, 1, 2, 255] {
+            XCTAssertTrue(playback.update([0xA1, 1, 0, controlType, 0]))
+            XCTAssertEqual(playback.supportsPlaybackCommands, controlType == 1)
+            for availability: UInt8 in [0, 1, 255] {
+                for state: UInt8 in [0, 1, 2, 3, 255] {
+                    XCTAssertTrue(playback.update([0xA5, 1, availability, state]))
+                    let enabled = controlType == 1 && availability == 0 && state != 255
+                    XCTAssertEqual(playback.canControl, enabled)
+                    for (command, value) in commands {
+                        XCTAssertEqual(playback.commandPayload(command), enabled ? [0xA4, 1, 0, value] : nil)
+                    }
                 }
             }
+            XCTAssertFalse(playback.canControlMusicVolume)
+            XCTAssertFalse(playback.canControlCallVolume)
+            XCTAssertNil(playback.callVolumePayload(0))
         }
     }
 
@@ -158,6 +159,35 @@ final class SonyLegacyPlaybackTests: XCTestCase {
         XCTAssertNil(playback.volume)
         XCTAssertFalse(playback.canControlMusicVolume)
         XCTAssertNil(playback.volumePayload(0))
+    }
+
+    func testLegacyTrackMetadataUsesSeparateCapabilityAndFieldTypes() {
+        var playback = SonyPlayback(supportedFunctions: [0xA1], generation: .v1)
+        let title: [UInt8] = [0xA7, 1, 0, 2, 3] + Array("曲".utf8)
+        playback.update([0xA1, 1, 0, 1, 0])
+        playback.update([0xA3, 1, 0, 2])
+        XCTAssertFalse(playback.update(title))
+        XCTAssertTrue(playback.legacyMetadataQueryPayloads.isEmpty)
+        playback.update([0xA1, 1, 0, 0, 1])
+        XCTAssertFalse(playback.supportsPlaybackCommands)
+        XCTAssertEqual(playback.legacyMetadataQueryPayloads, [[0xA6, 1, 0], [0xA6, 1, 1], [0xA6, 1, 2], [0xA6, 1, 3]])
+        XCTAssertEqual(playback.queryPayload(for: title), [0xA6, 1, 0])
+        XCTAssertTrue(playback.update(title))
+        XCTAssertEqual(playback.track?.title, "曲")
+        XCTAssertTrue(playback.update([0xA7, 1, 1, 2, 5] + Array("Album".utf8)))
+        XCTAssertEqual(playback.track?.album, "Album")
+        XCTAssertTrue(playback.update([0xA7, 1, 0, 1, 0]))
+        XCTAssertNil(playback.track?.title)
+        XCTAssertEqual(playback.track?.album, "Album")
+        for invalid in [[UInt8(0xA7), 1, 0, 2, 2, 0x41], [0xA7, 1, 0, 2, 1, 0xFF],
+                        [0xA7, 1, 0x10, 2, 1, 0x41], [0xA9, 1, 0, 2, 1, 0x41]] {
+            XCTAssertFalse(playback.update(invalid))
+        }
+        playback.update([0xA5, 1, 0, 3])
+        XCTAssertNil(playback.track)
+        XCTAssertFalse(playback.canReadLegacyMetadata)
+        XCTAssertTrue(playback.update(title))
+        XCTAssertNil(playback.track)
     }
 }
 
@@ -225,7 +255,7 @@ final class SonyLegacyPlaybackOrderTests: XCTestCase {
     }
 
     private func completeCapabilities(_ controller: SonyHeadphonesController, replyFirst: Bool) {
-        let replies: [[UInt8]] = [[0x03, 0, 1, 3, 0x58, 0x4D, 0x33], [0xA1, 1, 31, 1, 1],
+        let replies: [[UInt8]] = [[0x03, 0, 1, 3, 0x58, 0x4D, 0x33], [0xA1, 1, 31, 1, 0],
                                  [0xE1, 1, 0], [0xE1, 2, 0, 0], [0xF1, 4, 2, 0x10, 0x11]]
         for (query, reply) in zip(capabilityQueries, replies) {
             guard let frame = controller.simulatedPendingFrame else {

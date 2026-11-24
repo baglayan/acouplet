@@ -4,6 +4,50 @@ import XCTest
 
 final class SonyEarTipFitControllerTests: XCTestCase {
     @MainActor
+    func testWearingPositionUsesCurrentTableTwoMetadataAndAnOwnedResult() throws {
+        for function: UInt8 in [0xF6, 0xFF] {
+            let controller = readyController()
+            defer { controller.simulateControlLoss() }
+            controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+            acknowledgeSimulatedCommands(controller)
+            deliver([7, 0, 0], to: controller)
+            acknowledgeSimulatedCommands(controller)
+            deliver([7, 0, 1, function, 0], type: 0x0E, to: controller)
+            try acknowledge([0xF0, 7], on: controller)
+            let sent = controller.simulatedTransmittedFrames.filter { $0.type == 0x0E }.map(\.payload)
+            XCTAssertTrue(sent.contains([0xF0, 7]))
+            XCTAssertTrue(sent.contains([0xF2, 8]))
+            deliver([0xF1, 7, 1, 5], to: controller)
+            deliver([0xF3, 8, 0], type: 0x0E, to: controller)
+            XCTAssertFalse(controller.canStartWearingPositionCheck)
+            deliver([0xF1, 7, 1, 5], type: 0x0E, to: controller)
+            XCTAssertTrue(controller.canStartWearingPositionCheck)
+            let result: [UInt8] = [0xF9, 8, 0, 2, 4, 1, 4, 1, 4, 1, 4, 1] + Array(repeating: 0, count: 12)
+            deliver(result, type: 0x0E, to: controller)
+            XCTAssertNil(controller.wearingPositionResult)
+            controller.defersSimulatedWrites = true
+            controller.startWearingPositionCheck()
+            try acknowledge([0xF2, 8], on: controller)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF8, 8, 0])
+            XCTAssertTrue(controller.isRunningHeadphoneTest)
+            XCTAssertFalse(controller.canStartWearingPositionCheck)
+            deliver(result, type: 0x0E, to: controller)
+            XCTAssertNil(controller.wearingPositionResult)
+            controller.defersSimulatedWrites = false
+            controller.completeSimulatedWrite()
+            acknowledgeSimulatedCommands(controller)
+            deliver(Array(result.dropLast()), type: 0x0E, to: controller)
+            XCTAssertTrue(controller.checkingWearingPosition)
+            deliver(result, type: 0x0E, to: controller)
+            XCTAssertEqual(controller.wearingPositionResult, .reversedSides)
+            XCTAssertFalse(controller.isRunningHeadphoneTest)
+            XCTAssertTrue(controller.canStartWearingPositionCheck)
+            deliver([0xF5, 8, 1], type: 0x0E, to: controller)
+            XCTAssertFalse(controller.canStartWearingPositionCheck)
+        }
+    }
+
+    @MainActor
     func testApplicationQuitCancelsTheFitTestBeforeDrainingControls() async throws {
         let suite = "dev.baglayan.Acouplet.fit-termination-tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -222,6 +266,73 @@ final class SonyEarTipFitControllerTests: XCTestCase {
         controller.startEarTipFit(id: UUID())
         XCTAssertEqual(controller.earTipFitTransition?.phase, .ready)
         XCTAssertEqual(payloads(controller), [[0xF0, 6], [0xF2, 6], [0xF6, 6]])
+    }
+
+    @MainActor
+    func testStandaloneSelectionRequiresOwnedReadsAndKeepsNewerNotifications() throws {
+        let controller = discoverEarpieceSelection(functions: [0xF7])
+        defer { controller.simulateControlLoss() }
+        XCTAssertTrue(controller.earTipFit.supportsEarpieceSelection)
+        XCTAssertFalse(controller.earTipFit.isSupported)
+        XCTAssertFalse(controller.beginEarTipFit())
+        XCTAssertEqual(selectionQueries(controller), [[0xF2, 7]])
+        deliver([0xF7, 7, 1], to: controller)
+        XCTAssertNil(controller.earTipFit.selectedSeries)
+        deliver([0xF3, 7, 0], type: 0x0E, to: controller)
+        deliver([0xF3, 7, 2], to: controller)
+        XCTAssertNil(controller.earTipFit.selectionAvailable)
+        XCTAssertEqual(selectionQueries(controller), [[0xF2, 7]])
+        deliver([0xF3, 7, 1], to: controller)
+        XCTAssertEqual(controller.earTipFit.selectionAvailable, false)
+        try acknowledge([0xF6, 7], on: controller)
+        XCTAssertEqual(selectionQueries(controller), [[0xF2, 7], [0xF6, 7]])
+        deliver([0xF9, 7, 2], to: controller)
+        deliver([0xF7, 7, 1], to: controller)
+        XCTAssertEqual(controller.earTipFit.selectedSeries, .hybrid)
+        deliver([0xF5, 7, 0], to: controller)
+        XCTAssertEqual(controller.earTipFit.selectionAvailable, true)
+        deliver([0xF3, 7, 1], to: controller)
+        XCTAssertEqual(controller.earTipFit.selectionAvailable, true)
+        XCTAssertFalse(payloads(controller).contains { $0.first == 0xF8 })
+        let oldSession = controller.simulatedControlSession
+        controller.simulateDeviceConnection(named: "WF-1000XM5", supportsEarpieceSelection: true)
+        deliver([0xF9, 7, 3], session: oldSession, to: controller)
+        XCTAssertNil(controller.earTipFit.selectedSeries)
+    }
+
+    @MainActor
+    func testFitWaitsForTheStandaloneSeriesReadAndQueriesItsOwnFreshSeries() throws {
+        let controller = discoverEarpieceSelection(functions: [0xF6, 0xF7])
+        defer { controller.simulateControlLoss() }
+        deliver([0xF3, 7, 0], to: controller)
+        try acknowledge([0xF6, 7], on: controller)
+        XCTAssertFalse(controller.beginEarTipFit())
+        deliver([0xF7, 7, 1], to: controller)
+        XCTAssertTrue(controller.beginEarTipFit())
+        XCTAssertEqual(controller.earTipFit.selectionAvailable, true)
+        deliver([0xF7, 7, 3], to: controller)
+        try completeDiscovery(controller)
+        XCTAssertEqual(controller.earTipFitTransition?.phase, .checking)
+        XCTAssertFalse(controller.canStartEarTipFit)
+        deliver([0xF7, 7, 2], to: controller)
+        try acknowledge([0xF6, 7], on: controller)
+        XCTAssertTrue(controller.canStartEarTipFit)
+        XCTAssertEqual(controller.earTipFit.measurementSeries, .hybrid)
+        XCTAssertEqual(selectionQueries(controller), [[0xF2, 7], [0xF6, 7], [0xF6, 7]])
+    }
+
+    @MainActor
+    func testFitCannotTakeOwnershipOfATimedOutStandaloneSeriesReply() async throws {
+        let controller = discoverEarpieceSelection(functions: [0xF6, 0xF7])
+        defer { controller.simulateControlLoss() }
+        deliver([0xF3, 7, 0], to: controller)
+        try acknowledge([0xF6, 7], on: controller)
+        controller.simulateSystemReadTimeout([0xF6, 7])
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertFalse(controller.beginEarTipFit())
+        deliver([0xF7, 7, 2], to: controller)
+        XCTAssertNil(controller.earTipFit.selectedSeries)
+        XCTAssertEqual(selectionQueries(controller), [[0xF2, 7], [0xF6, 7], [0xF2, 7]])
     }
 
     @MainActor
@@ -790,6 +901,30 @@ final class SonyEarTipFitControllerTests: XCTestCase {
         controller.connect()
         XCTAssertNil(controller.earTipFitTransition)
         XCTAssertEqual(controller.simulatedTransmittedFrames, writes)
+    }
+
+    @MainActor
+    private func discoverEarpieceSelection(functions: [UInt8]) -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        while let frame = controller.simulatedPendingFrame {
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        }
+        let name = Array("WF-1000XM5".utf8)
+        deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
+        deliver([0x05, 3, 0, 1], to: controller)
+        deliver([0x07, 0, UInt8(functions.count)] + functions.flatMap { [$0, 0] }, to: controller)
+        while let frame = controller.simulatedPendingFrame {
+            controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []))
+        }
+        XCTAssertTrue(controller.isReady)
+        return controller
+    }
+
+    @MainActor
+    private func selectionQueries(_ controller: SonyHeadphonesController) -> [[UInt8]] {
+        payloads(controller).filter { $0 == [0xF2, 7] || $0 == [0xF6, 7] }
     }
 
     @MainActor

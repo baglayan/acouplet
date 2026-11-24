@@ -2259,8 +2259,8 @@ final class SonyConnectionControllerTests: XCTestCase {
 
     @MainActor
     func testPairingStandbyMustHaveExactLengthKnownOnValueAndAdvertisedFunction() throws {
-        for supportsStandby in [false, true] {
-            let controller = preparedController(supportsStandby: supportsStandby)
+        for (supportsStandby, supportsProfile) in [(false, false), (true, false), (false, true), (true, true)] {
+            let controller = preparedController(supportsStandby: supportsStandby, supportsStandbyProfile: supportsProfile)
             controller.setConnectionMode(.lowLatency)
             acknowledge(controller)
             deliver([0x99, 0x06, 0x10, 0, 1], to: controller)
@@ -2272,6 +2272,7 @@ final class SonyConnectionControllerTests: XCTestCase {
             }
             deliver([0x49, 0x0C, 0], to: controller)
             XCTAssertEqual(controller.connectionTransition?.phase, supportsStandby ? .pairingRequired : .awaitingResponse)
+            XCTAssertEqual(controller.leAudioStandby.enabled, supportsProfile ? true : nil)
             controller.simulateControlLoss()
         }
     }
@@ -2933,6 +2934,22 @@ final class SonyConnectionControllerTests: XCTestCase {
     #endif
 
     @MainActor
+    func testManualRefreshDuringBluetoothInitializationOpensControlsWithAutomaticReconnectOff() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        let device = ServiceDiscoveryDevice()
+        device.reportedName = "WH-1000XM3"
+        device.reportedAddress = "02:53:4F:4E:59:01"
+        controller.pairedDeviceInventory = [device]
+        controller.setReconnectAutomatically(false)
+        controller.refresh()
+        XCTAssertTrue(device.discoveryCallbacks.isEmpty)
+        controller.simulateBluetoothInitialization()
+        XCTAssertEqual(controller.linkState, .opening)
+        XCTAssertEqual(device.discoveryCallbacks.count, 1)
+    }
+
+    @MainActor
     func testInventoryWithoutRequestedConnectionSettlesSearchingAndPreservesFailure() async {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         defer { controller.simulateControlLoss() }
@@ -3131,6 +3148,65 @@ final class SonyConnectionControllerTests: XCTestCase {
         XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0, 0])
         XCTAssertEqual(controller.linkState, .handshaking)
         controller.simulateControlLoss()
+    }
+
+    @MainActor
+    func testULTEqualizerConfirmsCombinedStateAndRefreshesNotifications() throws {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "ULT WEAR", galleryModel: .whULT900N)
+        defer { controller.simulateControlLoss() }
+        let flat = Array(repeating: UInt8(10), count: 6)
+
+        controller.setEqualizerPreset(.bright)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 3, 0x10, 1, 0])
+        acknowledge(controller)
+        deliver([0x59, 3, 0x10, 2, 6] + flat, to: controller)
+        XCTAssertTrue(controller.isEqualizerUpdatePending)
+        XCTAssertTrue(controller.isULTEqualizerSelectionPending)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x5A, 3])
+        deliver([0x59, 3, 0x10, 1, 6] + flat, to: controller)
+        XCTAssertFalse(controller.isEqualizerUpdatePending)
+        XCTAssertEqual(controller.equalizerPreset, .bright)
+        acknowledgeAll(controller)
+
+        controller.setEqualizerULTMode(.ult2)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 3, 0x10, 2, 6] + flat)
+        XCTAssertTrue(controller.isULTEqualizerSelectionPending)
+        acknowledge(controller)
+        deliver([0x59, 3, 0x10, 2, 6] + flat, to: controller)
+        XCTAssertFalse(controller.isEqualizerUpdatePending)
+        XCTAssertEqual(controller.equalizer.ultMode, .ult2)
+        XCTAssertEqual(controller.equalizer.rawValues, flat)
+        acknowledgeAll(controller)
+
+        controller.refreshEqualizer()
+        controller.setEqualizerULTMode(.off)
+        let changed = [UInt8(19)] + flat.dropFirst()
+        let unsolicited: [UInt8] = [0x59, 3, 0x10, 0, 6] + changed
+        deliver(unsolicited, to: controller)
+        acknowledgeAll(controller)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.isEqualizerUpdatePending)
+        XCTAssertEqual(controller.equalizer.rawValues, changed)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == [0x58, 3, 0x10, 0, 6] + flat })
+        deliver([0x57] + unsolicited.dropFirst(), to: controller)
+
+        controller.refreshEqualizer(trackConfirmation: true)
+        acknowledgeAll(controller)
+        deliver([0x57, 3, 0x10, 2, 0], to: controller)
+        XCTAssertNil(controller.equalizer.settings)
+        XCTAssertNil(controller.equalizerReadbackID)
+        XCTAssertNotNil(controller.settingErrors[.equalizerReadback])
+
+        let previousWrites = controller.simulatedTransmittedFrames.count
+        deliver([0x55, 3, 1], to: controller)
+        acknowledgeAll(controller)
+        XCTAssertEqual(controller.equalizer.available, false)
+        let refreshed = controller.simulatedTransmittedFrames.dropFirst(previousWrites)
+            .filter { $0.type == 0x0C }.map(\.payload)
+        XCTAssertEqual(refreshed, [[0x52, 3], [0x5A, 3], [0x56, 3]])
+        controller.setEqualizerULTMode(.off)
+        XCTAssertNil(controller.simulatedPendingFrame)
     }
 
     @MainActor
@@ -3498,7 +3574,8 @@ final class SonyConnectionControllerTests: XCTestCase {
 
     @MainActor
     private func preparedController(identityDefaults: UserDefaults? = nil, supportsStandby: Bool = true,
-                                    pinnedAddress: String? = nil, connectionFunction: UInt8 = 0xE7) -> SonyHeadphonesController {
+                                    pinnedAddress: String? = nil, connectionFunction: UInt8 = 0xE7,
+                                    supportsStandbyProfile: Bool = false) -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true, identityDefaults: identityDefaults, pinnedAddress: pinnedAddress)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
         deliver([0x01, 0x00, 0x03, 0x00, 0x30, 0x18, 0x00, 0x00], to: controller, begin: true)
@@ -3506,7 +3583,8 @@ final class SonyConnectionControllerTests: XCTestCase {
         let name = Array("WF-1000XM5".utf8)
         deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
         deliver([0x05, 3, 0, 1], to: controller)
-        let functions: [UInt8] = [0x6B, 0x11, 0x12, 0x14, 0x40, 0x44, 0x50, 0x90, connectionFunction].filter { $0 != 0x40 || supportsStandby }
+        let functions: [UInt8] = [0x6B, 0x11, 0x12, 0x14, 0x40, 0x42, 0x44, 0x50, 0x90, connectionFunction]
+            .filter { ($0 != 0x40 || supportsStandby) && ($0 != 0x42 || supportsStandbyProfile) }
         deliver([0x07, 0, UInt8(functions.count)] + functions.flatMap { [$0, 0] }, to: controller)
         deliver([0x51, 0, 6, 21, 2, 0x16, 0, 0xA0, 0], to: controller)
         deliver([0x53, 0, 0], to: controller)

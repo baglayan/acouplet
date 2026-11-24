@@ -38,6 +38,239 @@ final class SonyAudioFeaturesTests: XCTestCase {
         XCTAssertEqual(audio.dseeSetPayload(.automatic), [0xE8, 0x01, 0x01])
     }
 
+    func testUpscalingIndicatorParsesCurrentEffectSeparatelyFromDSEESetting() {
+        var audio = SonyAudioFeatures(supportedFunctions: [0x13, 0xE2])
+        XCTAssertEqual(audio.queryPayloads, [[0x12, 0x03], [0xE0, 0x01], [0xE2, 0x01], [0xE6, 0x01]])
+        XCTAssertTrue(audio.update([0xE1, 0x01, 0x02]))
+        XCTAssertTrue(audio.update([0x13, 0x03, 0x03, 0x01]))
+        XCTAssertEqual(audio.upscalingType, .ultimate)
+        XCTAssertEqual(audio.upscalingStatus, .valid)
+        XCTAssertEqual(audio.dseeType, .extreme)
+        XCTAssertNil(audio.dseeMode)
+
+        let previous = audio
+        for payload: [UInt8] in [[0x13, 3, 3, 0xFF], [0x13, 3, 0xFF, 0], [0x15, 3, 1], [0x15, 3, 1, 2, 0]] {
+            XCTAssertFalse(audio.update(payload))
+            XCTAssertEqual(audio, previous)
+        }
+        XCTAssertTrue(audio.update([0x15, 0x03, 0xFF, 0x02]))
+        XCTAssertNil(audio.upscalingType)
+        XCTAssertEqual(audio.upscalingStatus, .invalid)
+        XCTAssertTrue(audio.update([0x15, 0x03, 0x02, 0xFF]))
+        XCTAssertEqual(audio.upscalingType, .extreme)
+        XCTAssertNil(audio.upscalingStatus)
+
+        var unsupported = SonyAudioFeatures(supportedFunctions: [0x12, 0xE2])
+        XCTAssertFalse(unsupported.update([0x15, 0x03, 0x03, 0x01]))
+    }
+
+    func testDSEEWithDisableReasonsKeepsAvailabilityModeAndReasonsSeparate() {
+        var audio = SonyAudioFeatures(supportedFunctions: [0xED])
+        XCTAssertEqual(audio.queryPayloads, [[0xE0, 0x0B], [0xE2, 0x0B], [0xE6, 0x0B]])
+        XCTAssertNil(audio.dseeSetPayload(.automatic))
+        XCTAssertTrue(audio.update([0xE1, 0x0B, 3]))
+        XCTAssertTrue(audio.update([0xE7, 0x0B, 0]))
+        XCTAssertTrue(audio.update([0xE3, 0x0B, 0, 3, 0x0B, 0, 0xFE]))
+        XCTAssertEqual(audio.dseeType, .ultimate)
+        XCTAssertEqual(audio.dseeMode, .off)
+        XCTAssertEqual(audio.dseeAvailable, true)
+        XCTAssertEqual(audio.dseeDisableReasons, [.listeningModeIsNotStandard, .calling, .other])
+        XCTAssertNil(audio.dseeSetPayload(.automatic))
+
+        let before = audio
+        for invalid: [UInt8] in [[0xE1, 0x0B, 0xFF], [0xE9, 0x0B, 2], [0xE5, 0x0B, 2, 0],
+                                  [0xE5, 0x0B, 0], [0xE5, 0x0B, 0, 1], [0xE5, 0x0B, 0, 0, 0],
+                                  [0xE5, 0x0B, 0, 1, 0xFF], [0xE5, 1, 0]] {
+            XCTAssertFalse(audio.update(invalid))
+            XCTAssertEqual(audio, before)
+        }
+        XCTAssertTrue(audio.update([0xE5, 0x0B, 1, 0]))
+        XCTAssertNil(audio.dseeSetPayload(.automatic))
+        XCTAssertTrue(audio.update([0xE5, 0x0B, 0, 0]))
+        XCTAssertEqual(audio.dseeSetPayload(.automatic), [0xE8, 0x0B, 1])
+        XCTAssertNil(audio.dseeSetPayload(.unknown(2)))
+        audio.invalidateDSEEStatus()
+        XCTAssertNil(audio.dseeSetPayload(.automatic))
+
+        var both = SonyAudioFeatures(supportedFunctions: [0xE2, 0xED])
+        XCTAssertEqual(both.queryPayloads, [[0xE0, 1], [0xE2, 1], [0xE6, 1]])
+        XCTAssertFalse(both.update([0xE5, 0x0B, 0, 1, 0]))
+    }
+
+    func testVoiceContentsSeparatesEligibilityStateAndExclusions() {
+        var audio = SonyAudioFeatures(supportedFunctions: [0xE8])
+        XCTAssertEqual(audio.queryPayloads, [[0xE0, 6], [0xE2, 6], [0xE6, 6]])
+        XCTAssertTrue(audio.update([0xE9, 6, 1]))
+        XCTAssertTrue(audio.update([0xE5, 6, 0]))
+        XCTAssertNil(audio.voiceContents?.setPayload(enabled: true))
+        XCTAssertFalse(audio.update([0xE1, 6, 1, 0xFF]))
+        XCTAssertNil(audio.voiceContents?.exclusions)
+        XCTAssertTrue(audio.update([0xE1, 6, 4, 0, 1, 3, 15]))
+        XCTAssertEqual(audio.voiceContents?.exclusions, [0, 1, 3, 15])
+        XCTAssertEqual(audio.voiceContents?.setPayload(enabled: true), [0xE8, 6, 0])
+        XCTAssertNil(audio.soundLeakageReduction)
+        XCTAssertFalse(audio.update([0xE9, 7, 0]))
+        XCTAssertFalse(audio.update([0xE9, 6, 0, 0]))
+        XCTAssertEqual(audio.voiceContents?.enabled, false)
+        XCTAssertTrue(audio.update([0xE9, 6, 0]))
+        XCTAssertTrue(audio.update([0xE5, 6, 1]))
+        XCTAssertEqual(audio.voiceContents?.setPayload(enabled: false), [0xE8, 6, 1])
+        audio.invalidateVoiceContentsRead([0xE2, 6])
+        XCTAssertNil(audio.voiceContents?.available)
+        XCTAssertEqual(audio.voiceContents?.enabled, true)
+        XCTAssertNil(audio.voiceContents?.setPayload(enabled: false))
+        XCTAssertNil(SonyAudioFeatures(supportedFunctions: [0xE6, 0xE9]).voiceContents)
+    }
+
+    @MainActor
+    func testVoiceContentsRequiresOwnedStateAndGatesReportedAudioExclusions() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
+        func deliver(_ payload: [UInt8], type: UInt8 = 0x0C) {
+            controller.simulateProtocolMessage(payload, type: type)
+            acknowledgeSimulatedCommands(controller)
+        }
+
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x07, 0, 4, 0x12, 0, 0x50, 0, 0xE2, 0, 0xE8, 0])
+        deliver([0x51, 0, 6, 21, 2, 0x16, 0, 0xA0, 0])
+        deliver([0x53, 0, 0])
+        deliver([0xE1, 1, 2])
+        deliver([0xE3, 1, 0])
+        deliver([0xE7, 1, 1])
+        deliver([0xE9, 6, 1], type: 0x0E)
+        deliver([0xE7, 6, 0])
+        XCTAssertNil(controller.audioFeatures.voiceContents?.enabled)
+        deliver([0xE1, 6, 3, 0, 1, 3])
+        deliver([0xE3, 6, 0])
+        deliver([0xE7, 6, 1])
+        let queries = controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && $0.payload.last == 6 }.map(\.payload)
+        XCTAssertEqual(queries, [[0xE0, 6], [0xE2, 6], [0xE6, 6]])
+        XCTAssertTrue(controller.canSetDSEE)
+        XCTAssertTrue(controller.canSetVoiceContents)
+        deliver([0x15, 2, 0x30])
+        XCTAssertNotNil(controller.voiceContentsConnectionRestriction)
+        XCTAssertFalse(controller.canSetVoiceContents)
+        deliver([0x15, 2, 2])
+        XCTAssertNil(controller.voiceContentsConnectionRestriction)
+
+        controller.setVoiceContents(true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE8, 6, 0])
+        XCTAssertTrue(controller.listeningModeExcludesEqualizer)
+        XCTAssertFalse(controller.canSetDSEE)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0xE9, 7, 0])
+        deliver([0xE7, 6, 0])
+        XCTAssertEqual(controller.audioFeatures.voiceContents?.enabled, false)
+        XCTAssertEqual(controller.pendingChanges[.voiceContents], [0])
+        deliver([0xE9, 6, 0])
+        XCTAssertEqual(controller.audioFeatures.voiceContents?.enabled, true)
+        XCTAssertNil(controller.pendingChanges[.voiceContents])
+        controller.setEqualizerPreset(0x16)
+        controller.setDSEE(.off)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        XCTAssertEqual(controller.dseeMode, .automatic)
+
+        deliver([0xE5, 6, 1])
+        controller.setVoiceContents(false)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE8, 6, 1])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0xE9, 6, 1])
+        XCTAssertFalse(controller.canSetVoiceContents)
+        XCTAssertFalse(controller.listeningModeExcludesEqualizer)
+        XCTAssertTrue(controller.canSetDSEE)
+        controller.simulateControlLoss()
+        XCTAssertNil(controller.audioFeatures.voiceContents)
+    }
+
+    func testSoundLeakageReductionKeepsAvailabilityStateAndExclusionsSeparate() {
+        var unsupported = SonyAudioFeatures(supportedFunctions: [0xE2, 0xE8])
+        XCTAssertFalse(unsupported.update([0xE9, 7, 0]))
+        XCTAssertNil(unsupported.soundLeakageReduction)
+
+        var audio = SonyAudioFeatures(supportedFunctions: [0xE9])
+        XCTAssertEqual(audio.queryPayloads, [[0xE0, 7], [0xE2, 7], [0xE6, 7]])
+        XCTAssertNil(audio.soundLeakageReduction?.setPayload(enabled: true))
+        XCTAssertTrue(audio.update([0xE1, 7, 3, 0, 1, 0x0F]))
+        XCTAssertTrue(audio.update([0xE3, 7, 0]))
+        XCTAssertTrue(audio.update([0xE7, 7, 1]))
+        XCTAssertEqual(audio.soundLeakageReduction?.exclusions, [0, 1, 0x0F])
+        XCTAssertEqual(audio.soundLeakageReduction?.enabled, false)
+        XCTAssertEqual(audio.soundLeakageReduction?.setPayload(enabled: true), [0xE8, 7, 0])
+        XCTAssertTrue(audio.update([0xE9, 7, 0]))
+        XCTAssertEqual(audio.soundLeakageReduction?.setPayload(enabled: false), [0xE8, 7, 1])
+        XCTAssertTrue(audio.update([0xE5, 7, 1]))
+        XCTAssertEqual(audio.soundLeakageReduction?.enabled, true)
+        XCTAssertEqual(audio.soundLeakageReduction?.available, false)
+        XCTAssertNil(audio.soundLeakageReduction?.setPayload(enabled: true))
+        XCTAssertEqual(audio.soundLeakageReduction?.setPayload(enabled: false), [0xE8, 7, 1])
+        let unchanged = audio
+        for payload: [UInt8] in [[0xE1, 7, 1], [0xE1, 7, 1, 0x10], [0xE3, 7, 2], [0xE9, 1, 0], [0xE9, 7, 0, 0]] {
+            XCTAssertFalse(audio.update(payload))
+            XCTAssertEqual(audio, unchanged)
+        }
+    }
+
+    @MainActor
+    func testSoundLeakageReductionUsesNegotiatedWritesAndPreservesDSEEState() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM5", controlBusy: true)
+        defer { controller.simulateControlLoss() }
+        func deliver(_ payload: [UInt8], type: UInt8 = 0x0C) {
+            controller.simulateProtocolMessage(payload, type: type)
+            acknowledgeSimulatedCommands(controller)
+        }
+
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x07, 0, 3, 0x50, 0, 0xE2, 0, 0xE9, 0])
+        deliver([0x51, 0, 6, 21, 2, 0x16, 0, 0xA0, 0])
+        deliver([0x53, 0, 0])
+        deliver([0xE1, 1, 2])
+        deliver([0xE3, 1, 0])
+        deliver([0xE7, 1, 1])
+        deliver([0xE1, 7, 2, 0, 1])
+        deliver([0xE3, 7, 0])
+        deliver([0xE7, 7, 1])
+        let queries = controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && $0.payload.last == 7 }.map(\.payload)
+        XCTAssertEqual(queries, [[0xE0, 7], [0xE2, 7], [0xE6, 7]])
+        XCTAssertTrue(controller.canSetDSEE)
+        XCTAssertTrue(controller.canSetSoundLeakageReduction)
+        XCTAssertNotNil(controller.equalizer.presetPayload(0x16))
+
+        controller.setSoundLeakageReduction(true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE8, 7, 0])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0xE9, 7, 0], type: 0x0E)
+        deliver([0xE7, 7, 0])
+        XCTAssertEqual(controller.audioFeatures.soundLeakageReduction?.enabled, false)
+        XCTAssertNotNil(controller.pendingChanges[.soundLeakageReduction])
+        deliver([0xE9, 7, 0])
+        XCTAssertEqual(controller.audioFeatures.soundLeakageReduction?.enabled, true)
+        XCTAssertNil(controller.pendingChanges[.soundLeakageReduction])
+        XCTAssertTrue(controller.soundLeakageReductionExcludes(.equalizer))
+        XCTAssertFalse(controller.canSetDSEE)
+        XCTAssertEqual(controller.dseeMode, .automatic)
+        controller.setDSEE(.off)
+        controller.setEqualizerPreset(0x16)
+        XCTAssertNil(controller.simulatedPendingFrame)
+
+        deliver([0xE5, 7, 1])
+        XCTAssertTrue(controller.canSetSoundLeakageReduction)
+        controller.setSoundLeakageReduction(false)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xE8, 7, 1])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0xE9, 7, 1])
+        XCTAssertTrue(controller.canSetDSEE)
+        XCTAssertFalse(controller.soundLeakageReductionExcludes(.equalizer))
+        controller.setSoundLeakageReduction(true)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        controller.simulateControlLoss()
+        XCTAssertNil(controller.audioFeatures.soundLeakageReduction)
+    }
+
     func testNotificationsKeepAvailabilitySeparateFromConfiguredMode() {
         var audio = SonyAudioFeatures(supportedFunctions: [0x12, 0xE2])
         XCTAssertNil(audio.dseeAvailable)
@@ -407,6 +640,36 @@ final class SonyAudioFeaturesTests: XCTestCase {
         XCTAssertTrue(controller.supportedFunctions.isEmpty)
         XCTAssertTrue(controller.supportedFunctions2.isEmpty)
         XCTAssertNil(controller.lastSyncDate)
+    }
+
+    @MainActor
+    func testControllerUpscalingReadbackAndNotificationTrackModernTableOne() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        func deliver(_ payload: [UInt8], type: UInt8 = 0x0C, beginConnection: Bool = false) {
+            controller.simulateProtocolMessage(payload, type: type, beginConnection: beginConnection)
+            acknowledgeSimulatedCommands(controller)
+        }
+        deliver([0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00], beginConnection: true)
+        deliver([0x07, 0x00, 0x01, 0x13, 0x00])
+        XCTAssertTrue(controller.supportsUpscalingStatus)
+        XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0C && $0.payload == [0x12, 0x03] })
+        deliver([0x13, 0x03, 0x03, 0x01], type: 0x0E)
+        XCTAssertNil(controller.upscalingIndicatorType)
+        deliver([0x13, 0x03, 0x03, 0x01])
+        XCTAssertEqual(controller.upscalingIndicatorType, .ultimate)
+        XCTAssertEqual(controller.upscalingIndicatorStatus, .valid)
+
+        controller.requestCurrentSettings()
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x15, 0x03, 0x03, 0x02])
+        deliver([0x13, 0x03, 0x03, 0x01])
+        XCTAssertEqual(controller.upscalingIndicatorStatus, .invalid)
+        deliver([0x13, 0x03, 0x03, 0x00])
+        XCTAssertEqual(controller.upscalingIndicatorStatus, .off)
+
+        controller.simulateControlLoss()
+        XCTAssertNil(controller.upscalingIndicatorType)
+        XCTAssertNil(controller.upscalingIndicatorStatus)
     }
 
     @MainActor

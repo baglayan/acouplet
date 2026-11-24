@@ -54,6 +54,64 @@ final class SonyEqualizerTests: XCTestCase {
         XCTAssertEqual(custom, retained)
     }
 
+    @MainActor
+    func testStandaloneSpeakerEQOwnsReadbacksAndRevokesDeferredEdits() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "SRS-ULT1000", controlBusy: true)
+        defer { controller.simulateControlLoss() }
+        func deliver(_ payload: [UInt8], type: UInt8 = 0x0C) {
+            controller.simulateProtocolMessage(payload, type: type)
+            acknowledgeSimulatedCommands(controller)
+        }
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x07, 0, 2, 0x54, 0, 0x55, 0])
+        let queries = controller.equalizer.soundEffect.queryPayloads + controller.equalizer.customEQ.queryPayloads
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && queries.contains($0.payload) }.map(\.payload), queries)
+        deliver([0x51, 0x30, 3, 0, 2, 3, 0])
+        deliver([0x53, 0x30, 0, 3, 0, 0, 2, 1, 3, 0])
+        deliver([0x57, 0x30, 0])
+        deliver([0x51, 0x31, 2, 21])
+        deliver([0x53, 0x31, 0])
+        deliver([0x57, 0x31, 2, 9, 11])
+        deliver([0x5B, 0x31, 2, 1, 0, 100, 2, 0, 4])
+        controller.setSoundEffect(.ult1)
+        XCTAssertNil(controller.pendingChanges[.soundEffect])
+        controller.setSoundEffect(.ult2)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 0x30, 3])
+        deliver([0x59, 0x30, 3], type: 0x0E)
+        deliver([0x57, 0x30, 3])
+        XCTAssertEqual(controller.pendingChanges[.soundEffect], [3])
+        deliver([0x59, 0x30, 3])
+        XCTAssertNil(controller.pendingChanges[.soundEffect])
+
+        let original = controller.equalizer.customEQ
+        controller.defersSimulatedWrites = true
+        controller.setCustomEQLevels([10, 11], basedOn: original)
+        let setter: [UInt8] = [0x58, 0x31, 2, 10, 11]
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, setter)
+        controller.simulateProtocolMessage([0x55, 0x31, 1])
+        controller.defersSimulatedWrites = false
+        controller.completeSimulatedWrite()
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == setter })
+        XCTAssertNil(controller.pendingChanges[.customEQ])
+        deliver([0x55, 0x31, 0])
+        deliver([0x59, 0x31, 2, 13, 11])
+        controller.setCustomEQLevels([10, 11], basedOn: original)
+        XCTAssertNil(controller.pendingChanges[.customEQ])
+        controller.setCustomEQLevels([10, 11], basedOn: controller.equalizer.customEQ)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, setter)
+        deliver([0x59, 0x33, 3, 0])
+        XCTAssertEqual(controller.pendingChanges[.customEQ], [2, 10, 11])
+        deliver([0x59, 0x31, 2, 10, 11])
+        XCTAssertNil(controller.pendingChanges[.customEQ])
+        XCTAssertEqual(controller.equalizer.customEQ.values, [10, 11])
+        controller.simulateControlLoss()
+        XCTAssertFalse(controller.equalizer.customEQ.isSupported)
+        XCTAssertFalse(controller.equalizer.soundEffect.isSupported)
+    }
+
     func testCustomSoundEffectRequiresReportedModesAndLevelRange() {
         XCTAssertFalse(SonyEqualizer(supportedFunctions: [0x59]).isSupported)
         XCTAssertFalse(SonyEqualizer(supportedFunctions: [0x59], generation: .v1).customSoundEffect.isSupported)
@@ -93,6 +151,64 @@ final class SonyEqualizerTests: XCTestCase {
         XCTAssertEqual(editable, retained)
     }
 
+    @MainActor
+    func testCustomSoundEffectConfirmsOwnedCommandsAndRejectsSupersededEdit() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "SRS-ULT1000", controlBusy: true)
+        defer { controller.simulateControlLoss() }
+        func deliver(_ payload: [UInt8], type: UInt8 = 0x0C) {
+            controller.simulateProtocolMessage(payload, type: type)
+            acknowledgeSimulatedCommands(controller)
+        }
+
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x07, 0, 1, 0x59, 0])
+        let queries = controller.equalizer.customSoundEffect.queryPayloads
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && queries.contains($0.payload) }.map(\.payload), queries)
+        deliver([0x51, 0x33, 2, 21, 2, 6, 3])
+        deliver([0x5B, 0x33, 2, 1, 0, 200, 0x10, 0, 1])
+        deliver([0x57, 0x33, 6, 0, 2, 2, 9, 10, 2, 12, 14])
+
+        controller.selectCustomSoundEffect(.ult2)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 0x33, 3])
+        deliver([0x59, 0x33, 3, 0], type: 0x0E)
+        deliver([0x57, 0x33, 3, 0, 2, 2, 9, 10, 2, 12, 14])
+        XCTAssertEqual(controller.pendingChanges[.customSoundEffect], [0x33, 3])
+        deliver([0x59, 0x33, 3, 0])
+        XCTAssertNil(controller.pendingChanges[.customSoundEffect])
+        XCTAssertEqual(controller.equalizer.customSoundEffect.values, [12, 14])
+
+        controller.editCustomSoundEffect(.ult2, values: [11, 14], basedOn: [9, 10])
+        XCTAssertNil(controller.pendingChanges[.customSoundEffect])
+        controller.defersSimulatedWrites = true
+        let superseded: [UInt8] = [0x58, 0x35, 0, 3, 2, 11, 14]
+        controller.editCustomSoundEffect(.ult2, values: [11, 14], basedOn: [12, 14])
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, superseded)
+        controller.simulateProtocolMessage([0x59, 0x36, 3, 0, 2, 15, 14])
+        controller.defersSimulatedWrites = false
+        controller.completeSimulatedWrite()
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == superseded })
+
+        controller.editCustomSoundEffect(.ult2, values: [11, 14], basedOn: [15, 14])
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, superseded)
+        deliver([0x59, 0x36, 3, 0, 2, 11, 14])
+        XCTAssertEqual(controller.pendingChanges[.customSoundEffect], Array(superseded.dropFirst()))
+        deliver([0x59, 0x35, 3, 2, 11, 14])
+        XCTAssertNil(controller.pendingChanges[.customSoundEffect])
+
+        controller.resetCustomSoundEffect(.ult2)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 0x34, 3])
+        deliver([0x59, 0x34, 6, 2, 8, 10])
+        XCTAssertEqual(controller.pendingChanges[.customSoundEffect], [0x34, 3])
+        deliver([0x59, 0x34, 3, 2, 10, 10])
+        XCTAssertNil(controller.pendingChanges[.customSoundEffect])
+        XCTAssertEqual(controller.equalizer.customSoundEffect.values, [10, 10])
+        controller.simulateControlLoss()
+        XCTAssertNil(controller.equalizer.customSoundEffect.selectedEffect)
+    }
+
     func testULTButtonAssignmentUsesReportedModesAndSelectionLimits() {
         let equalizer = SonyEqualizer(supportedFunctions: [0x58])
         XCTAssertFalse(equalizer.isSupported)
@@ -117,6 +233,54 @@ final class SonyEqualizerTests: XCTestCase {
         XCTAssertNil(assignment.setPayload(.custom, enabled: true))
         XCTAssertNil(assignment.setPayload(.live, enabled: true))
         XCTAssertEqual(assignment.setPayload(.live, enabled: false), [0x58, 0x40, 4, 6, 1, 0, 0, 2, 0, 4, 1])
+    }
+
+    @MainActor
+    func testULTButtonAssignmentUsesTableOneAndRejectsSupersededWrites() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "SRS-ULT1000", controlBusy: true)
+        defer { controller.simulateControlLoss() }
+        func deliver(_ payload: [UInt8], type: UInt8 = 0x0C) {
+            controller.simulateProtocolMessage(payload, type: type)
+            acknowledgeSimulatedCommands(controller)
+        }
+
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x07, 0, 1, 0x58, 0])
+        let queries = controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && $0.payload.dropFirst().first == 0x40 }.map(\.payload)
+        XCTAssertEqual(queries, [[0x50, 0x40], [0x56, 0x40]])
+        deliver([0x51, 0x40, 2, 3], type: 0x0E)
+        XCTAssertNil(controller.equalizer.ultSoundEffectAssignment.selectionCount)
+        deliver([0x51, 0x40, 2, 3])
+        let original: [UInt8] = [4, 3, 0, 0, 0, 2, 1, 4, 1]
+        let requested: [UInt8] = [4, 3, 0, 0, 0, 2, 0, 4, 1]
+        deliver([0x57, 0x40] + original)
+        controller.setULTSoundEffectAssignment(.off, enabled: false)
+        XCTAssertNil(controller.pendingChanges[.ultSoundEffectAssignment])
+        controller.setULTSoundEffectAssignment(.ult1, enabled: true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 0x40] + requested)
+        deliver([0x59, 0x40] + requested, type: 0x0E)
+        deliver([0x57, 0x40] + requested)
+        XCTAssertEqual(controller.pendingChanges[.ultSoundEffectAssignment], requested)
+        deliver([0x59, 0x40] + requested)
+        XCTAssertNil(controller.pendingChanges[.ultSoundEffectAssignment])
+        XCTAssertEqual(controller.equalizer.ultSoundEffectAssignment.entries?.filter(\.enabled).map(\.id), [.ult2, .off, .ult1])
+
+        controller.defersSimulatedWrites = true
+        controller.setULTSoundEffectAssignment(.off, enabled: false)
+        let superseded = [0x58, 0x40, 4, 3, 0, 0, 1, 2, 0, 4, 1] as [UInt8]
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, superseded)
+        controller.simulateProtocolMessage([0x59, 0x40, 4, 3, 0, 0, 0, 2, 1, 4, 0])
+        controller.defersSimulatedWrites = false
+        controller.completeSimulatedWrite()
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload == superseded })
+        XCTAssertNil(controller.pendingChanges[.ultSoundEffectAssignment])
+        XCTAssertEqual(controller.equalizer.ultSoundEffectAssignment.entries?.filter(\.enabled).map(\.id), [.ult2, .off, .custom])
+        controller.simulateControlLoss()
+        XCTAssertFalse(controller.equalizer.ultSoundEffectAssignment.isSupported)
+        XCTAssertNil(controller.equalizer.ultSoundEffectAssignment.entries)
     }
 
     func testTurnKeyEqualizerCapabilitiesAreIndependentOfThePresetEditor() {
@@ -148,6 +312,75 @@ final class SonyEqualizerTests: XCTestCase {
         XCTAssertEqual(manager.limit, .maximum)
     }
 
+    @MainActor
+    func testTurnKeyEqualizerControllerConfirmsOnlyTheTransmittedOperation() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM5", controlBusy: true)
+        defer { controller.simulateControlLoss() }
+        func deliver(_ payload: [UInt8], type: UInt8 = 0x0C) {
+            controller.simulateProtocolMessage(payload, type: type)
+            acknowledgeSimulatedCommands(controller)
+        }
+
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x07, 0, 2, 0x56, 0, 0x5B, 0])
+        for query in SonyTurnKeyEqualizer(supportsImport: true, supportsManagement: true).queryPayloads {
+            XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0C && $0.payload == query })
+        }
+        deliver([0x51, 0x37, 1, 0xB0], type: 0x0E)
+        XCTAssertNil(controller.equalizer.turnKey.deletablePresets)
+        deliver([0x51, 0x37, 1, 0xB0])
+        deliver([0x53, 0x37, 0])
+        controller.importTurnKeyEqualizer("AQID")
+        controller.deleteTurnKeyEqualizerPreset(0xB1)
+        XCTAssertNil(controller.pendingChanges[.turnKeyEQ])
+
+        controller.deleteTurnKeyEqualizerPreset(0xB0)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 0x37, 0xB0])
+        deliver([0x59, 0x32, 0])
+        XCTAssertEqual(controller.pendingChanges[.turnKeyEQ], [0x37, 0xB0])
+        deliver([0x59, 0x37, 0], type: 0x0E)
+        XCTAssertEqual(controller.pendingChanges[.turnKeyEQ], [0x37, 0xB0])
+        deliver([0x59, 0x37, 0])
+        XCTAssertNil(controller.pendingChanges[.turnKeyEQ])
+        XCTAssertNil(controller.equalizer.turnKey.deletablePresets)
+        XCTAssertEqual(controller.equalizer.turnKey.lastCompletedOperation, 0x37)
+
+        deliver([0x51, 0x37, 0])
+        deliver([0x53, 0x37, 1])
+        controller.importTurnKeyEqualizer("AQID")
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 0x32, 3, 1, 2, 3])
+        deliver([0x59, 0x32, 2])
+        XCTAssertNil(controller.pendingChanges[.turnKeyEQ])
+        XCTAssertNotNil(controller.settingErrors[.turnKeyEQ])
+        XCTAssertNil(controller.equalizer.turnKey.lastCompletedOperation)
+        XCTAssertNil(controller.equalizer.presetID)
+
+        deliver([0x99, 0, 0x93, 1])
+        XCTAssertTrue(controller.turnKeyImportActions.isEmpty)
+        for action: SonyConnectionAlertAction in [.negative, .positive] {
+            controller.importTurnKeyEqualizer("AQID")
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 0x32, 3, 1, 2, 3])
+            deliver([0x99, 0, 0x93, 1], type: 0x0E)
+            deliver([0x59, 0x32, 0])
+            XCTAssertTrue(controller.turnKeyImportActions.isEmpty)
+            XCTAssertNil(controller.equalizer.turnKey.lastCompletedOperation)
+            deliver([0x99, 0, 0x93, 1])
+            XCTAssertEqual(controller.turnKeyImportActions, [.negative, .positive])
+            controller.respondToTurnKeyEqualizerImport(action)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x98, 0, 0x93, action.rawValue])
+            XCTAssertNil(controller.equalizer.turnKey.lastCompletedOperation)
+            acknowledgeSimulatedCommands(controller)
+            XCTAssertNil(controller.pendingChanges[.turnKeyEQ])
+            XCTAssertEqual(controller.equalizer.turnKey.lastCompletedOperation, action == .positive ? 0x32 : nil)
+        }
+        deliver([0x99, 0, 0x96, 0])
+        XCTAssertNil(controller.equalizer.turnKey.deletablePresets)
+        controller.simulateControlLoss()
+        XCTAssertFalse(controller.equalizer.turnKey.supportsManagement)
+    }
+
     func testLRBalanceCorrectionUsesItsOwnCapabilityAndParameter() {
         let legacy = SonyEqualizer(supportedFunctions: [0x5A], generation: .v1)
         XCTAssertFalse(legacy.lrBalanceCorrection.isSupported)
@@ -174,6 +407,54 @@ final class SonyEqualizerTests: XCTestCase {
         XCTAssertEqual(state.setPayload(enabled: true), [0x58, 0x50, 0])
         XCTAssertTrue(state.update([0x55, 0x50, 1]))
         XCTAssertNil(state.setPayload(enabled: true))
+    }
+
+    @MainActor
+    func testLRBalanceCorrectionControllerRequiresSetupAndConfirmsExistingCorrection() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WH-1000XM5", controlBusy: true)
+        defer { controller.simulateControlLoss() }
+        func deliver(_ payload: [UInt8], type: UInt8 = 0x0C) {
+            controller.simulateProtocolMessage(payload, type: type)
+            acknowledgeSimulatedCommands(controller)
+        }
+
+        controller.simulateProtocolMessage([0x01, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x07, 0, 1, 0x5A, 0])
+        let queries = controller.simulatedTransmittedFrames.filter { $0.type == 0x0C && $0.payload.count >= 2
+            && (0x50...0x51).contains($0.payload[1]) }.map(\.payload)
+        XCTAssertEqual(queries, [[0x50, 0x51, 1], [0x52, 0x50], [0x52, 0x51], [0x56, 0x50]])
+        deliver([0x51, 0x51, 7, 0, 32])
+        deliver([0x53, 0x50, 0])
+        deliver([0x53, 0x51, 0])
+        deliver([0x57, 0x50, 2])
+        XCTAssertEqual(controller.equalizer.lrBalanceCorrection.mode, .offNotInitialized)
+        controller.setLRBalanceCorrection(true)
+        XCTAssertFalse(controller.canSetLRBalanceCorrection)
+        XCTAssertNil(controller.simulatedPendingFrame)
+
+        deliver([0x59, 0x50, 1], type: 0x0E)
+        XCTAssertEqual(controller.equalizer.lrBalanceCorrection.mode, .offNotInitialized)
+        deliver([0x59, 0x50, 1])
+        XCTAssertTrue(controller.canSetLRBalanceCorrection)
+        controller.setLRBalanceCorrection(true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 0x50, 0])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x57, 0x50, 0])
+        XCTAssertNotNil(controller.pendingChanges[.lrBalanceCorrection])
+        deliver([0x59, 0x51, 0, 0])
+        XCTAssertEqual(controller.equalizer.lrBalanceCorrection.mode, .off)
+        deliver([0x59, 0x50, 0])
+        XCTAssertEqual(controller.equalizer.lrBalanceCorrection.mode, .on)
+        XCTAssertNil(controller.pendingChanges[.lrBalanceCorrection])
+        controller.setLRBalanceCorrection(false)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, 0x50, 1])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x59, 0x50, 1])
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.payload.starts(with: [0x58, 0x51]) })
+        controller.simulateControlLoss()
+        XCTAssertFalse(controller.equalizer.lrBalanceCorrection.isSupported)
     }
 
     func testStandaloneBassBoostKeepsSignedRangesSeparateFromPresetEqualizer() {
@@ -205,6 +486,61 @@ final class SonyEqualizerTests: XCTestCase {
             XCTAssertTrue(equalizer.bassBoost.update([0x55, inquiry, 1]))
             XCTAssertNil(equalizer.bassBoost.setPayload(12))
             XCTAssertNil(equalizer.presetID)
+        }
+    }
+
+    @MainActor
+    func testBassBoostControllerRequiresFreshTableOneDataAndConfirmsOnlyNewLevel() throws {
+        for (legacy, function, inquiry): (Bool, UInt8, UInt8) in [(true, 0x52, 2), (false, 0x51, 1)] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            func acknowledgeCommands() {
+                for _ in 0..<40 {
+                    guard let frame = controller.simulatedPendingFrame else { return }
+                    controller.simulateProtocolData(SonyFrameCodec.encode(type: 1, sequence: 1 - frame.sequence, payload: []))
+                }
+            }
+            controller.simulateDeviceConnection(named: "WF-1000XM4", controlBusy: true)
+            controller.simulateProtocolMessage(legacy ? [0x01, 0, 2, 0x10] : [0x01, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+            acknowledgeCommands()
+            if legacy {
+                let name = Array("WF-1000XM4".utf8)
+                controller.simulateProtocolMessage([0x05, 1, UInt8(name.count)] + name)
+                controller.simulateProtocolMessage([0x05, 3, 0x30, 0xFF])
+            }
+            controller.simulateProtocolMessage([0x07, 0, 1, function] + (legacy ? [] : [0xFF]))
+            acknowledgeCommands()
+            XCTAssertTrue(controller.isReady)
+            let queries = [[UInt8(0x50), inquiry, 1], [0x52, inquiry], [0x56, inquiry]]
+            for query in queries {
+                XCTAssertTrue(controller.simulatedTransmittedFrames.contains { $0.type == 0x0C && $0.payload == query })
+            }
+            controller.simulateProtocolMessage([0x51, inquiry, 0xF8, 12], type: 0x0E)
+            XCTAssertNil(controller.equalizer.bassBoost.range)
+            controller.setBassBoost(5)
+            XCTAssertNil(controller.pendingChanges[.bassBoost])
+            controller.simulateProtocolMessage([0x51, inquiry, 0xF8, 12])
+            controller.simulateProtocolMessage([0x53, inquiry, 0])
+            controller.simulateProtocolMessage([0x57, inquiry, 0xFA])
+            acknowledgeCommands()
+            XCTAssertEqual(controller.equalizer.bassBoost.level, -6)
+            XCTAssertTrue(controller.canSetBassBoost)
+
+            controller.requestCurrentSettings()
+            acknowledgeCommands()
+            controller.setBassBoost(-3)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x58, inquiry, 0xFD])
+            acknowledgeCommands()
+            controller.simulateProtocolMessage([0x57, inquiry, 0xFD])
+            XCTAssertEqual(controller.equalizer.bassBoost.level, -6)
+            XCTAssertNotNil(controller.pendingChanges[.bassBoost])
+            acknowledgeCommands()
+            controller.simulateProtocolMessage([0x59, inquiry, 0xFD])
+            XCTAssertEqual(controller.equalizer.bassBoost.level, -3)
+            XCTAssertNil(controller.pendingChanges[.bassBoost])
+            XCTAssertNil(controller.pendingChanges[.equalizer])
+            controller.simulateProtocolMessage([0x55, inquiry, 1])
+            XCTAssertFalse(controller.canSetBassBoost)
         }
     }
 
@@ -370,7 +706,7 @@ final class SonyEqualizerTests: XCTestCase {
         XCTAssertEqual(withErrors.parameterQueryPayload, [0x56, 4])
     }
 
-    func testEmptyMetadataInvalidStepsAndULTNeverBecomeOrdinaryWritableEQ() {
+    func testEmptyMetadataAndInvalidStepsNeverBecomeWritableEQ() {
         var equalizer = prepared()
         XCTAssertTrue(equalizer.update([0x5B, 0, 0]))
         XCTAssertEqual(equalizer.bandInformation, [])
@@ -380,17 +716,57 @@ final class SonyEqualizerTests: XCTestCase {
         for steps: UInt8 in [0, 1] {
             XCTAssertNil(prepared(steps: steps).flatSettings)
         }
-        var ult = SonyEqualizer(supportedFunctions: [0x53])
-        XCTAssertTrue(ult.update([0x51, 3, 6, 21, 5, 2, 0, 0, 0xA0, 0]))
-        XCTAssertEqual(ult.inquiryType, 3)
-        XCTAssertEqual(ult.capabilities?.ultAdditionalSteps, 5)
-        XCTAssertEqual(ult.capabilities?.presets.map(\.id), [0, 0xA0])
-        XCTAssertEqual(ult.queryPayloads, [[0x50, 3, 1]])
-        XCTAssertNil(ult.parameterQueryPayload)
-        XCTAssertFalse(ult.update([0x53, 3, 0]))
-        XCTAssertFalse(ult.update([0x57, 3, 0xA0, 6, 10, 10, 10, 10, 10, 10]))
-        XCTAssertNil(ult.presetPayload(0))
-        XCTAssertNil(ult.settingsPayload(.flat))
+    }
+
+    func testULTWritesPreserveTheOtherFieldsAndClearBassStoresAnUnshiftedLevel() throws {
+        var equalizer = SonyEqualizer(supportedFunctions: [0x53])
+        XCTAssertEqual(equalizer.queryPayloads, [[0x50, 3, 1], [0x52, 3], [0x5A, 3], [0x56, 3]])
+        XCTAssertTrue(equalizer.update([0x51, 3, 3, 21, 4, 3, 0, 0, 0x10, 0, 0xA1, 0]))
+        XCTAssertTrue(equalizer.update([0x5B, 3, 3, 1, 1, 0x90, 0x10, 0, 1, 2, 0, 2]))
+        XCTAssertTrue(equalizer.update([0x53, 3, 0]))
+        XCTAssertFalse(equalizer.canSelectPreset)
+        XCTAssertTrue(equalizer.update([0x57, 3, 0x10, 2, 3, 0, 19, 10]))
+        XCTAssertTrue(equalizer.canEdit)
+        XCTAssertFalse(equalizer.requiresManualSelection)
+        XCTAssertEqual(equalizer.clearBassIndex, 1)
+        var curve = try XCTUnwrap(equalizer.settings)
+        XCTAssertEqual(curve.values, [-10, 9, 0])
+        XCTAssertEqual(equalizer.displayedLevel(curve[0], at: 0), -10)
+        XCTAssertEqual(equalizer.displayedLevel(curve[1], at: 1), 10)
+        XCTAssertEqual(equalizer.settingLevel(5, at: 1), 1)
+        XCTAssertEqual(equalizer.settingLevel(-9, at: 1), -10)
+        let mode = try XCTUnwrap(equalizer.ultModePayload(.off))
+        XCTAssertEqual(mode, [0x58, 3, 0x10, 0, 3, 0, 19, 10])
+        XCTAssertTrue(equalizer.acceptsSetPayload(mode, changingULTMode: true))
+        XCTAssertFalse(equalizer.acceptsSetPayload(mode))
+        let preset = try XCTUnwrap(equalizer.presetPayload(0))
+        XCTAssertEqual(preset, [0x58, 3, 0, 2, 0])
+        XCTAssertTrue(equalizer.confirms(equalizer.confirmationValue(preset),
+                                         value: equalizer.confirmationValue([0x59, 3, 0, 2, 3, 5, 8, 9])))
+        XCTAssertFalse(equalizer.confirms(equalizer.confirmationValue(preset),
+                                          value: equalizer.confirmationValue([0x59, 3, 0, 1, 3, 5, 8, 9])))
+        XCTAssertFalse(equalizer.confirms(equalizer.confirmationValue(mode),
+                                          value: equalizer.confirmationValue([0x59, 3, 0x10, 0, 3, 0, 18, 10])))
+        curve[1] = equalizer.settingLevel(5, at: 1)
+        XCTAssertEqual(equalizer.settingsPayload(curve), [0x58, 3, 0x10, 2, 3, 0, 11, 10])
+        XCTAssertFalse(equalizer.acceptsSetPayload([0x58, 3, 0x10, 1, 3, 0, 11, 10]))
+
+        XCTAssertTrue(equalizer.update([0x5B, 3, 3, 0x10, 0, 1, 0x10, 0, 1, 2, 0, 2]))
+        XCTAssertNil(equalizer.clearBassIndex)
+        XCTAssertEqual(equalizer.displayedLevel(9, at: 1), 9)
+        XCTAssertTrue(equalizer.update([0x59, 3, 0xA1, 2, 0]))
+        XCTAssertNil(equalizer.rawValues)
+        XCTAssertNil(equalizer.settings)
+        XCTAssertNil(equalizer.ultModePayload(.ult1))
+        XCTAssertFalse(equalizer.update([0x59, 3, 0xA1, 2, 128] + Array(repeating: 0, count: 128)))
+        XCTAssertFalse(equalizer.update([0x55, 3, 0, 0]))
+        XCTAssertTrue(equalizer.update([0x55, 3, 1]))
+        XCTAssertFalse(equalizer.canSelectPreset)
+        XCTAssertFalse(equalizer.acceptsSetPayload(preset))
+        XCTAssertTrue(equalizer.update([0x55, 3, 0]))
+        XCTAssertTrue(equalizer.update([0x59, 3, 0xA1, 255, 3, 7, 8, 9]))
+        XCTAssertNil(equalizer.ultMode)
+        XCTAssertNil(equalizer.presetPayload(0))
     }
 
     private func prepared(layout: [SonyEqualizerBand] = SonyEqualizerBand.legacy, steps: UInt8 = 21,

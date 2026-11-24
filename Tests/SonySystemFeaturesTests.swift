@@ -2,6 +2,56 @@ import XCTest
 @testable import Acouplet
 
 final class SonySystemFeaturesTests: XCTestCase {
+    func testCallSettingsDependsOnModernTableOneAdvertisement() {
+        var legacy = SonySystemFeatures(legacyGeneralSettings: [0xF8])
+        var unsupported = SonySystemFeatures(supportedFunctions: [0xF7, 0xF9])
+        XCTAssertFalse(legacy.update([0xF5, 8, 0, 1, 0, 0]))
+        XCTAssertFalse(unsupported.update([0xF9, 8, 0, 0xFF, 0]))
+        XCTAssertNil(legacy.callSettings)
+        XCTAssertNil(unsupported.callSettings)
+
+        var system = SonySystemFeatures(supportedFunctions: [0xF8])
+        XCTAssertEqual(system.queryPayloads, [[0xF0, 8], [0xF2, 8], [0xF6, 8]])
+        XCTAssertFalse(system.update([0xF1, 8, 1, 2]))
+        XCTAssertTrue(system.update([0xF1, 8, 0xFF, 2]))
+        XCTAssertEqual(system.callSettings?.capabilityFields, [0xFF, 2])
+        XCTAssertNil(system.sidetone)
+        XCTAssertNil(system[.incomingCallVibration])
+        XCTAssertNil(system.sidetoneSetPayload(enabled: true))
+    }
+
+    func testSpeakToChatSelectsTheAdvertisedGenerationAndPacketLayout() {
+        XCTAssertNil(SonySystemFeatures(legacyGeneralSettings: [0xF2, 0xFC]).speakToChatOptions)
+        XCTAssertNil(SonySystemFeatures(supportedFunctions: [0xF5]).speakToChatOptions)
+        XCTAssertEqual(SonySystemFeatures(supportedFunctions: [0xF2, 0xFC]).speakToChatOptions?.variant, .type2)
+
+        for legacy in [true, false] {
+            let inquiry: UInt8 = legacy ? 5 : 2
+            var model = legacy ? SonySystemFeatures(legacyGeneralSettings: [0xF5]) : SonySystemFeatures(supportedFunctions: [0xF2])
+            XCTAssertEqual(model.queryPayloads, [0xF0, 0xF2, 0xF6, 0xFA].map { [$0, inquiry] })
+            XCTAssertTrue(model.update([0xF3, inquiry, 0, 0]))
+            XCTAssertTrue(model.update([0xF7, inquiry, legacy ? 0 : 1, legacy ? 0 : 1]))
+            XCTAssertNil(model.setPayload(.speakToChat, enabled: true))
+            XCTAssertFalse(model.update([0xF1, inquiry, 0, 15, 30]))
+            XCTAssertTrue(model.update(legacy ? [0xF1, 5, 0, 1, 0, 0, 0, 0, 15, 30, 60, 0] : [0xF1, 2, 1, 15, 30, 60]))
+            XCTAssertEqual(model.speakToChatOptions?.delaySeconds, [15, 30, 60])
+            XCTAssertEqual(model.setPayload(.speakToChat, enabled: true), legacy ? [0xF8, 5, 1, 1] : [0xF8, 2, 0, 1])
+            XCTAssertFalse(model.update([0xFB, inquiry, 1, 3]))
+            XCTAssertTrue(model.update(legacy ? [0xFB, 5, 0, 1, 0x7F, 3] : [0xFB, 2, 1, 0x7F, 3]))
+            let sensitivity = SonySpeechSensitivity(rawValue: 2)
+            let delay = SonySpeakToChatDelay(rawValue: 1)
+            XCTAssertNil(model.speakToChatOptions?.setPayload(sensitivity: sensitivity, delay: delay))
+            XCTAssertTrue(model.update(legacy ? [0xFD, 5, 0, 1, 1, 3] : [0xFD, 2, 1, 0, 3]))
+            XCTAssertEqual(model.speakToChatOptions?.voiceFocus, true)
+            XCTAssertEqual(model.speakToChatOptions?.setPayload(sensitivity: sensitivity, delay: delay),
+                           legacy ? [0xFC, 5, 0, 2, 1, 1] : [0xFC, 2, 2, 0, 1])
+            XCTAssertFalse(model.update([0xFD, 0x0C, 1, 3]))
+            model.invalidateRead([0xF0, inquiry])
+            XCTAssertNil(model.setPayload(.speakToChat, enabled: true))
+            XCTAssertNil(model.speakToChatOptions?.setPayload(sensitivity: sensitivity, delay: delay))
+        }
+    }
+
     func testAssistantChoicesPreserveAdvertisedServicesAndAddExactlyOneNone() {
         for key: UInt8 in 0...3 {
             var state = SonyVoiceAssistantState()
@@ -194,6 +244,7 @@ final class SonySystemFeaturesTests: XCTestCase {
         let capture = sidetoneCapability(slot: 0xD2, title: "MULTIPOINT_SETTING", summary: "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE")
         XCTAssertEqual(capture.count, 65)
         XCTAssertTrue(system.update(capture))
+        XCTAssertEqual(system.multipointDisablesLDAC, false)
         XCTAssertEqual(system.multipointSlot, 0xD2)
         XCTAssertEqual(system.queryPayloads, [[0xD2, 0xD1], [0xD6, 0xD1], [0xD2, 0xD2], [0xD6, 0xD2]])
         XCTAssertNil(system.multipointSetPayload(enabled: false))
@@ -215,7 +266,7 @@ final class SonySystemFeaturesTests: XCTestCase {
 
     func testMultipointRequiresUniqueAdvertisedEnumSlotAndForgetsReplacedIdentity() {
         var system = SonySystemFeatures(supportedFunctions: [0xD2, 0xD4])
-        let capture = sidetoneCapability(slot: 0xD4, title: "MULTIPOINT_SETTING")
+        let capture = sidetoneCapability(slot: 0xD4, title: "MULTIPOINT_SETTING", summary: "MULTIPOINT_SETTING_SUMMARY")
         XCTAssertEqual(system.queryPayloads, [[0xD0, 0xD2, 1], [0xD0, 0xD4, 1]])
         XCTAssertFalse(system.update(sidetoneCapability(slot: 0xD1, title: "MULTIPOINT_SETTING")))
         var rawTitle = capture
@@ -223,16 +274,22 @@ final class SonySystemFeaturesTests: XCTestCase {
         XCTAssertTrue(system.update(rawTitle))
         XCTAssertNil(system.multipointSlot)
         XCTAssertTrue(system.update(capture))
+        XCTAssertEqual(system.multipointDisablesLDAC, true)
         XCTAssertTrue(system.update([0xD3, 0xD4, 0]))
         XCTAssertTrue(system.update([0xD7, 0xD4, 0, 1]))
         XCTAssertEqual(system.multipointSetPayload(enabled: true), [0xD8, 0xD4, 0, 0])
         XCTAssertTrue(system.update(sidetoneCapability(slot: 0xD2, title: "MULTIPOINT_SETTING")))
         XCTAssertNil(system.multipointSlot)
         XCTAssertNil(system.multipoint)
+        XCTAssertNil(system.multipointDisablesLDAC)
         XCTAssertNil(system.multipointSetPayload(enabled: true))
         XCTAssertTrue(system.queryPayloads.isEmpty)
         XCTAssertTrue(system.update(sidetoneCapability(slot: 0xD2)))
         XCTAssertEqual(system.multipointSlot, 0xD4)
+        XCTAssertEqual(system.multipoint?.enabled, false)
+        XCTAssertEqual(system.multipointDisablesLDAC, true)
+        XCTAssertTrue(system.update(sidetoneCapability(slot: 0xD4, title: "MULTIPOINT_SETTING", summary: "")))
+        XCTAssertNil(system.multipointDisablesLDAC)
         XCTAssertEqual(system.multipoint?.enabled, false)
         XCTAssertTrue(system.update(rawTitle))
         XCTAssertNil(system.multipoint)
@@ -335,9 +392,9 @@ final class SonySystemFeaturesTests: XCTestCase {
     }
 
     func testOnlyAdvertisedFunctionsAreQueriedIncludingFFHeadGestures() {
-        let unsupported = SonySystemFeatures(supportedFunctions: [0xF0, 0xF6])
+        let unsupported = SonySystemFeatures(supportedFunctions: [0xF6, 0xF7])
         XCTAssertTrue(unsupported.queryPayloads.isEmpty)
-        for feature in SonySystemFeature.allCases {
+        for feature in SonySystemFeature.allCases where feature != .legacyPowerSavingMode {
             XCTAssertNil(unsupported[feature])
             XCTAssertNil(unsupported.setPayload(feature, enabled: true))
             let system = SonySystemFeatures(supportedFunctions: [feature.function])
@@ -346,6 +403,35 @@ final class SonySystemFeaturesTests: XCTestCase {
             XCTAssertNotNil(system[feature])
         }
         XCTAssertEqual(SonySystemFeature.headGestures.function, 0xFF)
+    }
+
+    func testCallVibrationDistinguishesEligibilityAndStateAcrossGenerations() {
+        let feature = SonySystemFeature.incomingCallVibration
+        var legacy = SonySystemFeatures(legacyGeneralSettings: [0xF1])
+        XCTAssertEqual(legacy.queryPayloads, [[0xF0, 1], [0xF2, 1], [0xF6, 1]])
+        XCTAssertFalse(legacy.update([0xF1, 1, 1]))
+        XCTAssertTrue(legacy.update([0xF3, 1, 0]))
+        XCTAssertTrue(legacy.update([0xF7, 1, 0, 1]))
+        XCTAssertNil(legacy.setPayload(feature, enabled: false))
+        XCTAssertTrue(legacy.update([0xF1, 1, 0]))
+        XCTAssertEqual(legacy.setPayload(feature, enabled: false), [0xF8, 1, 0, 0])
+        XCTAssertTrue(legacy.update([0xF5, 1, 1]))
+        XCTAssertEqual(legacy[feature]?.enabled, true)
+        XCTAssertNil(legacy.setPayload(feature, enabled: false))
+        XCTAssertFalse(legacy.update([0xF9, 1, 1, 0]))
+        XCTAssertEqual(legacy[feature]?.enabled, true)
+        XCTAssertNil(legacy[.pauseOnRemoval])
+
+        var modern = SonySystemFeatures(supportedFunctions: [0xF0])
+        XCTAssertEqual(modern.queryPayloads, [[0xF2, 0], [0xF6, 0]])
+        XCTAssertNil(modern.setPayload(feature, enabled: false))
+        XCTAssertTrue(modern.update([0xF3, 0, 0]))
+        XCTAssertTrue(modern.update([0xF7, 0, 0]))
+        XCTAssertEqual(modern[feature]?.enabled, true)
+        XCTAssertEqual(modern.setPayload(feature, enabled: false), [0xF8, 0, 1])
+        XCTAssertFalse(modern.update([0xF9, 0, 0, 0]))
+        XCTAssertNil(SonySystemFeatures(supportedFunctions: [0x90, 0xF1])[feature])
+        XCTAssertNil(SonySystemFeatures(legacyGeneralSettings: [0x90, 0xF0])[feature])
     }
 
     func testWF1000XM5CapturedParametersDoNotImplyAvailability() {
@@ -360,6 +446,33 @@ final class SonySystemFeaturesTests: XCTestCase {
             XCTAssertNil(system[feature]?.available)
             XCTAssertNil(system.setPayload(feature, enabled: true))
         }
+    }
+
+    func testLegacyPowerSavingRequiresOnOffCapabilityAndUsesLegacyPolarity() {
+        let feature = SonySystemFeature.legacyPowerSavingMode
+        var system = SonySystemFeatures(legacyGeneralSettings: [0xF2])
+        XCTAssertEqual(system.queryPayloads, [[0xF0, 2], [0xF2, 2], [0xF6, 2]])
+        XCTAssertFalse(system.update([0xF1, 2, 1]))
+        XCTAssertTrue(system.update([0xF3, 2, 0]))
+        XCTAssertTrue(system.update([0xF7, 2, 0, 0]))
+        XCTAssertNil(system.setPayload(feature, enabled: true))
+        XCTAssertTrue(system.update([0xF1, 2, 0]))
+        XCTAssertEqual(system.queryPayloads, [[0xF2, 2], [0xF6, 2]])
+        XCTAssertEqual(system[feature]?.enabled, false)
+        XCTAssertEqual(system.setPayload(feature, enabled: true), [0xF8, 2, 0, 1])
+        XCTAssertFalse(system.update([0xF9, 2, 1, 1]))
+        XCTAssertEqual(system[feature]?.enabled, false)
+        XCTAssertTrue(system.update([0xF9, 2, 0, 1]))
+        XCTAssertEqual(system.setPayload(feature, enabled: false), [0xF8, 2, 0, 0])
+        system.invalidateRead([0xF2, 2])
+        XCTAssertNil(system[feature]?.available)
+        XCTAssertEqual(system[feature]?.enabled, true)
+        XCTAssertNil(system.setPayload(feature, enabled: false))
+
+        let modern = SonySystemFeatures(supportedFunctions: [0xF2])
+        XCTAssertNil(modern[feature])
+        XCTAssertNotNil(modern.speakToChatOptions)
+        XCTAssertNil(SonySystemFeatures(legacyGeneralSettings: [0xF1, 0xF3])[feature])
     }
 
     func testWakeWordRequiresItsAdvertisedFunctionAndDistinguishesInvisibleFromUnknown() {
@@ -611,6 +724,236 @@ final class SonySystemFeaturesTests: XCTestCase {
 
 @MainActor
 final class SonySystemFeatureOwnershipTests: XCTestCase {
+    func testAdaptiveVolumeWithLimitationUsesDeviceCautionAndLeavesSafeVolumeAlone() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([7, 0, 2, 0x90, 0, 0xFA, 0], to: controller)
+        acknowledgeSimulatedCommands(controller)
+        deliver([7, 0, 1, 0xF4, 0], type: 0x0E, to: controller)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(controller.adaptiveVolumeWithLimitation.isSupported)
+        XCTAssertNil(controller.systemFeatureState(.adaptiveVolume))
+        XCTAssertFalse(controller.canSetAdaptiveVolumeWithLimitation)
+        let queries = controller.simulatedTransmittedFrames.filter { $0.type == 0x0E }.map(\.payload)
+        XCTAssertTrue(queries.contains([0xF2, 4]))
+        XCTAssertTrue(queries.contains([0xF6, 4]))
+        XCTAssertTrue(payloads(controller).contains([0x94, 0, 0]))
+        deliver([0xF3, 4, 0], type: 0x0E, to: controller)
+        deliver([0xF7, 4, 1, 1, 0], type: 0x0C, to: controller)
+        XCTAssertNil(controller.adaptiveVolumeWithLimitation.enabled)
+        deliver([0xF7, 4, 1, 1, 0], type: 0x0E, to: controller)
+        XCTAssertEqual(controller.adaptiveVolumeWithLimitation.limitationActive, true)
+        XCTAssertTrue(controller.canSetAdaptiveVolumeWithLimitation)
+        deliver([0x99, 0, 0x5A, 2], to: controller)
+        XCTAssertNil(controller.adaptiveVolumeCaution)
+
+        controller.setAdaptiveVolumeWithLimitation(true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.type, 0x0E)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF8, 4, 0])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0x99, 0, 0x5B, 2], to: controller)
+        guard let caution = controller.adaptiveVolumeCaution else { return XCTFail("No Safe Volume caution") }
+        XCTAssertEqual(caution.availableActions, [.positive])
+        controller.acknowledgeAdaptiveVolumeCaution(caution, requestID: UUID())
+        XCTAssertNil(controller.simulatedPendingFrame)
+        deliver([0xF9, 4, 0, 1, 0], type: 0x0E, to: controller)
+        XCTAssertEqual(controller.adaptiveVolumeWithLimitation.enabled, false)
+        controller.acknowledgeAdaptiveVolumeCaution(caution, requestID: controller.adaptiveVolumeCautionRequestID)
+        XCTAssertEqual(controller.simulatedPendingFrame?.type, 0x0C)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0x98, 0, 0x5B, 1])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0xF9, 4, 0, 1, 0], type: 0x0E, to: controller)
+        XCTAssertEqual(controller.adaptiveVolumeWithLimitation.enabled, true)
+        XCTAssertEqual(controller.adaptiveVolumeWithLimitation.limitationActive, true)
+        XCTAssertNil(controller.pendingChanges[.adaptiveVolumeWithLimitation])
+        deliver([0xF9, 4, 0, 0], type: 0x0E, to: controller)
+        XCTAssertEqual(controller.adaptiveVolumeWithLimitation.limitationActive, false)
+        XCTAssertFalse(controller.simulatedTransmittedFrames.contains { $0.type == 0x0E && $0.payload.first == 0x54 })
+    }
+
+    func testAdaptiveVolumeConfirmsTheAdvertisedHeadphoneSetting() {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        let feature = SonySystemFeature.adaptiveVolume
+        defer { controller.simulateControlLoss() }
+        controller.simulateDeviceConnection(named: "WF-1000XM5")
+        controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([7, 0, 1, 0xFA, 0], to: controller)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertFalse(controller.canSetSystemFeature(feature))
+        XCTAssertTrue(payloads(controller).contains([0xF2, 0x0A]))
+        deliver([0xF3, 0x0A, 0], to: controller)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(payloads(controller).contains([0xF6, 0x0A]))
+        deliver([0xF7, 0x0A, 1], type: 0x0E, to: controller)
+        XCTAssertFalse(controller.canSetSystemFeature(feature))
+        deliver([0xF7, 0x0A, 1], to: controller)
+        XCTAssertTrue(controller.canSetSystemFeature(feature))
+        controller.setSystemFeature(feature, enabled: true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF8, 0x0A, 0])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0xF9, 0x0A, 0], type: 0x0E, to: controller)
+        XCTAssertEqual(controller.pendingChanges[.system(feature)], [0])
+        XCTAssertEqual(controller.systemFeatureState(feature)?.enabled, false)
+        deliver([0xF9, 0x0A, 0], to: controller)
+        XCTAssertNil(controller.pendingChanges[.system(feature)])
+        XCTAssertEqual(controller.systemFeatureState(feature)?.enabled, true)
+        deliver([0xF5, 0x0A, 1], to: controller)
+        XCTAssertFalse(controller.canSetSystemFeature(feature))
+    }
+
+    func testLegacyPowerSavingWaitsForQueriesAndConfirmsOnlyMatchingState() {
+        let feature = SonySystemFeature.legacyPowerSavingMode
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        defer { controller.simulateControlLoss() }
+        let name = "SRS-XB43"
+        controller.simulateDeviceConnection(named: name, controlBusy: true)
+        controller.simulateProtocolMessage([1, 0, 2, 0x10], beginConnection: true)
+        acknowledgeSimulatedCommands(controller)
+        deliver([5, 1, UInt8(name.utf8.count)] + Array(name.utf8), to: controller)
+        deliver([5, 3, 0x30, 0xFF], to: controller)
+        deliver([7, 0, 1, 0xF2], to: controller)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(controller.isReady)
+        XCTAssertFalse(controller.canSetSystemFeature(feature))
+        XCTAssertTrue(payloads(controller).contains([0xF0, 2]))
+        XCTAssertFalse(payloads(controller).contains([0xF2, 2]))
+        deliver([0xF1, 2, 0], type: 0x0E, to: controller)
+        deliver([0xF1, 2, 1], to: controller)
+        XCTAssertFalse(payloads(controller).contains([0xF2, 2]))
+
+        for reply: [UInt8] in [[0xF1, 2, 0], [0xF3, 2, 0], [0xF7, 2, 0, 0]] {
+            XCTAssertTrue(payloads(controller).contains([reply[0] - 1, 2]))
+            deliver(reply, to: controller)
+            acknowledgeSimulatedCommands(controller)
+        }
+        XCTAssertTrue(controller.canSetSystemFeature(feature))
+        XCTAssertEqual(controller.systemFeatureState(feature)?.enabled, false)
+        controller.setSystemFeature(feature, enabled: true)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF8, 2, 0, 1])
+        acknowledgeSimulatedCommands(controller)
+        deliver([0xF9, 1, 0, 1], to: controller)
+        deliver([0xF9, 2, 1, 1], to: controller)
+        XCTAssertEqual(controller.pendingChanges[.system(feature)], [0])
+        XCTAssertEqual(controller.systemFeatureState(feature)?.enabled, false)
+        deliver([0xF9, 2, 0, 1], to: controller)
+        XCTAssertNil(controller.pendingChanges[.system(feature)])
+        XCTAssertEqual(controller.systemFeatureState(feature)?.enabled, true)
+
+        deliver([0xF5, 2, 1], to: controller)
+        XCTAssertFalse(controller.canSetSystemFeature(feature))
+        controller.setSystemFeature(feature, enabled: false)
+        XCTAssertNil(controller.simulatedPendingFrame)
+        deliver([0xF5, 2, 0], to: controller)
+        XCTAssertTrue(controller.canSetSystemFeature(feature))
+        controller.setSystemFeature(feature, enabled: false)
+        XCTAssertEqual(controller.simulatedPendingFrame?.payload, [0xF8, 2, 0, 0])
+    }
+
+    func testCallVibrationNegotiatesBothDialectsAndConfirmsOnlyVibrationState() {
+        let feature = SonySystemFeature.incomingCallVibration
+        for legacy in [true, false] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            let inquiry: UInt8 = legacy ? 1 : 0
+            let name = legacy ? "WH-1000XM4" : "WF-1000XM5"
+            controller.simulateDeviceConnection(named: name, controlBusy: true)
+            controller.simulateProtocolMessage(legacy ? [1, 0, 2, 0x10] : [1, 0, 3, 0, 0x30, 0x18, 0, 1], beginConnection: true)
+            acknowledgeSimulatedCommands(controller)
+            if legacy {
+                deliver([5, 1, UInt8(name.utf8.count)] + Array(name.utf8), to: controller)
+                deliver([5, 3, 0x30, 0xFF], to: controller)
+                deliver([7, 0, 1, 0xF1], to: controller)
+            } else {
+                deliver([7, 0, 1, 0xF0, 0], to: controller)
+            }
+            acknowledgeSimulatedCommands(controller)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertFalse(controller.canSetSystemFeature(feature))
+            let initial: [[UInt8]] = (legacy ? [[0xF1, inquiry, 0]] : [])
+                + [[0xF3, inquiry, 0], legacy ? [0xF7, inquiry, 0, 0] : [0xF7, inquiry, 1]]
+            for reply in initial {
+                XCTAssertTrue(payloads(controller).contains([reply[0] - 1, inquiry]))
+                deliver(reply, to: controller)
+                acknowledgeSimulatedCommands(controller)
+            }
+            XCTAssertTrue(controller.canSetSystemFeature(feature))
+            controller.setSystemFeature(feature, enabled: true)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, legacy ? [0xF8, 1, 0, 1] : [0xF8, 0, 0])
+            acknowledgeSimulatedCommands(controller)
+            deliver([0xF9, legacy ? 0 : 1, 0], to: controller)
+            deliver(initial.last!, to: controller)
+            XCTAssertEqual(controller.pendingChanges[.system(feature)], [0])
+            XCTAssertEqual(controller.systemFeatureState(feature)?.enabled, false)
+            deliver(legacy ? [0xF9, 1, 0, 1] : [0xF9, 0, 0], to: controller)
+            XCTAssertNil(controller.pendingChanges[.system(feature)])
+            XCTAssertEqual(controller.systemFeatureState(feature)?.enabled, true)
+            deliver([0xF5, inquiry, 1], to: controller)
+            XCTAssertFalse(controller.canSetSystemFeature(feature))
+            XCTAssertEqual(controller.systemFeatureState(feature)?.enabled, true)
+            controller.setSystemFeature(feature, enabled: false)
+            XCTAssertNil(controller.simulatedPendingFrame)
+        }
+    }
+
+    func testLegacyAndTypeOneSpeakToChatDiscoveryAndWritesUseTheirOwnFields() {
+        for legacy in [true, false] {
+            let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+            defer { controller.simulateControlLoss() }
+            let inquiry: UInt8 = legacy ? 5 : 2
+            let name = legacy ? "WH-1000XM4" : "WF-1000XM5"
+            controller.simulateDeviceConnection(named: name, controlBusy: true)
+            controller.simulateProtocolMessage(legacy ? [1, 0, 2, 0x10] : [1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
+            acknowledgeSimulatedCommands(controller)
+            if legacy {
+                deliver([5, 1, UInt8(name.utf8.count)] + Array(name.utf8), to: controller)
+                deliver([5, 3, 0x30, 0xFF], to: controller)
+                deliver([7, 0, 1, 0xF5], to: controller)
+            } else {
+                deliver([7, 0, 1, 0xF2, 0], to: controller)
+            }
+            acknowledgeSimulatedCommands(controller)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertTrue(payloads(controller).contains([0xF0, inquiry]))
+            XCTAssertFalse(controller.canSetSystemFeature(.speakToChat))
+            let replies: [[UInt8]] = [
+                legacy ? [0xF1, 5, 0, 1, 0, 0, 0, 0, 15, 30, 60, 0] : [0xF1, 2, 1, 15, 30, 60],
+                [0xF3, inquiry, 0, 0],
+                legacy ? [0xF7, 5, 0, 0] : [0xF7, 2, 1, 1],
+                legacy ? [0xFB, 5, 0, 0, 1, 1] : [0xFB, 2, 0, 0, 1]
+            ]
+            for reply in replies {
+                XCTAssertTrue(payloads(controller).contains([reply[0] - 1, inquiry]))
+                deliver(reply, to: controller)
+                acknowledgeSimulatedCommands(controller)
+            }
+            XCTAssertTrue(controller.canSetSystemFeature(.speakToChat))
+            XCTAssertTrue(controller.canSetSpeakToChatOptions)
+            controller.setSystemFeature(.speakToChat, enabled: true)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, legacy ? [0xF8, 5, 1, 1] : [0xF8, 2, 0, 1])
+            acknowledgeSimulatedCommands(controller)
+            deliver([0xF9, 0x0C, 0, 1], to: controller)
+            if legacy { deliver([0xF9, 5, 2, 1], to: controller) }
+            XCTAssertNotNil(controller.pendingChanges[.system(.speakToChat)])
+            deliver(legacy ? [0xF9, 5, 1, 1] : [0xF9, 2, 0, 1], to: controller)
+            XCTAssertNil(controller.pendingChanges[.system(.speakToChat)])
+
+            controller.setSpeakToChatOptions(sensitivity: SonySpeechSensitivity(rawValue: 2), delay: SonySpeakToChatDelay(rawValue: 3))
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, legacy ? [0xFC, 5, 0, 2, 1, 3] : [0xFC, 2, 2, 0, 3])
+            acknowledgeSimulatedCommands(controller)
+            deliver(legacy ? [0xFD, 5, 0, 2, 0, 3] : [0xFD, 2, 2, 1, 3], to: controller)
+            XCTAssertNotNil(controller.pendingChanges[.speakToChatOptions])
+            deliver(legacy ? [0xFD, 5, 0, 2, 1, 3] : [0xFD, 2, 2, 0, 3], to: controller)
+            XCTAssertNil(controller.pendingChanges[.speakToChatOptions])
+            controller.setSpeakToChatOptions(sensitivity: SonySpeechSensitivity(rawValue: 2),
+                                            delay: SonySpeakToChatDelay(rawValue: 3), voiceFocus: false)
+            XCTAssertEqual(controller.simulatedPendingFrame?.payload, legacy ? [0xFC, 5, 0, 2, 0, 3] : [0xFC, 2, 2, 1, 3])
+        }
+    }
+
     func testAssistantRepliesNeedTheirTransmittedOwnerAndCorrectTable() {
         let controller = beginAssistantController()
         defer { controller.simulateControlLoss() }
@@ -745,8 +1088,8 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
     }
 
     func testQueuedAssistantSelectionRevalidatesAvailabilityCodecAndCurrentState() {
-        for change: [UInt8] in [[0xF5, 4, 1], [0xF5, 4, 2], [0xF9, 4, 0xFE], [0x15, 2, 0x30]] {
-            let controller = readyAssistantController()
+        for change: [UInt8] in [[0xF5, 4, 1], [0xF5, 4, 2], [0xF9, 4, 0xFE], [0x45, 0xFE, 0], [0x15, 2, 0x30]] {
+            let controller = readyAssistantController(leAudioRestricted: true)
             defer { controller.simulateControlLoss() }
             controller.refresh()
             controller.setVoiceAssistant(SonyVoiceAssistantOption(rawValue: 0x31))
@@ -758,7 +1101,7 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             XCTAssertTrue(controller.isReady)
             XCTAssertNil(controller.pendingChanges[.voiceAssistant])
         }
-        let controller = readyAssistantController()
+        let controller = readyAssistantController(leAudioRestricted: true)
         defer { controller.simulateControlLoss() }
         deliver([0x15, 2, 0x30], type: 0x0E, to: controller)
         XCTAssertTrue(controller.canSetVoiceAssistant)
@@ -768,6 +1111,11 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         XCTAssertFalse(payloads(controller).contains([0xF8, 4, 0x31]))
         deliver([0x15, 2, 2], to: controller)
         XCTAssertTrue(controller.canSetVoiceAssistant)
+
+        let unrestricted = readyAssistantController()
+        defer { unrestricted.simulateControlLoss() }
+        deliver([0x15, 2, 0x30], to: unrestricted)
+        XCTAssertTrue(unrestricted.canSetVoiceAssistant)
     }
 
     func testSourceTransitionInvalidatesQueuedAssistantSelection() {
@@ -1000,6 +1348,151 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
             XCTAssertEqual(payloads(controller).contains([0xD8, 0xD1, 0, 0]), !ambiguous)
             XCTAssertEqual(controller.pendingChanges[.sidetone], ambiguous ? nil : [0xD1, 0, 0])
             XCTAssertTrue(controller.isReady)
+        }
+    }
+
+    func testCallSettingsUsesOwnedReadsAndKeepsReportsSeparateFromSidetoneAndPlayback() {
+        let controller = beginSidetoneController(callSettings: true)
+        defer { controller.simulateControlLoss() }
+        acknowledgeSimulatedCommands(controller)
+        let initialPlaybackStatus = controller.playback.musicCallStatus
+        let status: [UInt8] = [0xF3, 8, 0, 1, 0, 0]
+        deliver(status, to: controller)
+        XCTAssertNil(controller.systemFeatures.callSettings?.status)
+        XCTAssertTrue(payloads(controller).contains(SonyCallSettings.capabilityQuery))
+        XCTAssertFalse(payloads(controller).contains(SonyCallSettings.statusQuery))
+        deliver([0xF1, 8, 0xFF, 1], to: controller)
+        XCTAssertFalse(payloads(controller).contains(SonyCallSettings.statusQuery))
+        deliver([0xF1, 8, 0xFF, 2], to: controller)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(payloads(controller).contains(SonyCallSettings.statusQuery))
+        deliver(status, type: 0x0E, to: controller)
+        XCTAssertNil(controller.systemFeatures.callSettings?.status)
+        deliver(status, to: controller)
+        let reported = SonyCallSettings.Status(available: true, inSettingMode: true, testSoundEnabled: true, inCall: true)
+        XCTAssertEqual(controller.systemFeatures.callSettings?.status, reported)
+        XCTAssertTrue(controller.diagnosticReport.contains("setting mode active: Yes"))
+        XCTAssertEqual(controller.playback.musicCallStatus, initialPlaybackStatus)
+        XCTAssertNil(controller.systemFeatures.sidetone)
+        XCTAssertFalse(controller.canSetSidetone)
+
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(payloads(controller).contains(SonyCallSettings.parameterQuery))
+        deliver([0xF9, 8, 0, 0xFF, 0], to: controller)
+        deliver([0xF7, 8, 1, 0, 0], to: controller)
+        XCTAssertEqual(controller.systemFeatures.callSettings?.parameters, .init(enabled: true, unknownFields: [0xFF, 0]))
+        deliver([0xF5, 8, 1, 0, 1, 1], to: controller)
+        XCTAssertEqual(controller.systemFeatures.callSettings?.status,
+                       .init(available: false, inSettingMode: false, testSoundEnabled: false, inCall: false))
+        XCTAssertFalse(payloads(controller).contains { [0xF4, 0xF8, 0xFC].contains($0[0]) && $0.dropFirst().first == 8 })
+
+        controller.simulateControlLoss()
+        XCTAssertNil(controller.systemFeatures.callSettings)
+    }
+
+    func testVoiceAssistantSideCautionRequiresAnOwnedWriteAndExplicitChoice() throws {
+        let controller = readyAssistantController(sideAlert: true)
+        defer { controller.simulateControlLoss() }
+        let message: [UInt8] = [0x99, 0x02, 1, 1]
+        deliver(message, to: controller)
+        XCTAssertNil(controller.voiceAssistantSideAlert)
+
+        let option = SonyVoiceAssistantOption(rawValue: 0x31)
+        controller.defersSimulatedWrites = true
+        controller.setVoiceAssistant(option)
+        controller.defersSimulatedWrites = false
+        deliver(message, to: controller)
+        XCTAssertNil(controller.voiceAssistantSideAlert)
+        controller.completeSimulatedWrite()
+        acknowledgeSimulatedCommands(controller)
+        deliver(message, type: 0x0E, to: controller)
+        XCTAssertNil(controller.voiceAssistantSideAlert)
+        deliver([0x99, 0x02, 4, 1], to: controller)
+        XCTAssertNil(controller.voiceAssistantSideAlert)
+        deliver(message, to: controller)
+        let alert = try XCTUnwrap(controller.voiceAssistantSideAlert)
+        let request = try XCTUnwrap(controller.voiceAssistantSideAlertRequestID)
+        XCTAssertEqual(alert.defaultSide, .right)
+        XCTAssertTrue(alert.usesTouchSensor)
+        XCTAssertTrue(alert.restartsHeadphones)
+        deliver([0xF9, 4, option.rawValue], to: controller)
+        XCTAssertEqual(controller.systemFeatures.voiceAssistant?.current?.rawValue, 0x30)
+        XCTAssertEqual(controller.pendingChanges[.voiceAssistant], [4, option.rawValue])
+        controller.respondToVoiceAssistantSideAlert(alert, action: .right, requestID: UUID())
+        XCTAssertEqual(controller.voiceAssistantSideAlert, alert)
+        XCTAssertFalse(payloads(controller).contains([0x98, 2, 1, 2]))
+        controller.respondToVoiceAssistantSideAlert(alert, action: .right, requestID: request)
+        acknowledgeSimulatedCommands(controller)
+        XCTAssertTrue(payloads(controller).contains([0x98, 2, 1, 2]))
+        XCTAssertEqual(controller.pendingChanges[.voiceAssistant], [4, option.rawValue])
+        deliver(message, to: controller)
+        XCTAssertNil(controller.voiceAssistantSideAlert)
+        deliver([0xF9, 4, option.rawValue], to: controller)
+        XCTAssertNil(controller.pendingChanges[.voiceAssistant])
+        XCTAssertEqual(controller.systemFeatures.voiceAssistant?.current, option)
+    }
+
+    func testVoiceAssistantSideCautionCancelPreservesTheCurrentAssistant() throws {
+        let option = SonyVoiceAssistantOption(rawValue: 0x31)
+        let message: [UInt8] = [0x99, 2, 2, 0]
+        for supported in [false, true] {
+            let controller = readyAssistantController(sideAlert: supported)
+            defer { controller.simulateControlLoss() }
+            controller.setVoiceAssistant(option)
+            acknowledgeSimulatedCommands(controller)
+            deliver(message, to: controller)
+            if supported {
+                let alert = try XCTUnwrap(controller.voiceAssistantSideAlert)
+                let request = try XCTUnwrap(controller.voiceAssistantSideAlertRequestID)
+                controller.respondToVoiceAssistantSideAlert(alert, action: .cancel, requestID: request)
+                acknowledgeSimulatedCommands(controller)
+                XCTAssertTrue(payloads(controller).contains([0x98, 2, 2, 0]))
+                XCTAssertNil(controller.pendingChanges[.voiceAssistant])
+                XCTAssertEqual(controller.systemFeatures.voiceAssistant?.current?.rawValue, 0x30)
+                XCTAssertTrue(controller.canSetVoiceAssistant)
+            } else {
+                XCTAssertNil(controller.voiceAssistantSideAlert)
+                XCTAssertFalse(payloads(controller).contains(where: { $0.starts(with: [0x98, 2]) }))
+                deliver([0xF9, 4, option.rawValue], to: controller)
+                XCTAssertEqual(controller.systemFeatures.voiceAssistant?.current, option)
+            }
+        }
+    }
+
+    func testVoiceAssistantSetupRequiresAnAdvertisedOwnedTableOneRead() {
+        let options: [UInt8] = [0x93, 3, 2, 2, 0]
+        for supported in [false, true] {
+            let controller = readyAssistantController(setupNotification: supported)
+            defer { controller.simulateControlLoss() }
+            let selected = controller.systemFeatures.voiceAssistant?.current
+            let selectable = controller.systemFeatures.voiceAssistant?.knownOptions
+            deliver(options, to: controller)
+            XCTAssertNil(controller.voiceAssistantSetupOptions)
+            controller.defersSimulatedWrites = true
+            controller.requestVoiceAssistantSetup()
+            controller.defersSimulatedWrites = false
+            deliver(options, to: controller)
+            XCTAssertNil(controller.voiceAssistantSetupOptions)
+            controller.completeSimulatedWrite()
+            acknowledgeSimulatedCommands(controller)
+            XCTAssertEqual(payloads(controller).contains(SonyVoiceAssistantSetup.query), supported)
+            deliver(options, type: 0x0E, to: controller)
+            deliver([0x93, 3, 1, 0xFF], to: controller)
+            deliver([0x93, 3, 2, 0], to: controller)
+            XCTAssertNil(controller.voiceAssistantSetupOptions)
+            deliver(options, to: controller)
+            XCTAssertEqual(controller.voiceAssistantSetupOptions?.map(\.rawValue), supported ? [0x33, 0x31] : nil)
+            if supported {
+                deliver([0x93, 3, 1, 1], to: controller)
+                controller.requestVoiceAssistantSetup()
+                acknowledgeSimulatedCommands(controller)
+                XCTAssertEqual(payloads(controller).filter { $0 == SonyVoiceAssistantSetup.query }.count, 1)
+                XCTAssertEqual(controller.voiceAssistantSetupOptions?.map(\.rawValue), [0x33, 0x31])
+            }
+            XCTAssertEqual(controller.systemFeatures.voiceAssistant?.current, selected)
+            XCTAssertEqual(controller.systemFeatures.voiceAssistant?.knownOptions, selectable)
+            controller.simulateControlLoss()
+            XCTAssertNil(controller.voiceAssistantSetupOptions)
         }
     }
 
@@ -1745,12 +2238,13 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         XCTAssertEqual(controller.systemFeatures.sidetone?.enabled, true)
     }
 
-    private func beginAssistantController() -> SonyHeadphonesController {
+    private func beginAssistantController(leAudioRestricted: Bool = false, sideAlert: Bool = false, setupNotification: Bool = false) -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
         controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
-        let functions: [UInt8] = [0x6B, 0xF4, 0xF5, 0x12]
+        let functions: [UInt8] = [0x6B, 0xF4, 0xF5, 0x12] + (leAudioRestricted ? [0x4E] : [])
+            + (sideAlert ? [0x92] : []) + (setupNotification ? [0x93] : [])
         deliver([7, 0, UInt8(functions.count)] + functions.flatMap { [$0, 1] }, to: controller)
         acknowledgeSimulatedCommands(controller)
         deliver([0x67, 0x17, 1, 1, 1, 0, 8], to: controller)
@@ -1758,8 +2252,8 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         return controller
     }
 
-    private func readyAssistantController() -> SonyHeadphonesController {
-        let controller = beginAssistantController()
+    private func readyAssistantController(leAudioRestricted: Bool = false, sideAlert: Bool = false, setupNotification: Bool = false) -> SonyHeadphonesController {
+        let controller = beginAssistantController(leAudioRestricted: leAudioRestricted, sideAlert: sideAlert, setupNotification: setupNotification)
         acknowledgeSimulatedCommands(controller)
         for reply: [UInt8] in [[0xF3, 5, 0], [0xF7, 5, 1], [0xF1, 4, 3, 4, 0x30, 0x31, 0x32, 0x33],
                               [0xF3, 4, 0], [0xF7, 4, 0x30]] {
@@ -1770,12 +2264,12 @@ final class SonySystemFeatureOwnershipTests: XCTestCase {
         return controller
     }
 
-    private func beginSidetoneController(additionalSlot: Bool = false) -> SonyHeadphonesController {
+    private func beginSidetoneController(additionalSlot: Bool = false, callSettings: Bool = false) -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5", controlBusy: true)
         controller.simulateProtocolMessage([1, 0, 3, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeSimulatedCommands(controller)
-        let functions: [UInt8] = additionalSlot ? [0x6B, 0xD1, 0xD2] : [0x6B, 0xD1]
+        let functions: [UInt8] = [0x6B, 0xD1] + (additionalSlot ? [0xD2] : []) + (callSettings ? [0xF8] : [])
         deliver([7, 0, UInt8(functions.count)] + functions.flatMap { [$0, 1] }, to: controller)
         acknowledgeSimulatedCommands(controller)
         deliver([0x67, 0x17, 1, 1, 1, 0, 8], to: controller)

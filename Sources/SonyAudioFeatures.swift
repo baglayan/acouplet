@@ -49,6 +49,34 @@ enum SonyDSEEType: UInt8, Sendable {
     }
 }
 
+enum SonyUpscalingStatus: UInt8, Sendable {
+    case off = 0, valid = 1, invalid = 2
+
+    var title: String {
+        switch self {
+        case .off: String(localized: "Off")
+        case .valid: String(localized: "Active")
+        case .invalid: String(localized: "Inactive")
+        }
+    }
+}
+
+enum SonyDSEEDisableReason: UInt8, Sendable {
+    case calling = 0x00
+    case demoMode = 0x01
+    case leAudioConnected = 0x02
+    case leAudioPlayback = 0x03
+    case tandemOverGATT = 0x04
+    case googleVoiceAssistant = 0x05
+    case sonyVoiceAssistant = 0x06
+    case tencentVoiceAssistant = 0x07
+    case cinemaUpmix = 0x08
+    case gameUpmix = 0x09
+    case musicUpmix = 0x0A
+    case listeningModeIsNotStandard = 0x0B
+    case other = 0xFE
+}
+
 enum SonyDSEEMode: Hashable, CaseIterable, Identifiable, Sendable {
     case off, automatic
     case unknown(UInt8)
@@ -142,17 +170,35 @@ enum SonyConnectionStream: Equatable, Sendable {
 struct SonyAudioFeatures: Equatable, Sendable {
     static let connectionStatusFunction: UInt8 = 0x11
     static let codecFunction: UInt8 = 0x12
+    static let codecQueryPayload: [UInt8] = [0x12, 0x02]
+    static let upscalingFunction: UInt8 = 0x13
+    static let upscalingQueryPayload: [UInt8] = [0x12, 0x03]
     static let dseeFunction: UInt8 = 0xE2
+    static let dseeWithDisableReasonsFunction: UInt8 = 0xED
+    static let dseeWithDisableReasonsInquiry: UInt8 = 0x0B
     static let connectionModeFunction: UInt8 = 0xE7
+    static let listeningModeFunction: UInt8 = 0xE6
 
     let supportsConnectionStatus: Bool
     let supportsCodecStatus: Bool
-    let supportsDSEE: Bool
+    let supportsUpscalingStatus: Bool
+    let dseeInquiry: UInt8?
+    let supportsListeningMode: Bool
     let connectionModeInquiryType: UInt8?
     private(set) var codec: SonyAudioCodec?
+    private(set) var upscalingType: SonyDSEEType?
+    private(set) var upscalingStatus: SonyUpscalingStatus?
     private(set) var dseeType: SonyDSEEType?
     private(set) var dseeAvailable: Bool?
     private(set) var dseeMode: SonyDSEEMode?
+    private(set) var dseeDisableReasons: [SonyDSEEDisableReason] = []
+    private(set) var soundLeakageReduction: SonySoundLeakageReduction?
+    private(set) var voiceContents: SonyVoiceContents?
+    private(set) var soundFieldOptimization: SonySoundFieldOptimization?
+    private(set) var tvSoundBooster: SonyTVSoundBooster?
+    private(set) var upmix: [SonyUpmix.Variant: SonyUpmix] = [:]
+    private(set) var backgroundMusic: SonyBackgroundMusic?
+    private(set) var listeningModeAssignments: SonyListeningModeAssignments?
     private(set) var supportedConnectionModes: [SonyConnectionMode]?
     private(set) var connectionModeLDACExclusions: [SonyLDACExclusiveFeature]?
     private(set) var connectionModeStatus: UInt8?
@@ -165,7 +211,22 @@ struct SonyAudioFeatures: Equatable, Sendable {
     init(supportedFunctions: Set<UInt8> = []) {
         supportsConnectionStatus = supportedFunctions.contains(Self.connectionStatusFunction)
         supportsCodecStatus = supportedFunctions.contains(Self.codecFunction)
-        supportsDSEE = supportedFunctions.contains(Self.dseeFunction)
+        supportsUpscalingStatus = supportedFunctions.contains(Self.upscalingFunction)
+        if supportedFunctions.contains(Self.dseeFunction) {
+            dseeInquiry = 0x01
+        } else {
+            dseeInquiry = supportedFunctions.contains(Self.dseeWithDisableReasonsFunction) ? Self.dseeWithDisableReasonsInquiry : nil
+        }
+        supportsListeningMode = supportedFunctions.contains(Self.listeningModeFunction)
+        soundLeakageReduction = supportedFunctions.contains(SonySoundLeakageReduction.function) ? SonySoundLeakageReduction() : nil
+        voiceContents = supportedFunctions.contains(SonyVoiceContents.function) ? SonyVoiceContents() : nil
+        soundFieldOptimization = supportedFunctions.contains(SonySoundFieldOptimization.function) ? SonySoundFieldOptimization() : nil
+        tvSoundBooster = supportedFunctions.contains(SonyTVSoundBooster.function) ? SonyTVSoundBooster() : nil
+        for variant in SonyUpmix.Variant.allCases where supportedFunctions.contains(variant.function) {
+            upmix[variant] = SonyUpmix(variant: variant)
+        }
+        backgroundMusic = SonyBackgroundMusic(supportedFunctions: supportedFunctions)
+        listeningModeAssignments = supportedFunctions.contains(SonyListeningModeAssignments.function) ? SonyListeningModeAssignments() : nil
         connectionModeInquiryType = supportedFunctions.contains(Self.connectionModeFunction) ? 0x05
             : supportedFunctions.contains(0xE3) ? 0x02 : supportedFunctions.contains(0xE1) ? 0x00 : nil
         if let connectionModeInquiryType, connectionModeInquiryType != 0x05 {
@@ -177,15 +238,84 @@ struct SonyAudioFeatures: Equatable, Sendable {
         connectionModeInquiryType != nil
     }
 
+    var listeningMode: SonyListeningMode? {
+        guard supportsListeningMode else { return nil }
+        if let backgroundMusic {
+            guard let enabled = backgroundMusic.enabled else { return nil }
+            if enabled { return .backgroundMusic }
+        }
+        if let cinema = upmix[.cinema] {
+            guard let selection = cinema.selection else { return nil }
+            if selection == .cinema { return .cinema }
+        }
+        if let series = upmix[.series] {
+            switch series.selection {
+            case .cinema: return .cinema
+            case .game: return .game
+            case .music: return .music
+            case .standard: break
+            case nil: return nil
+            }
+        }
+        if let voiceContents {
+            guard let enabled = voiceContents.enabled else { return nil }
+            if enabled { return .voiceContents }
+        }
+        if let soundLeakageReduction {
+            guard let enabled = soundLeakageReduction.enabled else { return nil }
+            if enabled { return .soundLeakageReduction }
+        }
+        return .standard
+    }
+
+    var listeningModeOptions: [SonyListeningMode] {
+        guard supportsListeningMode else { return [] }
+        let seriesModes = upmix[.series]?.selectableModes ?? []
+        var options: [SonyListeningMode] = [.standard]
+        if backgroundMusic != nil { options.append(.backgroundMusic) }
+        if upmix[.cinema] != nil || seriesModes.contains(.cinema) { options.append(.cinema) }
+        if seriesModes.contains(.game) { options.append(.game) }
+        if seriesModes.contains(.music) { options.append(.music) }
+        if voiceContents != nil { options.append(.voiceContents) }
+        if soundLeakageReduction != nil { options.append(.soundLeakageReduction) }
+        return options
+    }
+
+    func listeningModeChanges(to mode: SonyListeningMode) -> [SonyListeningMode.Change] {
+        guard let current = listeningMode, mode != current, listeningModeOptions.contains(mode) else { return [] }
+        let enabling = mode != .standard
+        switch enabling ? mode : current {
+        case .standard: return []
+        case .backgroundMusic: return [.backgroundMusic(enabling)]
+        case .voiceContents: return [.voiceContents(enabling)]
+        case .soundLeakageReduction: return [.soundLeakageReduction(enabling)]
+        case .cinema:
+            let target: SonyUpmix.Mode = enabling ? .cinema : .standard
+            return SonyUpmix.Variant.allCases.filter { variant in
+                guard let state = upmix[variant], state.selection != target else { return false }
+                return variant == .cinema || !enabling || state.selectableModes.contains(.cinema)
+            }.map { .upmix($0, target) }
+        case .game: return [.upmix(.series, enabling ? .game : .standard)]
+        case .music: return [.upmix(.series, enabling ? .music : .standard)]
+        }
+    }
+
     var queryPayloads: [[UInt8]] {
         var queries: [[UInt8]] = (supportsConnectionStatus ? [[0x12, 0x01]] : [])
-            + (supportsCodecStatus ? [[0x12, 0x02]] : [])
-            + (supportsDSEE ? [[0xE0, 0x01], [0xE2, 0x01], [0xE6, 0x01]] : [])
+            + (supportsCodecStatus ? [Self.codecQueryPayload] : [])
+            + (supportsUpscalingStatus ? [Self.upscalingQueryPayload] : [])
+        if let dseeInquiry { queries += [[0xE0, dseeInquiry], [0xE2, dseeInquiry], [0xE6, dseeInquiry]] }
         if let inquiry = connectionModeInquiryType {
             if inquiry == 0x05 { queries.append([0xE0, inquiry]) }
             queries += [[0xE2, inquiry], [0xE6, inquiry]]
         }
-        return queries
+        return queries + (soundLeakageReduction == nil ? [] : SonySoundLeakageReduction.queryPayloads)
+            + (voiceContents == nil ? [] : SonyVoiceContents.queryPayloads)
+            + (soundFieldOptimization == nil ? [] : SonySoundFieldOptimization.queryPayloads)
+            + (tvSoundBooster == nil ? [] : SonyTVSoundBooster.queryPayloads)
+            + SonyUpmix.Variant.allCases.filter { upmix[$0] != nil }.flatMap(\.queryPayloads)
+            + (backgroundMusic?.queryPayloads ?? [])
+            + (listeningModeAssignments == nil ? [] : SonyListeningModeAssignments.queryPayloads)
     }
 
     var connectionModeAvailable: Bool? {
@@ -204,14 +334,58 @@ struct SonyAudioFeatures: Equatable, Sendable {
         }
     }
 
+    var supportsDSEE: Bool { dseeInquiry != nil }
+    var dseeParameterQuery: [UInt8]? { dseeInquiry.map { [0xE6, $0] } }
+    var canSetDSEE: Bool {
+        dseeAvailable == true && dseeDisableReasons.isEmpty && dseeMode?.sonyValue != nil
+            && (dseeInquiry != Self.dseeWithDisableReasonsInquiry || dseeType != nil)
+    }
+
     func dseeSetPayload(_ mode: SonyDSEEMode) -> [UInt8]? {
-        guard supportsDSEE, dseeAvailable == true,
-              dseeMode?.sonyValue != nil, let value = mode.sonyValue else { return nil }
-        return [0xE8, 0x01, value]
+        guard let dseeInquiry, canSetDSEE, let value = mode.sonyValue else { return nil }
+        return [0xE8, dseeInquiry, value]
+    }
+
+    mutating func invalidateDSEEStatus() {
+        dseeAvailable = nil
+        dseeDisableReasons = []
     }
 
     mutating func invalidateDSEERead() {
         dseeMode = nil
+    }
+
+    mutating func invalidateUpscalingRead() {
+        upscalingType = nil
+        upscalingStatus = nil
+    }
+
+    mutating func invalidateSoundLeakageRead(_ query: [UInt8]) {
+        soundLeakageReduction?.invalidateRead(query)
+    }
+
+    mutating func invalidateVoiceContentsRead(_ query: [UInt8]) {
+        voiceContents?.invalidateRead(query)
+    }
+
+    mutating func invalidateTVSoundBoosterRead(_ query: [UInt8]) {
+        tvSoundBooster?.invalidateRead(query)
+    }
+
+    mutating func invalidateSoundFieldOptimizationRead(_ query: [UInt8]) {
+        soundFieldOptimization?.invalidateRead(query)
+    }
+
+    mutating func invalidateUpmixRead(_ query: [UInt8], variant: SonyUpmix.Variant) {
+        upmix[variant]?.invalidateRead(query[0])
+    }
+
+    mutating func invalidateBackgroundMusicRead(_ query: [UInt8]) {
+        backgroundMusic?.invalidateRead(query[0])
+    }
+
+    mutating func invalidateListeningModeAssignmentsRead(_ query: [UInt8]) {
+        listeningModeAssignments?.invalidateRead(query)
     }
 
     @discardableResult
@@ -225,15 +399,45 @@ struct SonyAudioFeatures: Equatable, Sendable {
         case (0x13, 0x02), (0x15, 0x02):
             guard supportsCodecStatus, payload.count == 3 else { return false }
             codec = SonyAudioCodec(rawValue: payload[2])
-        case (0xE1, 0x01):
-            guard supportsDSEE, payload.count == 3 else { return false }
-            dseeType = SonyDSEEType(rawValue: payload[2])
-        case (0xE3, 0x01), (0xE5, 0x01):
-            guard supportsDSEE, payload.count == 3 else { return false }
+        case (0x13, 0x03), (0x15, 0x03):
+            guard supportsUpscalingStatus, payload.count == 4,
+                  payload[0] != 0x13 || !payload.suffix(2).contains(0xFF) else { return false }
+            upscalingType = SonyDSEEType(rawValue: payload[2])
+            upscalingStatus = SonyUpscalingStatus(rawValue: payload[3])
+        case (0xE1, let inquiry) where inquiry == dseeInquiry:
+            guard payload.count == 3 else { return false }
+            let type = SonyDSEEType(rawValue: payload[2])
+            guard inquiry != Self.dseeWithDisableReasonsInquiry || type != nil else { return false }
+            dseeType = type
+        case (0xE3, let inquiry) where inquiry == dseeInquiry, (0xE5, let inquiry) where inquiry == dseeInquiry:
+            if inquiry == Self.dseeWithDisableReasonsInquiry {
+                guard payload.count >= 4, payload[2] <= 1, Int(payload[3]) == payload.count - 4 else { return false }
+                let reasons = payload.dropFirst(4).compactMap(SonyDSEEDisableReason.init(rawValue:))
+                guard reasons.count == Int(payload[3]) else { return false }
+                dseeDisableReasons = reasons
+            } else {
+                guard payload.count == 3 else { return false }
+            }
             dseeAvailable = payload[2] <= 1 ? payload[2] == 0 : nil
-        case (0xE7, 0x01), (0xE9, 0x01):
-            guard supportsDSEE, payload.count == 3 else { return false }
-            dseeMode = SonyDSEEMode(rawValue: payload[2])
+        case (0xE7, let inquiry) where inquiry == dseeInquiry, (0xE9, let inquiry) where inquiry == dseeInquiry:
+            guard payload.count == 3 else { return false }
+            let mode = SonyDSEEMode(rawValue: payload[2])
+            guard inquiry != Self.dseeWithDisableReasonsInquiry || mode.sonyValue != nil else { return false }
+            dseeMode = mode
+        case (_, SonySoundLeakageReduction.inquiry):
+            return soundLeakageReduction?.update(payload) == true
+        case (_, SonyVoiceContents.inquiry):
+            return voiceContents?.update(payload) == true
+        case (_, SonyTVSoundBooster.inquiry):
+            return tvSoundBooster?.update(payload) == true
+        case (_, SonySoundFieldOptimization.inquiry):
+            return soundFieldOptimization?.update(payload) == true
+        case (_, 0x04), (_, 0x0A):
+            return SonyUpmix.Variant(rawValue: payload[1]).flatMap { upmix[$0]?.update(payload) } == true
+        case (_, 0x03), (_, 0x09):
+            return backgroundMusic?.update(payload) == true
+        case (_, SonyListeningModeAssignments.inquiry):
+            return listeningModeAssignments?.update(payload) == true
         case (0xE1, 0x05):
             guard connectionModeInquiryType == payload[1], payload.count >= 6 else { return false }
             let modeCount = Int(payload[2])

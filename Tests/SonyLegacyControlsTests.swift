@@ -2086,8 +2086,6 @@ final class SonyLegacyControllerTests: XCTestCase {
 @MainActor
 final class SonyLegacyMultipointTests: XCTestCase {
     private let address = "02:53:4F:4E:59:01"
-    private let multipointIdentity: [UInt8] = [0xD1, 0xD2, 0x02, 0x12] + Array("MULTIPOINT_SETTING".utf8)
-        + [0x1A] + Array("MULTIPOINT_SETTING_SUMMARY".utf8) + [0x01, 0x00]
 
     func testWHXM4ReadsAndChangesMultipointOverMDRV1() throws {
         let (_, headphones) = try preparedXM4(multipointEnabled: false)
@@ -2122,8 +2120,24 @@ final class SonyLegacyMultipointTests: XCTestCase {
         XCTAssertTrue(headphones.ldacRequiresMultipointOff)
     }
 
-    func testOnlyTheWHXM4NeedsMultipointOffForLDAC() {
-        XCTAssertEqual(SonyDeviceModel.allCases.filter(\.offersLDACOnlyWithoutMultipoint), [.whXM4])
+    func testDocumentedMultipointRestrictionsForHeadphonesWithoutRecognizedMetadata() {
+        XCTAssertEqual(Set(SonyDeviceModel.allCases.filter(\.offersLDACOnlyWithoutMultipoint)), [.whXM4, .whXB910N, .whULT900N])
+    }
+
+    func testExplicitMultipointCoexistenceOverridesTheModelFallback() throws {
+        let (_, headphones) = try preparedXM4(multipointEnabled: true, summary: "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE")
+        defer { headphones.simulateControlLoss() }
+        XCTAssertEqual(headphones.systemFeatures.multipoint?.enabled, true)
+        XCTAssertEqual(headphones.systemFeatures.multipointDisablesLDAC, false)
+        XCTAssertFalse(headphones.ldacRequiresMultipointOff)
+    }
+
+    func testUnrecognizedMultipointSummaryUsesTheModelFallback() throws {
+        let (_, headphones) = try preparedXM4(multipointEnabled: true, summary: "")
+        defer { headphones.simulateControlLoss() }
+        XCTAssertEqual(headphones.systemFeatures.multipoint?.enabled, true)
+        XCTAssertNil(headphones.systemFeatures.multipointDisablesLDAC)
+        XCTAssertTrue(headphones.ldacRequiresMultipointOff)
     }
 
     #if !ACOUPLET_PUBLIC_APIS_ONLY
@@ -2307,20 +2321,23 @@ final class SonyLegacyMultipointTests: XCTestCase {
     }
     #endif
 
-    func testWHXM4ListsDevicesReadOnlyWhenMultipointAnnouncesFunction38() throws {
+    func testWHXM4OwnsLegacyPairingDeviceReadsAndKeepsSourceSelectionUnavailable() throws {
         let (_, headphones) = try preparedXM4(multipointEnabled: true, extraFunctions: [0x38])
         defer { headphones.simulateControlLoss() }
         XCTAssertTrue(headphones.multipoint.supportsLegacyInventory)
         XCTAssertFalse(headphones.multipoint.supportsInventory)
         XCTAssertEqual(headphones.simulatedTransmittedFrames.filter { $0.type == 0x0E && $0.payload == [0x36, 0x01] }.count, 1)
-        XCTAssertFalse(MultipointControls.isVisible(for: headphones.multipoint))
+        XCTAssertTrue(MultipointControls.isVisible(for: headphones.multipoint))
 
+        headphones.simulateProtocolMessage([0x31, 1, 8, 2, 0], type: 0x0E)
+        headphones.simulateProtocolMessage([0x33, 1, 0, 0], type: 0x0E)
         headphones.simulateProtocolMessage(legacyList, type: 0x0E)
         acknowledgeAll(headphones)
         XCTAssertEqual(headphones.multipoint.devices.map(\.name), ["Test Laptop", "Test Phone"])
         XCTAssertEqual(headphones.multipoint.devices.map(\.isConnected), [true, false])
         XCTAssertTrue(MultipointControls.isVisible(for: headphones.multipoint))
         XCTAssertNil(headphones.multipoint.selectedSource)
+        XCTAssertTrue(headphones.multipoint.canManageDevices)
 
         headphones.simulateProtocolMessage([0x39, 0x01, 0x00, 0x00], type: 0x0E)
         XCTAssertTrue(headphones.multipoint.devices.isEmpty)
@@ -2337,9 +2354,111 @@ final class SonyLegacyMultipointTests: XCTestCase {
         XCTAssertTrue(headphones.canRefreshDevices)
         headphones.refreshDevices()
         acknowledgeAll(headphones)
-        XCTAssertEqual(headphones.simulatedTransmittedFrames.dropFirst(before).map { [$0.type] + $0.payload }, [[0x0E, 0x36, 0x01]])
+        XCTAssertEqual(headphones.simulatedTransmittedFrames.dropFirst(before).map { [$0.type] + $0.payload }, [[0x0E, 0x32, 0x01], [0x0E, 0x36, 0x01]])
+        headphones.simulateProtocolMessage([0x35, 1, 0, 1], type: 0x0E)
+        headphones.simulateProtocolMessage([0x33, 1, 0, 0], type: 0x0E)
+        XCTAssertEqual(headphones.multipoint.available, false)
+        headphones.simulateProtocolMessage(legacyList, type: 0x0E)
         XCTAssertNil(headphones.multipoint.peripheralActionPayload(.disconnect, address: "02:00:00:00:00:A1"))
         XCTAssertNil(headphones.multipoint.sourceSwitchPayload(address: "02:00:00:00:00:A1"))
+    }
+
+    func testWHXM4UnpairNeedsADeviceResultAndCurrentOwnedInventory() throws {
+        let (_, headphones) = try preparedXM4(multipointEnabled: true, extraFunctions: [0x38])
+        defer { headphones.simulateControlLoss() }
+        headphones.simulateProtocolMessage([0x31, 1, 8, 2, 0], type: 0x0E)
+        headphones.simulateProtocolMessage([0x33, 1, 0, 0], type: 0x0E)
+        headphones.simulateProtocolMessage(legacyList, type: 0x0E)
+        let phone = try XCTUnwrap(headphones.multipoint.devices.last)
+        let laptopOnly = [0x37, 1, 1] + legacyList.dropFirst(3).prefix(30) + [1]
+        let outcome = [0x3D, 1, 0, 0x20] + Array(phone.address.utf8)
+        headphones.simulateProtocolMessage(outcome, type: 0x0E)
+        XCTAssertNil(headphones.multipoint.lastPeripheralResult)
+        headphones.changeDeviceConnection(.unpair, device: phone)
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x3C, 1, 0, 2] + Array(phone.address.utf8))
+        acknowledgeAll(headphones)
+        XCTAssertEqual(headphones.deviceActionTransition?.phase, .awaitingResult)
+        headphones.simulateProtocolMessage([0x3D, 1, 0, 0x10] + Array(phone.address.utf8), type: 0x0E)
+        headphones.simulateProtocolMessage([0x3D, 1, 0, 0x22] + Array(phone.address.utf8), type: 0x0E)
+        XCTAssertEqual(headphones.deviceActionTransition?.phase, .awaitingResult)
+        headphones.simulateProtocolMessage(outcome, type: 0x0E)
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x36, 1])
+        XCTAssertEqual(headphones.deviceActionTransition?.phase, .verifying)
+        headphones.simulateProtocolMessage([0x39] + laptopOnly.dropFirst(), type: 0x0E)
+        XCTAssertEqual(headphones.deviceActionTransition?.phase, .verifying)
+        XCTAssertEqual(headphones.multipoint.devices.count, 1)
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage(legacyList, type: 0x0E)
+        XCTAssertEqual(headphones.deviceActionTransition?.phase, .verifying)
+        XCTAssertEqual(headphones.multipoint.devices.count, 1)
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x36, 1])
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage(laptopOnly, type: 0x0E)
+        XCTAssertEqual(headphones.deviceActionTransition?.phase, .complete)
+        XCTAssertNil(headphones.multipoint.selectedSource)
+    }
+
+    func testWHXM4ConnectAndDisconnectUseTheSeparateLegacyActionAndResultBytes() throws {
+        let (_, headphones) = try preparedXM4(multipointEnabled: true, extraFunctions: [0x38])
+        defer { headphones.simulateControlLoss() }
+        headphones.simulateProtocolMessage([0x31, 1, 8, 2, 0], type: 0x0E)
+        headphones.simulateProtocolMessage([0x33, 1, 0, 0], type: 0x0E)
+        headphones.simulateProtocolMessage(legacyList, type: 0x0E)
+        let phone = try XCTUnwrap(headphones.multipoint.devices.last)
+        let address = Array(phone.address.utf8)
+        headphones.changeDeviceConnection(.connect, device: phone)
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x3C, 1, 0, 1] + address)
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0x3D, 1, 0, 0x13] + address, type: 0x0E)
+        XCTAssertEqual(headphones.deviceActionTransition?.phase, .failed)
+        XCTAssertNotNil(headphones.deviceActionTransition?.failureMessage)
+        XCTAssertNil(headphones.simulatedPendingFrame)
+
+        headphones.changeDeviceConnection(.connect, device: phone)
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0x3D, 1, 0, 0x10] + address, type: 0x0E)
+        acknowledgeAll(headphones)
+        var connected = legacyList
+        connected[50] = 2
+        headphones.simulateProtocolMessage(connected, type: 0x0E)
+        XCTAssertEqual(headphones.deviceActionTransition?.phase, .complete)
+        XCTAssertTrue(headphones.multipoint.devices[1].isConnected)
+        XCTAssertNil(headphones.multipoint.selectedSource)
+
+        headphones.changeDeviceConnection(.disconnect, device: headphones.multipoint.devices[1])
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x3C, 1, 0, 0] + address)
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0x3D, 1, 0, 0x00] + address, type: 0x0E)
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage(legacyList, type: 0x0E)
+        XCTAssertEqual(headphones.deviceActionTransition?.phase, .complete)
+        XCTAssertFalse(headphones.multipoint.devices[1].isConnected)
+    }
+
+    func testWHXM4PairingModeRequiresItsOwnNotificationBeyondTheFrameAcknowledgment() throws {
+        let (_, headphones) = try preparedXM4(multipointEnabled: true, extraFunctions: [0x38])
+        defer { headphones.simulateControlLoss() }
+        headphones.simulateProtocolMessage([0x31, 1, 8, 2, 0], type: 0x0E)
+        headphones.simulateProtocolMessage([0x33, 1, 0, 0], type: 0x0E)
+        headphones.simulateProtocolMessage(legacyList, type: 0x0E)
+        headphones.setLegacyPairingMode(true)
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x34, 1, 1, 0])
+        acknowledgeAll(headphones)
+        XCTAssertEqual(headphones.legacyPairingModeRequest, true)
+        XCTAssertEqual(headphones.multipoint.pairingMode, false)
+        headphones.simulateProtocolMessage([0x35, 1, 1], type: 0x0E)
+        headphones.simulateProtocolMessage([0x33, 1, 1, 0], type: 0x0E)
+        XCTAssertEqual(headphones.legacyPairingModeRequest, true)
+        XCTAssertEqual(headphones.multipoint.pairingMode, false)
+        headphones.simulateProtocolMessage([0x35, 1, 1, 1], type: 0x0E)
+        XCTAssertNil(headphones.legacyPairingModeRequest)
+        XCTAssertEqual(headphones.multipoint.pairingMode, true)
+        headphones.setLegacyPairingMode(false)
+        XCTAssertEqual(headphones.simulatedPendingFrame?.payload, [0x34, 1, 0, 0])
+        acknowledgeAll(headphones)
+        headphones.simulateProtocolMessage([0x35, 1, 0, 0], type: 0x0E)
+        XCTAssertNil(headphones.legacyPairingModeRequest)
+        XCTAssertEqual(headphones.multipoint.pairingMode, false)
     }
 
     func testWHXM4WithoutFunction38NeverAsksForOrShowsADeviceList() throws {
@@ -2361,7 +2480,13 @@ final class SonyLegacyMultipointTests: XCTestCase {
             + Array("02:00:00:00:00:A2".utf8) + [0, UInt8(phone.count)] + phone + [1]
     }
 
-    private func preparedXM4(multipointEnabled: Bool, extraFunctions: [UInt8] = [], additionalAddress: String? = nil) throws -> (SonyDeviceCoordinator, SonyHeadphonesController) {
+    private func multipointIdentity(summary: String) -> [UInt8] {
+        [0xD1, 0xD2, 0x02, 0x12] + Array("MULTIPOINT_SETTING".utf8)
+            + [UInt8(summary.utf8.count)] + Array(summary.utf8) + [0x01, 0x00]
+    }
+
+    private func preparedXM4(multipointEnabled: Bool, extraFunctions: [UInt8] = [], additionalAddress: String? = nil,
+                             summary: String? = "MULTIPOINT_SETTING_SUMMARY") throws -> (SonyDeviceCoordinator, SonyHeadphonesController) {
         let coordinator = SonyDeviceCoordinator(fallbackController: SonyHeadphonesController(startAutomatically: false, simulated: true)) { device in
             SonyHeadphonesController(startAutomatically: false, simulated: true, pinnedAddress: device.address, advertisedName: device.name)
         }
@@ -2388,11 +2513,13 @@ final class SonyLegacyMultipointTests: XCTestCase {
             XCTAssertTrue(headphones.isReady)
             XCTAssertEqual(headphones.deviceModel, .whXM4)
             acknowledgeAll(headphones)
-            headphones.simulateProtocolMessage(multipointIdentity)
-            acknowledgeAll(headphones)
-            headphones.simulateProtocolMessage([0xD3, 0xD2, 0x00])
-            headphones.simulateProtocolMessage([0xD7, 0xD2, 0x01, multipointEnabled ? 0x01 : 0x00])
-            acknowledgeAll(headphones)
+            if let summary {
+                headphones.simulateProtocolMessage(multipointIdentity(summary: summary))
+                acknowledgeAll(headphones)
+                headphones.simulateProtocolMessage([0xD3, 0xD2, 0x00])
+                headphones.simulateProtocolMessage([0xD7, 0xD2, 0x01, multipointEnabled ? 0x01 : 0x00])
+                acknowledgeAll(headphones)
+            }
         }
         return (coordinator, try XCTUnwrap(coordinator.controller(for: address)))
     }

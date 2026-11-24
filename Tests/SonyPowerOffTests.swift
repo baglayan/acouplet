@@ -3,6 +3,57 @@ import XCTest
 
 final class SonyPowerOffTests: XCTestCase {
     @MainActor
+    func testLegacyPowerOffRequiresItsOwnAdvertisedTableOneCapability() throws {
+        for functions: [UInt8] in [[], [0x23], [0x21], [0x21, 0x23]] {
+            let controller = readyLegacyController(functions: functions)
+            defer { controller.simulateControlLoss() }
+            let supported = functions.contains(0x21)
+            XCTAssertTrue(controller.isReady)
+            XCTAssertEqual(controller.controlProtocol, "MDR v1")
+            XCTAssertEqual(controller.supportsPowerOff, supported)
+            XCTAssertEqual(controller.canPowerOff, supported)
+            let before = controller.simulatedTransmittedFrames.count
+            controller.powerOff(expectedSession: controller.simulatedControlSession)
+            let sent = Array(controller.simulatedTransmittedFrames.dropFirst(before))
+            XCTAssertEqual(sent.map(\.payload), supported ? [[0x22, 0x00, 0x01]] : [])
+            if supported {
+                let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+                XCTAssertEqual(frame.type, 0x0C)
+                XCTAssertFalse(controller.canRetryRead(frame))
+                XCTAssertFalse(controller.canRetryBasicCommand(frame))
+                XCTAssertEqual(controller.powerOffState, .sending)
+                XCTAssertFalse(controller.canPowerOff)
+                controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: frame.sequence, payload: []))
+                XCTAssertEqual(controller.powerOffState, .sending)
+                acknowledgeAll(controller)
+                XCTAssertEqual(controller.powerOffState, .acknowledged)
+                XCTAssertTrue(controller.isReady)
+                controller.simulateControlLoss()
+                XCTAssertEqual(controller.powerOffState, .disconnected)
+            } else {
+                XCTAssertNil(controller.powerOffState)
+            }
+        }
+    }
+
+    @MainActor
+    func testLegacyPowerOffTimeoutKeepsUnknownOutcomeWithoutReplay() async throws {
+        let controller = readyLegacyController(functions: [0x21])
+        defer { controller.simulateControlLoss() }
+        let session = try XCTUnwrap(controller.powerOffSession)
+        controller.powerOff(expectedSession: session)
+        let frame = try XCTUnwrap(controller.simulatedPendingFrame)
+        controller.simulateAcknowledgmentTimeout()
+        await Task.yield()
+        XCTAssertEqual(controller.powerOffState, .unconfirmed)
+        XCTAssertEqual(controller.lastErrorMessage, String(localized: "The power-off command was not acknowledged. Its outcome is unknown."))
+        controller.simulateProtocolData(SonyFrameCodec.encode(type: 0x01, sequence: 1 - frame.sequence, payload: []), session: session)
+        controller.simulateAutomaticRefresh()
+        XCTAssertEqual(controller.powerOffState, .unconfirmed)
+        XCTAssertEqual(controller.simulatedTransmittedFrames.filter { $0.payload == [0x22, 0x00, 0x01] }.count, 1)
+    }
+
+    @MainActor
     func testPowerOffRequiresReadyAdvertisedSupportAndTheConfirmedSession() throws {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         XCTAssertNil(controller.powerOffSession)
@@ -17,7 +68,7 @@ final class SonyPowerOffTests: XCTestCase {
 
         controller.simulateProtocolMessage([0x01, 0, 0x03, 0, 0x30, 0x18, 0, 0], beginConnection: true)
         acknowledgeAll(controller)
-        deliver([0x07, 0, 1, 0x6B, 0xFF], to: controller)
+        deliver([0x07, 0, 2, 0x6B, 0xFF, 0x21, 0xFF], to: controller)
         acknowledgeAll(controller)
         deliver([0x67, 0x17, 1, 1, 0, 0, 10], to: controller)
         acknowledgeAll(controller)
@@ -285,6 +336,20 @@ final class SonyPowerOffTests: XCTestCase {
     private func readyController() -> SonyHeadphonesController {
         let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
         controller.simulateDeviceConnection(named: "WF-1000XM5")
+        return controller
+    }
+
+    @MainActor
+    private func readyLegacyController(functions: [UInt8]) -> SonyHeadphonesController {
+        let controller = SonyHeadphonesController(startAutomatically: false, simulated: true)
+        controller.simulateDeviceConnection(named: "WF-1000XM4", controlBusy: true)
+        controller.simulateProtocolMessage([0x01, 0, 2, 0x10], beginConnection: true)
+        acknowledgeAll(controller)
+        let name = Array("WF-1000XM4".utf8)
+        deliver([0x05, 1, UInt8(name.count)] + name, to: controller)
+        deliver([0x05, 3, 0x30, 0xFF], to: controller)
+        deliver([0x07, 0, UInt8(functions.count)] + functions, to: controller)
+        acknowledgeAll(controller)
         return controller
     }
 

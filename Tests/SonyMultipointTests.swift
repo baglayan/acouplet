@@ -93,14 +93,22 @@ final class SonyMultipointTests: XCTestCase {
         XCTAssertEqual(MultipointSourcePicker.title(for: third, among: [first, second, third]), "MacBook Pro · 03:00:00:00:00:01")
     }
 
-    func testOnlyNegotiatedInventoryAndSourceFunctionsProduceReadQueries() {
-        for functions: Set<UInt8> in [[], [0x34], [0x42, 0x47]] {
+    func testOnlyNegotiatedMultipointFunctionsProduceReadQueries() {
+        for functions: Set<UInt8> in [[], [0x35], [0x42, 0x47]] {
             var multipoint = SonyMultipoint(supportedFunctions: functions)
             XCTAssertTrue(multipoint.queryPayloads.isEmpty)
             XCTAssertFalse(multipoint.update(capturedInventory))
             XCTAssertFalse(multipoint.update([0x37, 1, 1]))
+            XCTAssertFalse(multipoint.update([0x37, 3, 1]))
             XCTAssertNil(multipoint.sourceSwitchPayload(address: firstAddress))
         }
+        var musicHandover = SonyMultipoint(supportedFunctions: [0x34])
+        XCTAssertEqual(musicHandover.queryPayloads, [[0x36, 3]])
+        XCTAssertFalse(musicHandover.update(capturedInventory))
+        XCTAssertFalse(musicHandover.update([0x37, 1, 1]))
+        XCTAssertTrue(musicHandover.update([0x37, 3, 1]))
+        XCTAssertEqual(musicHandover.musicHandoverEnabled, true)
+        XCTAssertNil(musicHandover.sourceSwitchPayload(address: firstAddress))
         for function: UInt8 in [0x32, 0x33] {
             var multipoint = SonyMultipoint(supportedFunctions: [function])
             XCTAssertEqual(multipoint.queryPayloads, [[0x30, 2], [0x32, 2], [0x36, 2]])
@@ -406,7 +414,7 @@ final class SonyMultipointTests: XCTestCase {
 
     func testLegacyListParsesConnectedAndSavedDevicesWithoutASource() throws {
         var multipoint = SonyMultipoint(legacySupportedFunctions: [0x38])
-        XCTAssertEqual(multipoint.queryPayloads, [[0x36, 0x01]])
+        XCTAssertEqual(multipoint.queryPayloads, [[0x30, 0x01], [0x32, 0x01], [0x36, 0x01]])
         XCTAssertTrue(multipoint.update(legacyListPacket([(firstAddress, 1, "Test Laptop"), (secondAddress, 0, "Test Phone Ü")])))
         XCTAssertEqual(multipoint.devices.map(\.address), [firstAddress, secondAddress])
         XCTAssertEqual(multipoint.devices.map(\.name), ["Test Laptop", "Test Phone Ü"])
@@ -416,6 +424,37 @@ final class SonyMultipointTests: XCTestCase {
         XCTAssertFalse(multipoint.canManageDevices)
         XCTAssertFalse(multipoint.canControlSources)
         XCTAssertNil(multipoint.peripheralActionPayload(.connect, address: secondAddress))
+    }
+
+    func testLegacyManagementUsesTheClassicInquiryAndConnectionDetail() {
+        var multipoint = SonyMultipoint(legacySupportedFunctions: [0x38])
+        XCTAssertTrue(multipoint.update([0x31, 1, 8, 2, 0]))
+        XCTAssertTrue(multipoint.update([0x33, 1, 0, 0]))
+        XCTAssertTrue(multipoint.update(legacyListPacket([(firstAddress, 1, "Laptop"), (secondAddress, 0, "Phone")])))
+        XCTAssertEqual(multipoint.queryPayloads, [[0x32, 1], [0x36, 1]])
+        XCTAssertTrue(multipoint.canManageDevices)
+        XCTAssertFalse(multipoint.supportsInventory)
+        XCTAssertFalse(multipoint.canControlSources)
+        XCTAssertNil(multipoint.selectedSource)
+        XCTAssertNil(multipoint.keepingSetPayload(true))
+        XCTAssertEqual(multipoint.peripheralActionPayload(.connect, address: secondAddress),
+                       [0x3C, 1, 0, 1] + Array(secondAddress.utf8))
+        XCTAssertEqual(multipoint.peripheralActionPayload(.disconnect, address: firstAddress),
+                       [0x3C, 1, 0, 0] + Array(firstAddress.utf8))
+        XCTAssertEqual(multipoint.peripheralActionPayload(.unpair, address: secondAddress),
+                       [0x3C, 1, 0, 2] + Array(secondAddress.utf8))
+        XCTAssertNil(multipoint.peripheralActionPayload(.unpair, address: firstAddress))
+        XCTAssertEqual(multipoint.legacyPairingModePayload(true), [0x34, 1, 1, 0])
+        XCTAssertNil(multipoint.legacyPairingModePayload(false))
+        XCTAssertFalse(multipoint.update([0x3D, 1, 1, 0x10] + Array(secondAddress.utf8)))
+        XCTAssertTrue(multipoint.update([0x3D, 1, 0, 0x20] + Array(secondAddress.utf8)))
+        XCTAssertEqual(multipoint.lastPeripheralResult?.action, SonyPeripheralAction.unpair.rawValue)
+        XCTAssertEqual(multipoint.lastPeripheralResult?.result, .unpairingSuccess)
+        XCTAssertTrue(multipoint.update([0x35, 1, 1, 0]))
+        XCTAssertEqual(multipoint.legacyPairingModePayload(false), [0x34, 1, 0, 0])
+        XCTAssertTrue(multipoint.update([0x35, 1, 0, 1]))
+        XCTAssertFalse(multipoint.canManageDevices)
+        XCTAssertNil(multipoint.legacyPairingModePayload(true))
     }
 
     func testLegacyListAcceptsSeveralConnectedDevicesWithTheSameStateByte() {
